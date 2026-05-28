@@ -5,7 +5,7 @@ useragent = 'Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/13
 
 # Параметры запуска браузера
 browser_launch_options = {
-    'headless': True,
+    'headless': False,
     # Firefox-специфичные настройки для скрытия автоматизации
     'firefox_user_prefs': {
         # Отключить детекцию webdriver

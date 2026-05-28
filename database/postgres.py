@@ -11,14 +11,16 @@ logger = init_logger(__name__)
 
 
 class Database:
-    def __init__(self, max_retries=5, retry_delay=2):
+    def __init__(self, max_retries=5, retry_delay=2, db_name: str | None = None):
         """
         Инициализация соединения с БД через PgBouncer.
         :param max_retries: Количество попыток подключения
         :param retry_delay: задержка между попытками
+        :param db_name: имя базы (по умолчанию pg_name); для данных опционов — pg_name_fin
         """
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.db_name = db_name or pg_name
         self.connection = self.connect_to_db()
 
     def connect_to_db(self):
@@ -27,13 +29,13 @@ class Database:
         while retries < self.max_retries:
             try:
                 conn = psycopg2.connect(
-                    database=pg_name,
+                    database=self.db_name,
                     user=pg_user,
                     password=pg_password,
                     host=pg_host,
                     port=pg_port
                 )
-                logger.info("✅ Подключение к БД через PgBouncer установлено.")
+                logger.info(f"✅ Подключение к БД '{self.db_name}' через PgBouncer установлено.")
                 return conn
             except OperationalError as e:
                 logger.warning(f"⚠️ Ошибка подключения к БД: {e}")
@@ -146,15 +148,6 @@ class Database:
             fetch_mode='all'
         )
 
-    def check_otc(self, val_id):
-        """
-        # проверка, является ли текущая пара рабочей
-        :param val_id: id валютной пары OTC
-        :return:
-        """
-        sql = f"SELECT pocket_real FROM vocabulary.otc_valute WHERE val_id = %s"
-        return self.execute_query_with_retries(sql, (val_id,), fetch_mode='val')
-
     # счетчики
     def plus_counter(self, tf, otc):
         """
@@ -210,17 +203,17 @@ class Database:
                f"WHERE os.timeframe = %s AND os.binary = %s")
         return self.execute_query_with_retries(sql, (timeframe, binary,), fetch_mode='row')
 
-    def pages_setting(self, timeframe: str):
+    def pages(self, program: str, mode: str):
         """
-        # поиск страниц для браузера TradingView
-        :param timeframe: таймфрейм
-        :return: либо результат, если не найден - перезагрузка программы
-          """
-        sql = ("SELECT cp.* FROM cookies.cook_page cp "
-               "JOIN settings.option_setting os ON cp.user_id  = os.cookies_tv "
-               "WHERE os.timeframe = %s AND os.binary = true "
-               "ORDER BY cp.page_id")
-        return self.execute_query_with_retries(sql, (timeframe,), fetch_mode='all')
+        Страницы браузера из общей binodex.cookies.pages по (program, mode).
+        Таблица общая для нескольких программ; уже содержит только нужные страницы
+        в порядке order_idx. Вызывать на инстансе database_fin (binodex).
+        :param program: ключ программы (PROG_KEY)
+        :param mode: режим браузера — 'tv' или 'otc'
+        :return: список страниц (description, url, order_idx, ...) либо None
+        """
+        sql = "SELECT * FROM cookies.pages WHERE program = %s AND mode = %s ORDER BY order_idx"
+        return self.execute_query_with_retries(sql, (program, mode), fetch_mode='all')
 
     def close_program(self, program_id: int):
         """
@@ -239,5 +232,48 @@ class Database:
         :return: jsonb кук (list[dict]) либо None если не нашли
         """
         sql = "SELECT cookies FROM cookies.pocket_cookies WHERE user_id = %s"
+        row = self.execute_query_with_retries(sql, (user_id,), fetch_mode='val')
+        return row['cookies'] if row else None
+
+    def option_setting_base(self, timeframe: str, binary: bool, program: str):
+        """
+        Базовые настройки экземпляра из базы данных опционов (pg_name_fin).
+        Без джойнов на cookies/telegram — те данные добираются отдельно из Program.
+        settings.option_setting общая для нескольких программ → отбираем свои по program.
+        :param timeframe: таймфрейм
+        :param binary: True — опционы на обычных валютных парах
+        :param program: ключ программы (PROG_KEY) — фильтр своих строк
+        :return: строка settings.option_setting либо None
+        """
+        sql = ('SELECT * FROM settings.option_setting '
+               'WHERE timeframe = %s AND "binary" = %s AND program = %s')
+        return self.execute_query_with_retries(sql, (timeframe, binary, program), fetch_mode='row')
+
+    def telegram_creds(self, id_telegram: int):
+        """
+        Креды юзербота из Program — таблицу telegram не переносим.
+        :param id_telegram: id юзербота (option_setting.user_bot)
+        :return: строка с api_id, api_hash, session_string либо None
+        """
+        sql = "SELECT api_id, api_hash, session_string FROM telegram.telegram WHERE id_telegram = %s"
+        return self.execute_query_with_retries(sql, (id_telegram,), fetch_mode='row')
+
+    def save_session_string(self, id_telegram: int, session_string: str) -> bool:
+        """
+        Сохранить session string Pyrogram юзербота в Program (telegram.telegram).
+        :param id_telegram: id юзербота (telegram.telegram.id_telegram)
+        :param session_string: строка сессии из Client.export_session_string()
+        :return: True при успехе
+        """
+        sql = "UPDATE telegram.telegram SET session_string = %s WHERE id_telegram = %s"
+        return self.execute_query_with_retries(sql, (session_string, id_telegram), fetch_mode='execute', commit=True)
+
+    def tv_cookies(self, user_id: int):
+        """
+        Куки TradingView из Program (cookies.tv_cookies) по id владельца.
+        :param user_id: option_setting.cookies_tv
+        :return: jsonb кук либо None
+        """
+        sql = "SELECT cookies FROM cookies.tv_cookies WHERE user_id = %s"
         row = self.execute_query_with_retries(sql, (user_id,), fetch_mode='val')
         return row['cookies'] if row else None

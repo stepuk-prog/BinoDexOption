@@ -9,14 +9,13 @@ from apps.otc_app import open_otc_browser
 from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options
-from settings.browser_config import tf_menu, tf_link, search_val, find_val, symbol, \
-    forex, tf_link_price, close_tool_win, pop_up2, pop_up3
-from settings.config import cookies, database, binary
+from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
+    tf_link_price, pop_up2, pop_up3
+from settings.config import cookies, database_fin, binary, prog_key
 from settings.cookie_utils import add_cookies_to_context
-from settings.tf_config import timeframe
 from settings.timing import (
-    POPUP_SETTLE_DELAY, RETRY_DELAY, ELEMENT_RETRY_DELAY,
-    TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG, MAX_ELEMENT_ATTEMPTS
+    POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY,
+    TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG
 )
 from settings.result_types import BrowserInitResult, OperationResult
 
@@ -292,16 +291,19 @@ async def open_tv_browser(manager: BrowserManager):
     :param manager: менеджер браузера
     :return: tuple (success, error_message)
     """
-    list_screen = database.pages_setting(timeframe=timeframe)
+    # Страницы TV из общей binodex.cookies.pages по (program, mode='tv').
+    # Таблица содержит только нужные страницы (main, price) в порядке order_idx —
+    # main идёт первой (idx == 0), все скриншоты снимаются с неё.
+    list_screen = database_fin.pages(program=prog_key, mode='tv')
 
     for idx, page_data in enumerate(list_screen):
-        page_name = page_data['description']  # ключ из БД: main, dogon, itog, price
+        page_name = page_data['description']  # ключ из БД: main, price
 
         if idx == 0:
             # Первая страница - используем существующую (уже 'main')
             page = manager.pages['main']
             try:
-                await page.goto(page_data['page'], wait_until='domcontentloaded')
+                await page.goto(page_data['url'], wait_until='domcontentloaded')
 
                 # Добавляем cookies
                 await add_cookies_to_context(manager.context, cookies)
@@ -309,7 +311,7 @@ async def open_tv_browser(manager: BrowserManager):
                 await page.reload(wait_until='domcontentloaded')
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
-                                    text=f'Ошибка загрузки страницы {page_data["page"]} - {error}')
+                                    text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
         else:
             # Открываем новую вкладку через JavaScript
             try:
@@ -317,7 +319,7 @@ async def open_tv_browser(manager: BrowserManager):
 
                 # Ожидаем новую страницу и открываем её одновременно
                 async with manager.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
-                    await current_page.evaluate(f"window.open('{page_data['page']}')")
+                    await current_page.evaluate(f"window.open('{page_data['url']}')")
 
                 page = await new_page_info.value
                 manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл
@@ -326,7 +328,7 @@ async def open_tv_browser(manager: BrowserManager):
                 setup_dialog_handler(page)
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
-                                    text=f'Ошибка загрузки страницы {page_data["page"]} - {error}')
+                                    text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
 
         page = manager.pages[page_name]
         await page.bring_to_front()
@@ -334,31 +336,16 @@ async def open_tv_browser(manager: BrowserManager):
         # Закрытие всплывающих DOM-окон
         await close_dom_popups(page)
 
-        # Включение выбора валюты (forex) для корректной работы
-        await page.locator(f"#{symbol}").first.click(timeout=TIMEOUT_MEDIUM)
-        await asyncio.sleep(1)  # Ждём открытия меню
-        await page.locator(f"#{forex}").first.click(timeout=TIMEOUT_MEDIUM)
-        await asyncio.sleep(0.5)
-
-        # Закрытие окна выбора
-        await page.locator(f"xpath={close_tool_win}").first.click(timeout=TIMEOUT_MEDIUM)
-        await asyncio.sleep(0.5)
-
-        # Настройка таймфрейма
-        if page_data['description'] == 'price':
-            tek_frame = tf_link_price
-        elif page_data['description'] == 'itog':
-            continue
-        else:
-            tek_frame = tf_link
+        # Настройка таймфрейма (грузим только main и price). Категорию и актив
+        # ставит init_valute_browser позже — приминг поиска символа здесь не нужен.
+        tek_frame = tf_link_price if page_data['description'] == 'price' else tf_link
 
         try:
             await page.locator(f"xpath={tf_menu}").first.click(force=True, timeout=TIMEOUT_MEDIUM)
-            await asyncio.sleep(0.5)
             await page.locator(f"xpath={tek_frame}").first.click(force=True, timeout=TIMEOUT_MEDIUM)
         except (Exception,) as error:
             await close_program(manager=manager, status=1,
-                                text=f'Не могу переключить таймфрейм для страницы {page_data["page"]} - {error}')
+                                text=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
 
     # Закрытие попапов на всех страницах (попапы уже гарантированно появились)
     for page_name, page in manager.pages.items():
@@ -369,22 +356,69 @@ async def open_tv_browser(manager: BrowserManager):
     return OperationResult(success=True)
 
 
+async def _reset_search_category(page) -> None:
+    """Сброс категории поиска символа на «Все» (первая вкладка).
+    TV запоминает выбранную категорию между открытиями — иначе пара другого типа
+    может не найтись. Первая вкладка — «Все» во всех локалях."""
+    try:
+        tab = page.locator('#symbol-search-tabs button[role="tab"]').first
+        await tab.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
+        if await tab.get_attribute('aria-selected') != 'true':
+            await tab.click(timeout=TIMEOUT_MEDIUM)
+            await asyncio.sleep(0.3)
+    except (Exception,):
+        pass
+
+
+async def _click_fxcm_pair(page, pair: str) -> bool:
+    """Клик по FXCM-строке в диалоге поиска по data-symbol-name="FX:<pair>" + фолбэки.
+    Строки рендерятся через overlap-manager-root → ищем на уровне page; visibility
+    у строк TV нестабилен → ждём attached и пробуем несколько стратегий клика."""
+    candidates = [
+        page.locator(f'[data-symbol-name="FX:{pair}"]').first,
+        page.locator(
+            f'[data-name="symbol-search-dialog-content-item"]:has([title="FXCM"]):has-text("{pair}")'
+        ).first,
+        page.locator(f'div[class*="itemRow"]:has([title="FXCM"]):has-text("{pair}")').first,
+    ]
+    for loc in candidates:
+        try:
+            await loc.wait_for(state='attached', timeout=TIMEOUT_SHORT)
+        except (Exception,):
+            continue
+        try:
+            await loc.scroll_into_view_if_needed(timeout=1500)
+        except (Exception,):
+            pass
+        for strategy in ('normal', 'force', 'js'):
+            try:
+                if strategy == 'normal':
+                    await loc.click(timeout=2000)
+                elif strategy == 'force':
+                    await loc.click(timeout=2000, force=True)
+                else:
+                    await loc.evaluate('el => el.click()')
+                return True
+            except (Exception,):
+                continue
+    return False
+
+
 async def init_valute_browser(manager: BrowserManager, valute: str):
     """
-    Настройка валюты в окне браузера
+    Настройка валюты в окне браузера (TradingView, котировки FXCM).
     :param manager: менеджер браузера
-    :param valute: название валютной пары
+    :param valute: название валютной пары (например 'EURUSD')
     """
+    pair = valute.replace('/', '').replace('FX:', '').upper()
     try:
         for page_name, page in manager.pages.items():
             logger.info(f"🔄 Переключение валюты на странице: {page_name}")
             await page.bring_to_front()
             await page.wait_for_load_state('domcontentloaded')
-
-            # Закрываем попапы перед работой
             await close_dom_popups(page)
 
-            # Клик по кнопке поиска символа с retry
+            # Открыть поиск символа (force-фолбэк на случай перехвата клика оверлеем)
             symbol_btn = page.locator(f"#{symbol}").first
             for attempt in range(3):
                 try:
@@ -398,47 +432,24 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
             else:
                 await symbol_btn.click(force=True, timeout=TIMEOUT_MEDIUM)
 
-            logger.debug(f"  Клик по symbol выполнен")
-            await asyncio.sleep(1)  # Ждём открытия меню
+            # Сброс категории на «Все» (sticky-фильтр TV иначе ломает поиск).
+            # Диалог дождётся через wait_for внутри — фиксированный sleep не нужен.
+            await _reset_search_category(page)
 
-            # Клик по forex
-            forex_btn = page.locator(f"#{forex}").first
-            await forex_btn.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
-            await forex_btn.click(timeout=TIMEOUT_MEDIUM)
-            logger.debug(f"  Клик по forex выполнен")
-            await asyncio.sleep(1)  # Ждём загрузки списка
-
-            # Поиск строки ввода валюты
-            valute_input = page.locator(f".{search_val}")
+            # Ввод символа в формате FX:<pair> (FXCM): exchange-префикс поднимает
+            # нужный фид наверх вместо строк всех провайдеров.
+            valute_input = page.locator(f".{search_val}").first
             await valute_input.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
-            await valute_input.clear()
-            await valute_input.fill(valute)
-            logger.debug(f"  Введена валюта: {valute}")
+            await valute_input.fill(f"FX:{pair}")
 
-            # Ждём пока TradingView выполнит поиск
-            await asyncio.sleep(1)
+            # Клик по FXCM-строке по data-symbol-name; _click_fxcm_pair сам ждёт
+            # появления строки (wait_for attached), доп. пауза после ввода не нужна.
+            if not await _click_fxcm_pair(page, pair):
+                await close_program(
+                    manager=manager, status=1,
+                    text=f"Ошибка загрузки данных в браузер - не найдена FXCM-строка FX:{pair}")
 
-            # Поиск и клик по найденной валюте
-            result = False
-            for attempt in range(MAX_ELEMENT_ATTEMPTS):
-                try:
-                    find_val_elem = page.locator(f".{find_val}")
-                    count = await find_val_elem.count()
-                    if count > 0:
-                        await find_val_elem.first.click(timeout=TIMEOUT_MEDIUM)
-                        result = True
-                        logger.debug(f"  Валюта выбрана (найдено {count} элементов)")
-                        break
-                    else:
-                        logger.debug(f"  Попытка {attempt + 1}: элементов не найдено")
-                except (Exception,) as e:
-                    logger.warning(f"Попытка {attempt + 1}/{MAX_ELEMENT_ATTEMPTS} выбора валюты: {e}")
-                await asyncio.sleep(RETRY_DELAY)
-
-            if not result:
-                await close_program(manager=manager, status=1, text=f"Ошибка загрузки данных в браузер - валюта не найдена")
-
-            logger.info(f"✅ Валюта {valute} установлена на странице {page_name}")
+            logger.info(f"✅ Валюта FX:{pair} установлена на странице {page_name}")
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f"Ошибка загрузки данных в браузер - {error}")
 

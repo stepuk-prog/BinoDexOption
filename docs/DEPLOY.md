@@ -1,6 +1,8 @@
 # Инструкция по деплою UniversalOption
 
-**Целевая папка на сервере:** `/home/vova/Options`
+**Целевая папка на сервере:** `/home/vova/Binidex/BinoOptions`
+
+Заливка проекта — **копированием с dev-машины** (rsync/scp), не через git.
 
 ---
 
@@ -10,7 +12,7 @@
 
 ```bash
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3.11-dev git
+sudo apt install -y python3.11 python3.11-venv python3.11-dev
 ```
 
 ### 1.2. Установка Firefox (для Playwright)
@@ -47,41 +49,40 @@ sudo apt install -y firefox
 ### 2.1. Создание структуры папок
 
 ```bash
-mkdir -p /home/vova/Options
-cd /home/vova/Options
+mkdir -p /home/vova/Binidex/BinoOptions
 ```
 
 ### 2.2. Копирование файлов проекта
 
-```bash
-# Вариант 1: через git
-git clone <repository_url> /home/vova/Options
+Заливаем с dev-машины (исключая venv/.git/логи/сессии):
 
-# Вариант 2: через scp (с локальной машины)
-scp -r /path/to/UniversalOption/* vova@server:/home/vova/Options/
+```bash
+rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
+    --exclude 'logs/*' --exclude 'files/*' \
+    ./ vova@server:/home/vova/Binidex/BinoOptions/
+
+# либо scp:
+# scp -r ./* vova@server:/home/vova/Binidex/BinoOptions/
 ```
 
 ### 2.3. Создание виртуального окружения
 
 ```bash
-cd /home/vova/Options
-python3.11 -m venv .venv
-source .venv/bin/activate
+cd /home/vova/Binidex/BinoOptions
+python3.11 -m venv venv
+source venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-playwright install firefox
 ```
 
 ### 2.4. Установка браузеров Playwright
 
 ```bash
 # Активируем venv если ещё не активирован
-source /home/vova/Options/.venv/bin/activate
+source /home/vova/Binidex/BinoOptions/venv/bin/activate
 
-# Установка Firefox для Playwright
+# Установка Firefox для Playwright + системные зависимости
 playwright install firefox
-
-# Установка системных зависимостей для Playwright
 playwright install-deps firefox
 ```
 
@@ -92,29 +93,32 @@ playwright install-deps firefox
 ### 3.1. Создание файла .env
 
 ```bash
-cp /home/vova/Options/.env.example /home/vova/Options/.env
-nano /home/vova/Options/.env
+nano /home/vova/Binidex/BinoOptions/.env
 ```
 
-Заполните необходимые переменные:
+`.env` содержит только общую базу (параметры экземпляра — `TIMEFRAME`/`BINARY`/`TEST` — передаются через systemd `Environment=`, не здесь):
+
 ```env
-# Database
+# Базы (через PgBouncer): Program — настройки/cookies/telegram, binodex — данные опционов
+DATABASE=Program
+DATABASE_FIN=binodex
 PG_HOST=localhost
-PG_PORT=5432
-PG_NAME=options_db
-PG_USER=options_user
+PG_PORT=6442
+PG_USER=vova
 PG_PASSWORD=your_password
 
-# Telegram (для тестов)
-TEST_API_ID=your_api_id
-TEST_API_HASH=your_api_hash
-TEST_SESSION_FILE=test_session
-CHANNEL=your_test_channel_id
+# Каналы и бот для ERROR/REPORT-логов
+ERROR_CHANNEL=-100...
+MESSAGE_CHANNEL=-100...
+COOKIES_CHANNEL=-100...
+TOKEN=your_error_bot_token
 
 # Настройки догонов
-OVERLAP=2
-OVERLAP_RANDOM=1
+OVERLAP=3
+OVERLAP_RANDOM=2
 ```
+
+Сессии юзерботов и cookies хранятся в БД (`telegram.telegram.session_string`, `cookies.*`), в `.env` их нет. `.env` в `.gitignore`, не коммитим.
 
 ---
 
@@ -123,18 +127,13 @@ OVERLAP_RANDOM=1
 ### 4.1. Копирование service-файлов
 
 ```bash
-sudo cp /home/vova/Options/systemd/*.service /etc/systemd/system/
+sudo cp /home/vova/Binidex/BinoOptions/systemd/*.service /etc/systemd/system/
 ```
 
-### 4.2. Редактирование service-файлов
+### 4.2. Пример unit-файла
 
-Отредактируйте пути в каждом service-файле:
+Готовые юниты лежат в `systemd/`. Структура (параметры экземпляра — в `Environment=`):
 
-```bash
-sudo nano /etc/systemd/system/option-1m-bin.service
-```
-
-Пример содержимого:
 ```ini
 [Unit]
 Description=Option Bot 1m Binary
@@ -143,11 +142,10 @@ After=network.target
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/Options
+WorkingDirectory=/home/vova/Binidex/BinoOptions
 Environment="TIMEFRAME=1m" "BINARY=true" "TEST=false"
-EnvironmentFile=/home/vova/Options/.env
-ExecStart=/home/vova/Options/.venv/bin/python bot.py
-Restart=always
+ExecStart=/home/vova/Binidex/BinoOptions/venv/bin/python3.11 main.py
+Restart=on-failure
 RestartSec=10
 
 [Install]
@@ -156,18 +154,15 @@ WantedBy=multi-user.target
 
 ### 4.3. Доступные конфигурации
 
-| Сервис                   | Таймфрейм | Тип    |
-|--------------------------|-----------|--------|
-| `option-1m-bin.service`  | 1 минута  | Binary |
-| `option-1m-otc.service`  | 1 минута  | OTC    |
-| `option-3m-bin.service`  | 3 минуты  | Binary |
-| `option-3m-otc.service`  | 3 минуты  | OTC    |
-| `option-5m-bin.service`  | 5 минут   | Binary |
-| `option-5m-otc.service`  | 5 минут   | OTC    |
-| `option-10m-bin.service` | 10 минут  | Binary |
-| `option-10m-otc.service` | 10 минут  | OTC    |
-| `option-15m-bin.service` | 15 минут  | Binary |
-| `option-15m-otc.service` | 15 минут  | OTC    |
+| Сервис                  | Таймфрейм | Тип    |
+|-------------------------|-----------|--------|
+| `option-1m-bin.service` | 1 минута  | Binary |
+| `option-1m-otc.service` | 1 минута  | OTC    |
+| `option-3m-otc.service` | 3 минуты  | OTC    |
+| `option-5m-bin.service` | 5 минут   | Binary |
+| `option-5m-otc.service` | 5 минут   | OTC    |
+
+Под другие ТФ/типы — скопировать юнит и поменять `Environment="TIMEFRAME=..." "BINARY=..."`.
 
 ### 4.4. Перезагрузка systemd
 
@@ -182,11 +177,11 @@ sudo systemctl daemon-reload
 ### 5.1. Ручной запуск (для тестирования)
 
 ```bash
-cd /home/vova/Options
-source .venv/bin/activate
+cd /home/vova/Binidex/BinoOptions
+source venv/bin/activate
 
 # Запуск с переменными окружения
-TIMEFRAME=1m BINARY=true TEST=false python bot.py
+TIMEFRAME=1m BINARY=true TEST=false python main.py
 ```
 
 ### 5.2. Запуск через systemd
@@ -225,27 +220,24 @@ sudo journalctl -u option-1m-bin.service -f
 
 Логи записываются в папку `logs/` с именами по шаблону:
 ```
-/home/vova/Options/logs/option_{timeframe}_{type}.log
+/home/vova/Binidex/BinoOptions/logs/option_{timeframe}_{type}.log
 ```
 
 Примеры:
-- `/home/vova/Options/logs/option_1m_bin.log`
-- `/home/vova/Options/logs/option_1m_otc.log`
+- `/home/vova/Binidex/BinoOptions/logs/option_1m_bin.log`
+- `/home/vova/Binidex/BinoOptions/logs/option_1m_otc.log`
 
 ### 6.2. Просмотр логов
 
 ```bash
 # В реальном времени
-tail -f /home/vova/Options/logs/option_1m_bin.log
+tail -f /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
 
 # Последние 50 строк
-tail -n 50 /home/vova/Options/logs/option_1m_bin.log
+tail -n 50 /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
 
 # Поиск ошибок
-grep "ERROR" /home/vova/Options/logs/option_1m_bin.log
-
-# Поиск ошибок в последних 100 строках
-tail -n 100 /home/vova/Options/logs/option_1m_bin.log | grep "ERROR"
+grep "ERROR" /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
 ```
 
 ---
@@ -253,19 +245,18 @@ tail -n 100 /home/vova/Options/logs/option_1m_bin.log | grep "ERROR"
 ## 7. Обновление
 
 ```bash
-cd /home/vova/Options
-
 # Остановка сервисов
 sudo systemctl stop option-1m-bin.service
 
-# Обновление кода
-git pull
+# Перезаливка кода с dev-машины (rsync, как при установке)
+rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
+    --exclude 'logs/*' --exclude 'files/*' \
+    ./ vova@server:/home/vova/Binidex/BinoOptions/
 
-# Обновление зависимостей
-source .venv/bin/activate
+# Обновление зависимостей (если менялись)
+cd /home/vova/Binidex/BinoOptions
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Обновление Playwright (если нужно)
 playwright install firefox
 
 # Запуск сервисов
@@ -279,22 +270,22 @@ sudo systemctl start option-1m-bin.service
 ### Ошибка "Browser closed unexpectedly"
 ```bash
 # Переустановка браузеров Playwright
-source /home/vova/Options/.venv/bin/activate
+source /home/vova/Binidex/BinoOptions/venv/bin/activate
 playwright install firefox --force
 playwright install-deps firefox
 ```
 
 ### Ошибка подключения к БД
 ```bash
-# Проверка доступности PostgreSQL
-pg_isready -h localhost -p 5432
+# Проверка доступности PgBouncer
+pg_isready -h localhost -p 6442
 
 # Проверка переменных окружения
-cat /home/vova/Options/.env | grep PG_
+cat /home/vova/Binidex/BinoOptions/.env | grep PG_
 ```
 
 ### Проверка работы Playwright
 ```bash
-source /home/vova/Options/.venv/bin/activate
+source /home/vova/Binidex/BinoOptions/venv/bin/activate
 python -c "from playwright.sync_api import sync_playwright; print('Playwright OK')"
 ```

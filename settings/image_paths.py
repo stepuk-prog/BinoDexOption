@@ -2,10 +2,6 @@
 Константы путей к изображениям.
 """
 
-# Сообщения о волатильности и ошибках
-VOLATILITY_IMAGE = 'pictures/volat.jpg'
-UNACTIVE_IMAGE = 'pictures/unactive.jpg'
-
 # Прогнозы — рандомный выбор из 3 картинок на каждый новый прогноз.
 NEW_FORECAST_IMAGES = [
     'pictures/new_prognoz/new_prognoz_1.png',

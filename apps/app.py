@@ -13,15 +13,15 @@ from apps.my_exeptions import lost_connection_photo, lost_connection
 from database import AsyncDatabase
 from logs import init_logger
 from settings.Option_class import Option
-from messages import (minus_message, main_bug_message, dop_plus10_message, plus50_message, plus5_message,
+from messages import (main_bug_message, dop_plus10_message, plus50_message, plus5_message,
                       plus10_message, plus15_message, plus20_message, plus25_message, plus30_message, plus35_message,
                       plus40_message, plus45_message)
-from settings import move_x1, move_y1, move_dogon_y, qr_move_y, qr_move_x, itog_move_y
+from settings import qr110_x, qr110_y, qr85_x, qr85_y
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
-from settings.config import channel_id, option_data, get_app, binary, shot_path, screenshot_path
-from settings.constant import water_path, small_water_path, qr_path, bear_color, bull_color, find_time, water_otc_path
-from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, PRE_MESSAGE_DELAY
-from settings.image_paths import VOLATILITY_IMAGE, PLUS_SERIES_IMAGE
+from settings.config import channel_id, option_data, get_app, binary, program_id, shot_path, screenshot_path
+from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
+from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY
+from settings.image_paths import PLUS_SERIES_IMAGE
 
 if TYPE_CHECKING:
     from apps.browser_app import BrowserManager
@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 # Инициализируется при первом использовании через get_database()
 _database: AsyncDatabase | None = None
 logger = init_logger(__name__)
+
+# Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
+_shutdown_requested = False
+
+
+def request_shutdown():
+    """Пометить штатную остановку — подавляет сообщение о сбое (main_bug_message)."""
+    global _shutdown_requested
+    _shutdown_requested = True
 
 
 async def get_database() -> AsyncDatabase:
@@ -54,25 +63,20 @@ def check_work_hour() -> bool:
 
 
 def get_water():
-    """Загрузка водяного знака"""
+    """Загрузка QR-оверлеев (qr110, qr85)"""
     try:
-        water = Image.open(water_path)
-        water_small = Image.open(small_water_path)
-        qr = Image.open(qr_path)
-        water_otc = Image.open(water_otc_path)
-        return True, water, water_small, qr, water_otc
+        qr110 = Image.open(qr110_path)
+        qr85 = Image.open(qr85_path)
+        return True, (qr110, qr85)
     except (Exception,) as error:
-        logger.error(f'Не могу загрузить водяной знак - {error}')
-        return False, None, None, None, None
+        logger.error(f'Не могу загрузить QR - {error}')
+        return False, None
 
 
 async def check_plus():
     """Проверка количества плюсов"""
     database = await get_database()
-    if binary:
-        kol_plus = await database.plus_counter(tf=str(option_data.timeframe), otc=False)
-    else:
-        kol_plus = await database.plus_counter(tf=str(option_data.timeframe), otc=True)
+    kol_plus = await database.plus_counter(program_id=program_id)
     await asyncio.sleep(CHECK_PLUS_DELAY)
 
     plus_messages = {
@@ -109,28 +113,9 @@ async def check_plus():
 
 
 async def check_minus():
-    """Проверка количества минусов"""
+    """Сброс серии плюсов при минусе — инкремент счётчика минусов в БД."""
     database = await get_database()
-    if binary:
-        kol_minus = await database.minus_counter(tf=str(option_data.timeframe), otc=False)
-    else:
-        kol_minus = await database.minus_counter(tf=str(option_data.timeframe), otc=True)
-
-    if kol_minus['minus'] == 2:
-        img = VOLATILITY_IMAGE
-        await asyncio.sleep(PRE_MESSAGE_DELAY)
-        message_text = minus_message()
-        try:
-            await get_app().send_photo(chat_id=channel_id, photo=img, caption=message_text)
-            return True, ''
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=img, text=message_text,
-                                                  mes_type='сообщение о волатильности')
-            if bug_fix[0]:
-                return True, ''
-            else:
-                error_text = f"Ошибка отправки сообщения о волатильности - {bug_fix[1]}"
-                return False, error_text
+    await database.minus_counter(program_id=program_id)
     return True, ''
 
 
@@ -148,10 +133,10 @@ async def exit_main(channel_mess: bool,
     :return: result, plus - если окончился плюсом, fall - перезапуск
     """
     plus = False
-    if channel_mess:
+    if channel_mess and not _shutdown_requested:
         try:
-            await get_app().send_message(channel_id, main_bug_message(),
-                                   disable_web_page_preview=False)
+            await get_app().send_photo(chat_id=channel_id, photo='pictures/bug.png',
+                                       caption=main_bug_message())
         except (Exception,) as error:
             logger.error(f'Ошибка отправки сообщения о сбое программы - {error}')
     else:
@@ -257,13 +242,12 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
         return False, error_text
 
 
-async def screenshot(manager: "BrowserManager", screen: str | None, water, qr) -> tuple[bool, float | str]:
+async def screenshot(manager: "BrowserManager", screen: str | None, qr) -> tuple[bool, float | str]:
     """
-    Снятие скриншота
+    Снятие скриншота с окна main.
     :param manager: менеджер браузера
-    :param screen: имя страницы ('main', 'dogon', 'itog') или None для только цены
-    :param water: водяной знак
-    :param qr: QR код
+    :param screen: None — только цена без скриншота; иначе снимаем скрин и кладём QR.
+    :param qr: кортеж (qr110, qr85) — QR-оверлеи
     :return: (success, price или error_message)
     """
     try:
@@ -274,7 +258,8 @@ async def screenshot(manager: "BrowserManager", screen: str | None, water, qr) -
         if screen is None:  # если требуется только цена без скриншота
             return True, price_result[1]
 
-        page = manager.pages[screen]
+        # Грузится только окно main — все скрины снимаются с него.
+        page = manager.pages['main']
         await page.bring_to_front()
 
         # Закрытие popup, если есть
@@ -292,13 +277,10 @@ async def screenshot(manager: "BrowserManager", screen: str | None, water, qr) -
         await element.screenshot(path=shot_path)
 
         with Image.open(shot_path) as img:
-            if screen == 'main':
-                img.paste(water, (move_x1, move_y1), mask=water)
-            elif screen == 'dogon':
-                img.paste(water, (move_x1, move_dogon_y), mask=water)
-            elif screen == 'itog':
-                img.paste(water, (move_x1, itog_move_y), mask=water)
-                img.paste(qr, (qr_move_x, qr_move_y), mask=qr)
+            if qr:
+                qr110, qr85 = qr
+                img.paste(qr110, (qr110_x, qr110_y), mask=qr110 if qr110.mode in ('RGBA', 'LA') else None)
+                img.paste(qr85, (qr85_x, qr85_y), mask=qr85 if qr85.mode in ('RGBA', 'LA') else None)
             img.save(screenshot_path)
 
         return True, price_result[1]

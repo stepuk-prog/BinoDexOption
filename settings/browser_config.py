@@ -29,8 +29,6 @@ pop_up3 = find_par(data=vib_all_kat, par='pop_up3')
 screen_zone = find_par(data=vib_all_kat, par='screen_zone')
 # включение выбора валюты
 symbol = find_par(data=vib_all_kat, par='symbol')
-# выбор торговли
-forex = find_par(data=vib_all_kat, par='forex')
 # установка таймфрейма в 1 минуту для страницы с ценой
 tf_link_price = find_par(data=vib_all_kat, par=f'tf_link_1')
 # установка таймфрейма

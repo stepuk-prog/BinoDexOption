@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/Options
+WorkingDirectory=/home/vova/Binidex/BinoOptions
 Environment="TIMEFRAME=5m" "BINARY=true" "TEST=false"
-ExecStart=/home/vova/Options/.venv/bin/python3.11 bot.py
+ExecStart=/home/vova/Binidex/BinoOptions/venv/bin/python3.11 main.py
 Restart=on-failure
 RestartSec=10
 

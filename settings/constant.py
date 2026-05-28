@@ -1,16 +1,12 @@
 import os
 
-water_path = f'{os.getcwd()}/pictures/water.png'
-small_water_path = f'{os.getcwd()}/pictures/water_small.png'
-qr_path = f'{os.getcwd()}/pictures/qr.png'
-water_otc_path = f'{os.getcwd()}/pictures/water_otc.png'
+qr110_path = f'{os.getcwd()}/pictures/qr-code_110.png'
+qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи
 find_time = 2  # максимальное время поиска точки входа в минутах
-bug_pic = 'https://i.im.ge/2023/02/11/axeAhF.bug.jpg'  # картинка для сообщения о сбое в канал
 weekend = 'https://i.ibb.co/Df7NKbJ/endweek.jpg'  # картинка об окончании недели
 start_trade = 'https://i.ibb.co/ZJjHc6W/startweek.jpg'  # картинка о начале торговой недели
-dop_dogon_pic = ['https://i.ibb.co/yqkb9YQ/first-dogon.jpg', 'https://i.ibb.co/GVNJ3dF/second-dogon.jpg']
 pl_mes = ('<blockquote>'
           '<emoji id="5472146462362048818">💡</emoji><b><i>ВАЖНО:</i></b> '
           '<i>Помните, что торговые прогнозы служат только в качестве дополнительного анализа валютной пары, и не '

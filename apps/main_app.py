@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
 from apps.my_exeptions import lost_connection_photo
-from apps.otc_app import parce_otc, screenshot_otc, check_unactive_otc
+from apps.otc_app import parce_otc, screenshot_otc
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -21,7 +21,7 @@ count_price = 0  # счетчик количества одинаковой це
 logger = init_logger(__name__)
 
 
-async def main(manager: "BrowserManager", water, qr):
+async def main(manager: "BrowserManager", qr):
     global used_val, prev_price, count_price
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
@@ -36,7 +36,7 @@ async def main(manager: "BrowserManager", water, qr):
         await find_option_data(manager=manager, log_data=option_data, used_val=used_val)
         logger.info("✅ find_option_data завершён")
         logger.info("📸 Вызов screenshot(screen=None)...")
-        screen_shot = await screenshot(manager=manager, screen=None, water=water, qr=qr)
+        screen_shot = await screenshot(manager=manager, screen=None, qr=qr)
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
         pic_str = '_otc'
@@ -45,7 +45,7 @@ async def main(manager: "BrowserManager", water, qr):
             return await exit_main(channel_mess=False, result=False,
                                    bug_text='Ошибка загрузки валюты на график', check_cookies=count_price)
         page = manager.pages['main']
-        screen_shot = await screenshot_otc(page=page, water=water, asset=option_data.name)
+        screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
     if not screen_shot[0]:
         return await exit_main(channel_mess=False, result=False,
@@ -77,13 +77,10 @@ async def main(manager: "BrowserManager", water, qr):
 
     if binary:
         await find_point(manager, option_data.resume)
-        screen_shot = await screenshot(manager=manager, screen='main', water=water, qr=qr)
+        screen_shot = await screenshot(manager=manager, screen='main', qr=qr)
     else:
-        if await check_unactive_otc(log_data=option_data):
-            page = manager.pages['main']
-            screen_shot = await screenshot_otc(page=page, water=water, asset=option_data.name)
-        else:
-            return await exit_main(channel_mess=False, result=True, bug_text='', fall=False, check_cookies=count_price)
+        page = manager.pages['main']
+        screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
     if not screen_shot[0]:
         return await exit_main(channel_mess=True, result=False,
@@ -108,13 +105,10 @@ async def main(manager: "BrowserManager", water, qr):
     await asyncio.sleep(option_data.option_time)
 
     if binary:
-        screen_shot = await screenshot(manager=manager, screen='itog', water=water, qr=qr)
+        screen_shot = await screenshot(manager=manager, screen='itog', qr=qr)
     else:
-        if await check_unactive_otc(log_data=option_data):
-            page = manager.pages['main']
-            screen_shot = await screenshot_otc(page=page, water=water, asset=option_data.name)
-        else:
-            return await exit_main(channel_mess=False, result=True, bug_text='', fall=False, check_cookies=count_price)
+        page = manager.pages['main']
+        screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
     if screen_shot[0]:
         option_data.itg_price = round(screen_shot[1], option_data.round)
@@ -179,14 +173,10 @@ async def main(manager: "BrowserManager", water, qr):
 
         if binary:
             await find_point(manager=manager, resume=option_data.resume)
-            screen_shot = await screenshot(manager=manager, screen='dogon', water=water, qr=qr)
+            screen_shot = await screenshot(manager=manager, screen='dogon', qr=qr)
         else:
-            if await check_unactive_otc(log_data=option_data):
-                page = manager.pages['main']
-                screen_shot = await screenshot_otc(page=page, water=water, asset=option_data.name)
-            else:
-                return await exit_main(channel_mess=False, result=True, bug_text='', fall=False,
-                                       check_cookies=count_price)
+            page = manager.pages['main']
+            screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
         if not screen_shot[0]:
             return await exit_main(channel_mess=True, result=False,
@@ -212,14 +202,10 @@ async def main(manager: "BrowserManager", water, qr):
         await asyncio.sleep(option_data.dgn_time)
 
         if binary:
-            screen_shot = await screenshot(manager=manager, screen='itog', water=water, qr=qr)
+            screen_shot = await screenshot(manager=manager, screen='itog', qr=qr)
         else:
-            if await check_unactive_otc(log_data=option_data):
-                page = manager.pages['main']
-                screen_shot = await screenshot_otc(page=page, water=water, asset=option_data.name)
-            else:
-                return await exit_main(channel_mess=False, result=True, bug_text='', fall=False,
-                                       check_cookies=count_price)
+            page = manager.pages['main']
+            screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
         if not screen_shot[0]:
             return await exit_main(channel_mess=True, result=False,

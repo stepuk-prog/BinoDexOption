@@ -1,11 +1,14 @@
 /.env
-/files/
+/files/*
+!/files/.gitkeep
 /logs/option_1m_bin.log
 /logs/option_1m_otc.log
 /pictures/screenshot_1m_bin.png
 /pictures/screenshot_1m_otc.png
 /pictures/shot_1m_bin.png
 /pictures/shot_1m_otc.png
+/pictures/screenshot_preview.png
+/pictures/screenshot_otc_preview.png
 
 /.venv/
 /.idea/

@@ -5,11 +5,13 @@ from dotenv import load_dotenv
 from database import Database
 from pyrogram import Client
 from settings.Option_class import Option
+from settings.database_config import pg_name_fin
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
 
 logger = logging.getLogger(__name__)
-database = Database()
+database = Database()  # Program: настройки браузера, cookies, telegram, программа
+database_fin = Database(db_name=pg_name_fin)  # binodex: данные опционов и option_setting
 
 
 def parse_bool(value: str) -> bool:
@@ -19,6 +21,8 @@ def parse_bool(value: str) -> bool:
 
 timeframe = os.getenv("TIMEFRAME")
 binary = parse_bool(os.getenv("BINARY", "0"))
+# Ключ программы — фильтр своих строк в общей settings.option_setting.
+prog_key = os.getenv("PROG_KEY")
 
 # Суффикс для файлов (для разделения между экземплярами)
 file_suffix = f"{timeframe}_{'bin' if binary else 'otc'}"
@@ -27,7 +31,8 @@ file_suffix = f"{timeframe}_{'bin' if binary else 'otc'}"
 shot_path = f"pictures/shot_{file_suffix}.png"
 screenshot_path = f"pictures/screenshot_{file_suffix}.png"
 log_path = f"logs/option_{file_suffix}.log"
-option = database.option_setting(timeframe=timeframe, binary=binary)
+# Базовые настройки экземпляра — из базы данных опционов (binodex).
+option = database_fin.option_setting_base(timeframe=timeframe, binary=binary, program=prog_key)
 if option is None:
     raise ValueError(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
 test = parse_bool(os.getenv("TEST", "0"))
@@ -39,16 +44,24 @@ if test:
     api_id = os.getenv("TEST_API_ID")
     api_hash = os.getenv("TEST_API_HASH")
     session_file = os.getenv("TEST_SESSION_FILE")
+    session_string = None
 else:
     channel_id = option['channel_id']
-    api_id = option['api_id']
-    api_hash = option['api_hash']
+    # Креды юзербота — из Program (telegram.telegram), таблицу не переносим.
+    creds = database.telegram_creds(id_telegram=option['user_bot'])
+    if not creds:
+        raise ValueError(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
+    api_id = creds['api_id']
+    api_hash = creds['api_hash']
+    # Сессия из БД (Pyrogram session string). Если пусто — fallback на файл files/*.session.
+    session_string = creds['session_string']
     session_file = f'files/{option["session_file"]}'
 prog_name = option['prog_name']
+# Куки — из Program (cookies.*), не переносим.
 if binary:
-    cookies = option['cook_tv']
+    cookies = database.tv_cookies(user_id=option['cookies_tv'])
 else:
-    cookies = option['cookies']
+    cookies = database.get_pocket_cookies(user_id=option['cookies_pocket'])
 
 # Test override: подмена OTC-кук через env COOK_OTC (user_id в cookies.pocket_cookies), без правки БД
 cook_otc_override = os.getenv("COOK_OTC")
@@ -78,7 +91,13 @@ def get_app() -> Client:
     global _app
     if _app is None:
         try:
-            _app = Client(name=session_file, api_id=api_id, api_hash=api_hash)
+            if session_string:
+                # Сессия из БД — без файла на диске.
+                _app = Client(name=prog_name, api_id=api_id, api_hash=api_hash,
+                              session_string=session_string, in_memory=True)
+            else:
+                # Fallback: файловая сессия files/*.session.
+                _app = Client(name=session_file, api_id=api_id, api_hash=api_hash)
         except (Exception,) as e:
             logger.error(f"Ошибка создания Pyrogram Client: {e}")
             raise

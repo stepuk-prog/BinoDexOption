@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from PIL import Image
 from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeout, WebSocket
 
-from apps.my_exeptions import lost_connection_photo
 from settings.Option_class import Option
 from settings.config import get_app, channel_id, cookies, shot_path, screenshot_path
 from settings.cookie_utils import add_cookies_to_context
@@ -18,8 +17,7 @@ from settings.result_types import OperationResult
 from apps.exit_app import close_program
 from database import AsyncDatabase
 from logs import init_logger
-from messages import otc_unactive
-from settings.screenshot_set import move_x_otc, move_y_otc, win_x_otc, win_y_otc
+from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y
 from settings.browser_config import (input_otc, otc_val_list_close, otc_val_list_open, screen_zone_otc, otcprice,
                                      change_tf, chart_type, s30, timeframe_otc, otc_screen, name_valute_list_css,
                                      list_valute_css, percent_value, check_google)
@@ -213,12 +211,12 @@ async def get_price(page: Page, asset: str = None, timeout: int = TIMEOUT_SHORT 
     return False
 
 
-async def screenshot_otc(page: Page, water, asset: str = None) -> tuple[bool, float | bool, str] | tuple[bool, str, str]:
+async def screenshot_otc(page: Page, asset: str = None, qr=None) -> tuple[bool, float | bool, str] | tuple[bool, str, str]:
     """
-    Получение скриншота Pocket
+    Получение скриншота Pocket (с QR-оверлеем).
     :param page: страница браузера
-    :param water: qr код
     :param asset: название актива для получения цены
+    :param qr: кортеж (qr110, qr85) — на OTC кладём только qr110
     :return:
     """
     for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
@@ -236,7 +234,9 @@ async def screenshot_otc(page: Page, water, asset: str = None) -> tuple[bool, fl
                 logger.warning(msg)
                 continue
             with Image.open(shot_path) as img:
-                img.paste(water, (move_x_otc, move_y_otc), mask=water)
+                if qr:
+                    qr110 = qr[0]
+                    img.paste(qr110, (otc_qr_x, otc_qr_y), mask=qr110 if qr110.mode in ('RGBA', 'LA') else None)
                 img.save(screenshot_path)
             return True, price, screenshot_path
         except (Exception,) as e:
@@ -345,23 +345,6 @@ async def otc_list_close(page: Page) -> bool:
 
     logger.warning("Не удалось закрыть меню выбора валют")
     return False
-
-
-async def check_unactive_otc(log_data: Option):
-    """Проверка активности OTC пары"""
-    database = await get_database()
-    check = await database.check_otc(val_id=log_data.id_val)
-    if check:
-        if not check['pocket_real']:
-            message_text = otc_unactive()
-            try:
-                await get_app().send_photo(chat_id=channel_id, photo='pictures/unactive.jpg', caption=message_text)
-                logger.report(f'Текущая пара{log_data.name} OTC неактивна')
-            except (Exception,) as error:
-                await lost_connection_photo(error=error, photo='pictures/unactive.jpg', text=message_text,
-                                            mes_type='сообщение о неактивной паре ОТС')
-            return False
-    return True
 
 
 async def design_customization(page: Page) -> bool:
