@@ -1,0 +1,15 @@
+[Unit]
+Description=Option Bot 3m OTC
+After=network.target
+
+[Service]
+Type=simple
+User=vova
+WorkingDirectory=/home/vova/Options
+Environment="TIMEFRAME=3m" "BINARY=false" "TEST=false"
+ExecStart=/home/vova/Options/.venv/bin/python3.11 bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

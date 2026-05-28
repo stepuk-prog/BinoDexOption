@@ -1,0 +1,15 @@
+[Unit]
+Description=OPTION 3 MIN OTC
+After=network.target
+
+[Service]
+User=vova
+Group=vova
+
+WorkingDirectory=/home/vova/Options/OTC/3min/
+Environment="PYTHONPATH=/home/vova/Options/OTC/3min/"
+ExecStart=/home/vova/Options/OTC/3min/venv/bin/python3.11 /home/vova/Options/OTC/3min/bot.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

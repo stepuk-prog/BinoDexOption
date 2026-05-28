@@ -1,0 +1,8 @@
+Pillow==11.0.0
+playwright==1.57.0
+python-dotenv~=1.1.1
+pyrofork
+tgcrypto-pyrofork
+aiogram==3.17.0
+psycopg2-binary~=2.9.10
+asyncpg~=0.30.0

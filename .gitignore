@@ -1,0 +1,13 @@
+/.env
+/files/
+/logs/option_1m_bin.log
+/logs/option_1m_otc.log
+/pictures/screenshot_1m_bin.png
+/pictures/screenshot_1m_otc.png
+/pictures/shot_1m_bin.png
+/pictures/shot_1m_otc.png
+
+/.venv/
+/.idea/
+__pycache__/
+*.pyc

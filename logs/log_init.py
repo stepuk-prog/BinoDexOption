@@ -1,0 +1,125 @@
+import asyncio
+import logging
+import os
+from logging import Handler, LogRecord, handlers
+
+from aiogram import Bot
+from settings.logger_config import error_channel, token, frame, message_channel, cookies_channel
+
+
+def _get_log_path() -> str:
+    """Получить путь к файлу логов на основе TIMEFRAME и BINARY"""
+    timeframe = os.getenv("TIMEFRAME", "unknown")
+    binary_str = os.getenv("BINARY", "0")
+    is_binary = binary_str.lower() in ('1', 'true', 'yes', 'on')
+    suffix = f"{timeframe}_{'bin' if is_binary else 'otc'}"
+    return f"logs/option_{suffix}.log"
+
+# Определение пользовательских уровней логирования
+ERROR_LEVEL = logging.ERROR  # Используем стандартный уровень для error
+REPORT_LEVEL = 25  # Новый уровень для report
+COOKIES_LEVEL = 35  # Уровень для ошибок - отвал cookies
+
+# Добавление новых уровней логирования
+logging.addLevelName(REPORT_LEVEL, "REPORT")
+logging.addLevelName(COOKIES_LEVEL, "COOKIES")
+
+
+# Добавление новых методов в класс Logger
+def report(self, message, *args, **kws):
+    if self.isEnabledFor(REPORT_LEVEL):
+        self._log(REPORT_LEVEL, message, args, **kws)
+
+def cookies(self, message, *args, **kws):
+    if self.isEnabledFor(COOKIES_LEVEL):
+        self._log(COOKIES_LEVEL, message, args, **kws)
+
+
+
+logging.Logger.report = report
+logging.Logger.cookies = cookies
+
+# Синглтон для aiogram Bot (один экземпляр на всё приложение)
+_telegram_bot: Bot | None = None
+
+
+def get_telegram_bot() -> Bot:
+    """Получить singleton экземпляр бота"""
+    global _telegram_bot
+    if _telegram_bot is None:
+        _telegram_bot = Bot(token=token)
+    return _telegram_bot
+
+
+class TelegramBotHandler(Handler):  # Handler для логера, отправляющий сообщение в Telegram (async)
+    def __init__(self):
+        super().__init__()
+        self.bot = get_telegram_bot()  # Используем синглтон
+        self.setLevel(REPORT_LEVEL)
+        self.err_fmt = logging.Formatter(
+            f'‼️Сбой {frame}\n\n %(filename)s [LINE:%(lineno)d] '
+            '#%(levelname)-8s [%(asctime)s] %(message)s')
+        self.msg_fmt = logging.Formatter(f'📫{frame}\n\n %(message)s')
+
+    async def _send_message(self, chat_id: int, text: str):
+        """Асинхронная отправка сообщения"""
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=text)
+        except (Exception,) as error:
+            print(f'Сбой отправки сообщения в Telegram — {error}')
+
+    def emit(self, record: LogRecord):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Нет запущенного event loop - пропускаем отправку
+            return
+
+        try:
+            if record.levelno >= ERROR_LEVEL:
+                self.setFormatter(self.err_fmt)
+                loop.create_task(self._send_message(error_channel, self.format(record=record)))
+            elif record.levelno == REPORT_LEVEL:
+                self.setFormatter(self.msg_fmt)
+                loop.create_task(self._send_message(message_channel, self.format(record=record)))
+            elif record.levelno == COOKIES_LEVEL:
+                self.setFormatter(self.msg_fmt)
+                loop.create_task(self._send_message(cookies_channel, self.format(record=record)))
+        except (Exception,) as error:
+            print(f'Сбой отправки сообщения в Telegram — {error}')
+
+
+# Синглтон для файлового хендлера (один на все логгеры)
+_file_handler: logging.Handler | None = None
+
+
+def _get_file_handler() -> logging.Handler:
+    """Получить синглтон файлового хендлера"""
+    global _file_handler
+    if _file_handler is None:
+        FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
+        log_path = _get_log_path()
+        _file_handler = logging.handlers.RotatingFileHandler(
+            filename=log_path, maxBytes=1000000, backupCount=5, encoding='utf8'
+        )
+        _file_handler.setFormatter(logging.Formatter(FORMAT))
+        _file_handler.setLevel(REPORT_LEVEL)
+    return _file_handler
+
+
+def init_logger(name):  # инициализация логера
+    logger = logging.getLogger(name)
+    logger.addHandler(TelegramBotHandler())
+    FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
+    logger.setLevel(REPORT_LEVEL)
+
+    # Stream handler (консоль)
+    sh = logging.StreamHandler()
+    sh.setFormatter(logging.Formatter(FORMAT))
+    sh.setLevel(REPORT_LEVEL)
+    logger.addHandler(sh)
+
+    # File handler (синглтон)
+    logger.addHandler(_get_file_handler())
+
+    return logger

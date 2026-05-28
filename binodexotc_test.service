@@ -1,0 +1,14 @@
+[Unit]
+Description=BinoDexOtc_test
+
+[Service]
+User=vova
+Group=vova
+
+WorkingDirectory=/home/vova/BinoDexOTC_test
+Environment="PYTHONPATH=/home/vova/BinoDexOTC_test"
+ExecStart=/home/vova/BinoDexOTC_test/.venv/bin/python3.11 /home/vova/BinoDexOTC_test/bot.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
