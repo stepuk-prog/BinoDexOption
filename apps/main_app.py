@@ -13,7 +13,7 @@ from settings.timing import BETWEEN_MESSAGES_DELAY, POST_SCREENSHOT_DELAY
 from settings.image_paths import DOGON_IMAGES, NEW_FORECAST_IMAGES
 
 if TYPE_CHECKING:
-    from apps.browser_app import BrowserManager
+    from classes.browser_manager import BrowserManager
 
 used_val = [0]
 prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)

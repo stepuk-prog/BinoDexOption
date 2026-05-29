@@ -7,7 +7,7 @@ from typing import NamedTuple, Union
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from apps.browser_app import BrowserManager
+    from classes.browser_manager import BrowserManager
 
 
 class BrowserInitResult(NamedTuple):

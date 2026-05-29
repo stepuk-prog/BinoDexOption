@@ -6,7 +6,7 @@ from logs import init_logger
 from settings.timing import LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY
 
 if TYPE_CHECKING:
-    from apps.browser_app import BrowserManager
+    from classes.browser_manager import BrowserManager
 
 logger = init_logger(__name__)
 

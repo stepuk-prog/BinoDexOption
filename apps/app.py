@@ -22,7 +22,7 @@ from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
 if TYPE_CHECKING:
-    from apps.browser_app import BrowserManager
+    from classes.browser_manager import BrowserManager
 
 # Глобальный экземпляр асинхронной базы данных
 # Инициализируется при первом использовании через get_database()
