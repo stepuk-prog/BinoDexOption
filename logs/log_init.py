@@ -53,6 +53,12 @@ def get_telegram_bot() -> Bot:
     return _telegram_bot
 
 
+async def close_telegram_bot():
+    """Закрыть aiohttp-сессию aiogram-бота, если он был создан."""
+    if _telegram_bot is not None:
+        await _telegram_bot.session.close()
+
+
 class TelegramBotHandler(Handler):  # Handler для логера, отправляющий сообщение в Telegram (async)
     def __init__(self):
         super().__init__()

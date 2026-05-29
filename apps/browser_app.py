@@ -295,7 +295,7 @@ async def open_tv_browser(manager: BrowserManager):
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
                                     text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
-                return
+                return OperationResult(success=False)
         else:
             # Открываем новую вкладку через JavaScript
             try:
@@ -313,7 +313,7 @@ async def open_tv_browser(manager: BrowserManager):
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
                                     text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
-                return
+                return OperationResult(success=False)
 
         page = manager.pages[page_name]
         await page.bring_to_front()
@@ -331,7 +331,7 @@ async def open_tv_browser(manager: BrowserManager):
         except (Exception,) as error:
             await close_program(manager=manager, status=1,
                                 text=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
-            return
+            return OperationResult(success=False)
 
     # Закрытие попапов на всех страницах (попапы уже гарантированно появились)
     for page_name, page in manager.pages.items():

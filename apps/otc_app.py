@@ -372,7 +372,7 @@ def setup_websocket_tracker(page: Page):
     page.on("websocket", on_websocket)
 
 
-async def init_otc(manager: "BrowserManager") -> bool | None:
+async def init_otc(manager: "BrowserManager") -> bool:
     """Инициализация OTC страницы"""
     page = manager.pages['main']
 
@@ -384,7 +384,7 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
         await page.set_viewport_size({'width': win_x_otc, 'height': win_y_otc})
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f"Не загрузился браузер - {error}")
-        return
+        return False
 
     try:
         # Ждём полной загрузки страницы
@@ -395,7 +395,7 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
             await add_cookies_to_context(manager.context, cookies)
         else:
             await close_program(manager=manager, status=1, text="Нет cookies для установки.")
-            return
+            return False
 
         await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
 
@@ -407,7 +407,7 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
             google_button = page.locator(f".{check_google}")
             if await google_button.count() > 0:
                 await close_program(manager=manager, text='', status=1, cookies=True)
-                return
+                return False
         except (Exception,) as e:
             logger.warning(f"Ошибка проверки cookies (Google-кнопка): {e}")
 
@@ -422,6 +422,7 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
         return True
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f'Ошибка загрузки страницы OTC - {error}')
+        return False
 
 
 async def close_modal(page: Page):
