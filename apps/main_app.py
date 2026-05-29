@@ -21,6 +21,20 @@ count_price = 0  # счетчик количества одинаковой це
 logger = init_logger(__name__)
 
 
+async def _try_send(bot, photo, caption, mes_type: str, timeout: float | None = None) -> tuple[bool, str]:
+    """Отправка поста с обработкой обрыва связи. Возврат (ok, текст_ошибки)."""
+    try:
+        coro = bot.send_photo(chat_id=channel_id, photo=photo, caption=caption)
+        await (asyncio.wait_for(coro, timeout=timeout) if timeout else coro)
+        return True, ''
+    except asyncio.TimeoutError:
+        logger.error("❌ Таймаут отправки (%s)", mes_type)
+        return False, 'Таймаут Pyrogram'
+    except (Exception,) as error:
+        logger.error("❌ Ошибка отправки (%s): %s", mes_type, error)
+        return await lost_connection_photo(error=error, photo=photo, text=caption, mes_type=mes_type)
+
+
 async def main(manager: "BrowserManager", qr):
     global used_val, prev_price, count_price
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
@@ -51,21 +65,9 @@ async def main(manager: "BrowserManager", qr):
 
     message_text = first_message()
     new_prognoz_img = random.choice(NEW_FORECAST_IMAGES)  # рандомно из 3 в pictures/new_prognoz/
-    try:
-        await asyncio.wait_for(
-            bot.send_photo(chat_id=channel_id, photo=new_prognoz_img, caption=message_text),
-            timeout=30.0
-        )
-        logger.info("✅ Первое сообщение отправлено")
-    except asyncio.TimeoutError:
-        logger.error("❌ Таймаут отправки сообщения (30 сек)")
-        return await exit_main(channel_mess=False, result=False, bug_text='Таймаут Pyrogram', check_cookies=count_price)
-    except (Exception,) as error:
-        logger.error("❌ Ошибка отправки: %s", error)
-        bug_fix = await lost_connection_photo(error=error, photo=new_prognoz_img, text=message_text,
-                                              mes_type='первое сообщение')
-        if not bug_fix[0]:
-            return await exit_main(channel_mess=False, result=False, bug_text=bug_fix[1], check_cookies=count_price)
+    ok, err = await _try_send(bot, new_prognoz_img, message_text, 'первое сообщение', timeout=30.0)
+    if not ok:
+        return await exit_main(channel_mess=False, result=False, bug_text=err, check_cookies=count_price)
 
     used_val.append(option_data.id_val)
     if len(used_val) >= 4:  # держим последние 3 id → актив не повторяется в окне из 4 рынков подряд
@@ -92,13 +94,9 @@ async def main(manager: "BrowserManager", qr):
     option_data.levels()
     message_text = second_message()
 
-    try:
-        await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=message_text)
-    except (Exception,) as error:
-        bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=message_text,
-                                              mes_type='второе сообщение')
-        if not bug_fix[0]:
-            return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
+    ok, err = await _try_send(bot, screenshot_path, message_text, 'второе сообщение')
+    if not ok:
+        return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
     await asyncio.sleep(option_data.option_time)
 
@@ -125,16 +123,10 @@ async def main(manager: "BrowserManager", qr):
 
     if not option_data.dgn:  # если опцион закончился без догона
         message_text = third_message()
-        try:
-            await bot.send_photo(channel_id, screenshot_path, caption=message_text)
-            return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=message_text,
-                                                  mes_type='итоговое сообщение')
-            if not bug_fix[0]:
-                return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
-            else:
-                return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
+        ok, err = await _try_send(bot, screenshot_path, message_text, 'итоговое сообщение')
+        if not ok:
+            return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
+        return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
 
     # Перетасованный список картинок для перекрытий — без повторов в рамках одного прогноза.
     dogon_pool = random.sample(DOGON_IMAGES, len(DOGON_IMAGES))
@@ -146,26 +138,17 @@ async def main(manager: "BrowserManager", qr):
             option_data.random_dogon()
 
         text_message = prepare_dogon_message(idx=index)
-        try:
-            await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
-                                                  mes_type='первое сообщение о догоне')
-            if not bug_fix[0]:
-                return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
+        ok, err = await _try_send(bot, screenshot_path, text_message, 'первое сообщение о догоне')
+        if not ok:
+            return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
         await asyncio.sleep(BETWEEN_MESSAGES_DELAY)
 
         img = dogon_pool[index % len(dogon_pool)]
         text_message = dop_dogon_message()
-
-        try:
-            await bot.send_photo(chat_id=channel_id, photo=img, caption=text_message)
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=img, text=text_message,
-                                                  mes_type='доп. сообщение догона')
-            if not bug_fix[0]:
-                return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
+        ok, err = await _try_send(bot, img, text_message, 'доп. сообщение догона')
+        if not ok:
+            return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
 
@@ -189,13 +172,9 @@ async def main(manager: "BrowserManager", qr):
                                                           count=count_price)
 
         text_message = dogon_message()
-        try:
-            await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
-                                                  mes_type='Сообщение о догоне')
-            if not bug_fix[0]:
-                return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
+        ok, err = await _try_send(bot, screenshot_path, text_message, 'Сообщение о догоне')
+        if not ok:
+            return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
         await asyncio.sleep(option_data.dgn_time)
 
@@ -220,17 +199,10 @@ async def main(manager: "BrowserManager", qr):
         if option_data.comparing_lists_dogon():
             option_data.kol_dogon = index + 1
             text_message = third_message()
-            try:
-                await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
-                return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
-            except (Exception,) as error:
-                bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
-                                                      mes_type='итоговое сообщение')
-                if not bug_fix[0]:
-                    return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1],
-                                           check_cookies=count_price)
-                else:
-                    return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
+            ok, err = await _try_send(bot, screenshot_path, text_message, 'итоговое сообщение')
+            if not ok:
+                return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
+            return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
 
         index = index + 1
         if len(option_data.dogon_par) == index:
@@ -239,13 +211,7 @@ async def main(manager: "BrowserManager", qr):
     option_data.minus = True
     option_data.plus = False
     text_message = minus_dogon_message()
-    try:
-        await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
-        return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
-    except (Exception,) as error:
-        bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
-                                              mes_type='итоговое сообщение по последнему догону с минусом')
-        if not bug_fix[0]:
-            return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
-        else:
-            return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
+    ok, err = await _try_send(bot, screenshot_path, text_message, 'итоговое сообщение по последнему догону с минусом')
+    if not ok:
+        return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
+    return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)

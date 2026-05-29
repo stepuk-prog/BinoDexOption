@@ -255,6 +255,8 @@ STEALTH_JS = """
 
 async def init_browser() -> BrowserInitResult:
     """Инициализация браузера Playwright"""
+    pw = None
+    browser = None
     try:
         pw = await async_playwright().start()
         browser = await pw.firefox.launch(**browser_launch_options)
@@ -281,6 +283,17 @@ async def init_browser() -> BrowserInitResult:
 
         return BrowserInitResult(success=True, manager_or_error=manager)
     except (Exception,) as error:
+        # Подчищаем частично поднятое, чтобы не оставить осиротевший Firefox-процесс
+        try:
+            if browser:
+                await browser.close()
+        except (Exception,):
+            pass
+        try:
+            if pw:
+                await pw.stop()
+        except (Exception,):
+            pass
         return BrowserInitResult(success=False, manager_or_error=f"Ошибка подключения браузера - {error}")
 
 
@@ -302,15 +315,16 @@ async def open_tv_browser(manager: BrowserManager):
             # Первая страница - используем существующую (уже 'main')
             page = manager.pages['main']
             try:
-                await page.goto(page_data['url'], wait_until='domcontentloaded')
+                await page.goto(page_data['url'], wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
 
                 # Добавляем cookies
                 await add_cookies_to_context(manager.context, cookies)
 
-                await page.reload(wait_until='domcontentloaded')
+                await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
                                     text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
+                return
         else:
             # Открываем новую вкладку через JavaScript
             try:
@@ -328,6 +342,7 @@ async def open_tv_browser(manager: BrowserManager):
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
                                     text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
+                return
 
         page = manager.pages[page_name]
         await page.bring_to_front()
@@ -345,6 +360,7 @@ async def open_tv_browser(manager: BrowserManager):
         except (Exception,) as error:
             await close_program(manager=manager, status=1,
                                 text=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
+            return
 
     # Закрытие попапов на всех страницах (попапы уже гарантированно появились)
     for page_name, page in manager.pages.items():
@@ -365,8 +381,8 @@ async def _reset_search_category(page) -> None:
         if await tab.get_attribute('aria-selected') != 'true':
             await tab.click(timeout=TIMEOUT_MEDIUM)
             await asyncio.sleep(0.3)
-    except (Exception,):
-        pass
+    except (Exception,) as e:
+        logger.warning(f"Не удалось сбросить категорию поиска TV: {e}")
 
 
 async def _click_fxcm_pair(page, pair: str) -> bool:
@@ -447,6 +463,7 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
                 await close_program(
                     manager=manager, status=1,
                     text=f"Ошибка загрузки данных в браузер - не найдена FXCM-строка FX:{pair}")
+                return
 
             logger.info(f"✅ Валюта FX:{pair} установлена на странице {page_name}")
     except (Exception,) as error:

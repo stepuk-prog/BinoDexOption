@@ -135,9 +135,12 @@ def _get_file_handlers() -> list[logging.Handler]:
 
 def init_logger(name):  # инициализация логера
     logger = logging.getLogger(name)
+    if logger.handlers:  # уже сконфигурирован — не плодим хендлеры при повторном вызове
+        return logger
+    logger.setLevel(REPORT_LEVEL)
+    logger.propagate = False  # не дублировать записи в root-логгер
     logger.addHandler(TelegramBotHandler())
     FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
-    logger.setLevel(REPORT_LEVEL)
 
     # Stream handler (консоль)
     sh = logging.StreamHandler()

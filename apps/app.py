@@ -14,7 +14,7 @@ from database import AsyncDatabase
 from logs import init_logger
 from classes.Option_class import Option
 from messages import main_bug_message, dop_plus10_message, plus_message
-from settings import qr110_x, qr110_y, qr85_x, qr85_y
+from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
 from settings.config import channel_id, option_data, get_app, binary, program_id, shot_path, screenshot_path
 from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
@@ -262,8 +262,8 @@ async def screenshot(manager: "BrowserManager", screen: str | None, qr) -> tuple
         with Image.open(shot_path) as img:
             if qr:
                 qr110, qr85 = qr
-                img.paste(qr110, (qr110_x, qr110_y), mask=qr110 if qr110.mode in ('RGBA', 'LA') else None)
-                img.paste(qr85, (qr85_x, qr85_y), mask=qr85 if qr85.mode in ('RGBA', 'LA') else None)
+                paste_overlay(img, qr110, qr110_x, qr110_y)
+                paste_overlay(img, qr85, qr85_x, qr85_y)
             img.save(screenshot_path)
 
         return True, price_result[1]

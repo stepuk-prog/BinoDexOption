@@ -113,7 +113,7 @@ class AsyncDatabase:
             try:
                 # Получаем соединение из нужного пула
                 pool = self.data_pool if use_data_pool else self.pool
-                async with pool.acquire() as connection:
+                async with pool.acquire(timeout=30) as connection:
                     if fetch_mode == "row":
                         return await connection.fetchrow(sql, *args)
                     elif fetch_mode == "val":
@@ -170,7 +170,7 @@ class AsyncDatabase:
                 logger.error(f"🚨 Непредвиденная ошибка при выполнении {func}: {error_str}")
                 return False
 
-        return None
+        return False  # все попытки исчерпаны — единый контракт: ошибка → False (не None)
 
     # Методы для работы с опционами _______________________________________________________________
 
@@ -239,38 +239,6 @@ class AsyncDatabase:
                                         use_data_pool=True)
 
     # Настройки ___________________________________________________________________________________
-
-    async def tv_setting(self) -> list | bool:
-        """
-        Загрузка настроек для браузера TradingView.
-        :return: Список настроек или False
-        """
-        sql = "SELECT * FROM settings.tv_settings"
-        return await self.execute_query(sql, fetch_mode='all', func='tv_setting')
-
-    async def otc_setting(self) -> list | bool:
-        """
-        Загрузка настроек для браузера Pocket.
-        :return: Список настроек или False
-        """
-        sql = "SELECT * FROM settings.pocket_settings"
-        return await self.execute_query(sql, fetch_mode='all', func='otc_setting')
-
-    async def option_setting_base(self, timeframe: str, binary: bool, program: str) -> dict | bool | None:
-        """
-        Базовые настройки экземпляра из базы данных опционов (pg_name_fin).
-        Без джойнов на cookies/telegram — те данные добираются отдельно из Program
-        (см. telegram_creds). Кросс-БД JOIN между binodex и Program невозможен.
-        settings.option_setting общая для нескольких программ → отбираем свои по program.
-        :param timeframe: таймфрейм
-        :param binary: True — опционы на обычных валютных парах
-        :param program: ключ программы (PROG_KEY) — фильтр своих строк
-        :return: строка settings.option_setting либо None
-        """
-        sql = ('SELECT * FROM settings.option_setting '
-               'WHERE timeframe = $1 AND "binary" = $2 AND program = $3')
-        return await self.execute_query(sql, timeframe, binary, program, fetch_mode='row',
-                                        func='option_setting_base', use_data_pool=True)
 
     async def close_program(self, program_id: int) -> bool:
         """

@@ -33,7 +33,8 @@ async def bot():
             await app.start()
             break
         except Unauthorized as error:
-            await session_dead_shutdown(error)
+            await session_dead_shutdown(error)  # делает sys.exit(0); return — страховка
+            return
         except (Exception,) as error:
             logger.warning(f"Попытка {attempt}/{attempts} запуска юзербота не удалась: {error}")
             try:
@@ -54,7 +55,10 @@ async def bot():
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки стартового сообщения - {error}')
         if datetime.weekday(datetime.now() + timedelta(hours=2)) >= 5:
-            await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+            try:
+                await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+            except (Exception,) as error:
+                logger.error(f'Ошибка отправки сообщения о выходных - {error}')
             database.close_program(program_id=program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
@@ -87,12 +91,10 @@ async def bot():
             pass  # Windows — graceful по сигналам недоступен
 
     while not stop_event.is_set():
-        if binary:
-            res_option = await main(manager=manager, qr=qr)
-        else:
-            res_option = await main(manager=manager, qr=qr)
-            if res_option[4] > 2:
-                await close_program(manager=manager, status=1, text='Подозрение на отвал cookies')
+        res_option = await main(manager=manager, qr=qr)
+        # OTC: подозрение на отвал cookies (одинаковая цена N раз подряд) → перезагрузка
+        if not binary and res_option[4] > 2:
+            await close_program(manager=manager, status=1, text='Подозрение на отвал cookies')
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —
         # это штатный стоп, не сбой; уходим в graceful-ветку ниже (status=false).
@@ -114,7 +116,10 @@ async def bot():
                 if not res_option[1]:
                     await asyncio.sleep(await time_sleep())
                     continue
-                await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+                try:
+                    await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+                except (Exception,) as error:
+                    logger.error(f'Ошибка отправки сообщения о выходных - {error}')
                 await app.stop()
                 database.close_program(program_id=program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')

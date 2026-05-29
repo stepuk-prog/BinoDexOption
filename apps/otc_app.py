@@ -17,7 +17,7 @@ from classes.result_types import OperationResult
 from apps.exit_app import close_program
 from database import AsyncDatabase
 from logs import init_logger
-from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y
+from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (input_otc, otc_val_list_close, otc_val_list_open, screen_zone_otc, otcprice,
                                      change_tf, chart_type, s30, timeframe_otc, otc_screen, name_valute_list_css,
                                      list_valute_css, percent_value, check_google)
@@ -239,7 +239,7 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None) -> tuple[bool, 
             with Image.open(shot_path) as img:
                 if qr:
                     qr110 = qr[0]
-                    img.paste(qr110, (otc_qr_x, otc_qr_y), mask=qr110 if qr110.mode in ('RGBA', 'LA') else None)
+                    paste_overlay(img, qr110, otc_qr_x, otc_qr_y)
                 img.save(screenshot_path)
             return True, price, screenshot_path
         except (Exception,) as e:
@@ -453,22 +453,24 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
     setup_websocket_tracker(page)
 
     try:
-        await page.goto(otc_screen, wait_until='domcontentloaded')
+        await page.goto(otc_screen, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
         await page.set_viewport_size({'width': win_x_otc, 'height': win_y_otc})
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f"Не загрузился браузер - {error}")
+        return
 
     try:
         # Ждём полной загрузки страницы
-        await page.wait_for_load_state('domcontentloaded')
+        await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_LONG)
 
         # Добавляем cookies
         if cookies:
             await add_cookies_to_context(manager.context, cookies)
         else:
             await close_program(manager=manager, status=1, text="Нет cookies для установки.")
+            return
 
-        await page.reload(wait_until='domcontentloaded')
+        await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
 
         # Закрываем модальные окна
         await close_modal(page=page)
@@ -478,8 +480,9 @@ async def init_otc(manager: "BrowserManager") -> bool | None:
             google_button = page.locator(f".{check_google}")
             if await google_button.count() > 0:
                 await close_program(manager=manager, text='', status=1, cookies=True)
-        except (Exception,):
-            pass
+                return
+        except (Exception,) as e:
+            logger.warning(f"Ошибка проверки cookies (Google-кнопка): {e}")
 
         # Ждём подключения WebSocket
         tracker = get_price_tracker()
