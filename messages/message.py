@@ -1,7 +1,5 @@
-import random
-
 from settings.config import option_data, binary
-from settings.constant import minus_fraze, pl_mes
+from settings.constant import pl_mes
 
 
 def first_message():
@@ -10,17 +8,17 @@ def first_message():
     :return: текст поста
     """
     # f_message = f'<a href="{first_pic}">&#8205;</a>'
-    f_message = f'<b><i>Подготовьте торговый актив: {option_data.name_emoji} </i></b>\n\n'
+    f_message = f'<b><i>Подготовьте торговый актив{"" if binary else " OTC"}: {option_data.name_emoji} </i></b>\n\n'
     if binary:
-        f_message += (f'<i>Ссылка на валютную пару: <a href="{option_data.link_val}"><b>Жми сюда</b></a></i> '
+        f_message += (f'<i>Ссылка на торговый актив: <a href="{option_data.link_val}"><b>Жми сюда</b></a></i> '
                       f'<emoji id="5021905410089550576">✅</emoji>\n\n')
     f_message += ('<emoji id="5472146462362048818">💡</emoji>'
                   '<b><i>Важные рекомендации перед отработкой:</i></b>\n\n')
     f_message += ('<blockquote>'
                   '<emoji id="5021712394259268143">🟡</emoji> <i>Соблюдайте риск и мани менеджмент, не рискуйте более '
-                  '5% от суммы вашего баланса!</i>\n'
+                  '5% от суммы вашего баланса!</i>\n\n'
                   '<emoji id="5021712394259268143">🟡</emoji> <i>Не копируйте вход в рынок слепо, всегда используйте '
-                  'свой собственный технический анализ!</i>\n'
+                  'свой собственный технический анализ!</i>\n\n'
                   '<emoji id="5021712394259268143">🟡</emoji> <i>Данные прогнозы выступают в качестве рекомендации для'
                   ' входа, но не являются сигналом!</i>'
                   '</blockquote>')
@@ -95,7 +93,7 @@ def third_message():
     if option_data.plus:
         s_message += '<i>Итог прогноза:</i><b><i> плюс</i></b> <emoji id="5021905410089550576">✅</emoji>'
     elif option_data.vozvrat:
-        s_message += '<i>Итог прогноза: </i><b><i><u>ВОЗВРАТ</u></i></b> <emoji id="5382178536872223059">💫</emoji>\n'
+        s_message += '<i>Итог прогноза: </i><b><i><u>ВОЗВРАТ</u></i></b> <emoji id="5382178536872223059">💫</emoji>\n\n'
         s_message += ('<blockquote>'
                       '<i><b>ВОЗВРАТ</b> — это, когда точка открытия, и точка закрытия совпадают вплоть до последней '
                       'цифры после запятой, такое происходит крайне редко, по этому робот фиксирует "возврат", т.е '
@@ -145,15 +143,15 @@ def dop_dogon_message():
     :return: текст поста
     """
     if option_data.buy:
-        direction_word = 'ВВЕРХ'
-        direction_arrow = '<emoji id="5269460053651366623">📈</emoji>'
+        direction_word = 'вверх'
+        # direction_arrow = '<emoji id="5269460053651366623">📈</emoji>'
     else:
         direction_word = 'ВНИЗ'
-        direction_arrow = '<emoji id="5271811599785534382">📈</emoji>'
+        # direction_arrow = '<emoji id="5271811599785534382">📈</emoji>'
     dg_message = ('<b><i><emoji id="5472146462362048818">💡</emoji></i></b>'
                   '<b><i>Условия повторного входа в рынок:</i></b>\n\n')
     dg_message += (f'<emoji id="5337068216189464647">🤔</emoji> <i><b>Повторный</b> вход будет осуществляться: </i>'
-                   f'<b><i>{direction_word}</i></b> {direction_arrow}\n\n')
+                   f'<b><i>{direction_word}</i></b>\n\n')
     dg_message += ('<emoji id="5337068216189464647">🤔</emoji> <i>Поиск точки входа занимает </i>'
                    '<b><i>до 2-х минут времени</i></b>\n\n')
     dg_message += ('<emoji id="5337068216189464647">🤔</emoji> <i>Сейчас подготовьте сумму для перекрытия согласно '
@@ -182,13 +180,13 @@ def minus_dogon_message():
     # сообщение об итоге догона (входные данные, итоговые данные)
     :return: текст поста
     """
-    s_message = f'<i>Валютная пара: <b>{option_data.name_emoji}</b></i> {option_data.trade_emoji}\n\n'
+    asset_label = 'Торговый актив' if binary else 'Торговый актив OTC'
+    s_message = f'<i>{asset_label}: <b>{option_data.name_emoji}</b></i> {option_data.trade_emoji}\n\n'
     s_message += (f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> '
                   f'<emoji id="5231200819986047254">📊</emoji>\n')
     s_message += (f'<b><i>Котировка закрытия: {option_data.itg_price:.{option_data.round}f}</i></b> '
                   f'<emoji id="5451882707875276247">🕯</emoji>\n\n')
     s_message += f'<i>Итог прогноза: <b><u>МИНУС</u></b></i> <emoji id="5390874368177873184">❌</emoji>\n\n'
-    s_message += f'<i>{random.choice(minus_fraze)}</i> <emoji id="4927486932113425461">❗️</emoji>'
     return s_message
 
 
@@ -262,7 +260,7 @@ def plus_message(count: int) -> str:
             f'{_PLUS_BOLT}\n\n'),
         40: _plus_head('4О') + (
             f'<i>Мы сделали 4О прогнозов в ПЛЮС подряд за счёт индивидуального подбора лучших ситуаций на рынке! '
-            f'Работает AI от Smoke FX, который сканирует все валютные пары для Binary Options! Ориентировочная сумма'
+            f'Работает AI от Smoke FX, который сканирует все торговые активы для Binary Options! Ориентировочная сумма'
             f' прибыли составляет <u>275.ООО₽  чистыми</u>! Не забывайте о том, что, Smoke FX тащит как '
             f'настоящий дед!</i> {_PLUS_BOLT}\n\n'),
         45: _plus_head('45') + (
@@ -336,9 +334,9 @@ def start_message():
     message += ('<blockquote>'
                 '<emoji id="5021712394259268143">🟡</emoji> <i>Пересматривайте обучающие видео на моём канале ютуб, '
                 'так вы наберетесь больше полезной информации, и сможете проводить правильный разбор графика по '
-                'прогнозам: https://www.youtube.com/@smoke_fx</i>\n'
+                'прогнозам: https://www.youtube.com/@smoke_fx</i>\n\n'
                 '<emoji id="5021712394259268143">🟡</emoji> <i>Занимайтесь практикой, анализируйте график на '
-                'финансовом рынке на сайте tradingview, рекомендую использовать таймфрейм 5 минут!</i>\n'
+                'финансовом рынке на сайте tradingview, рекомендую использовать таймфрейм 5 минут!</i>\n\n'
                 '<emoji id="5021712394259268143">🟡</emoji> <i>Смотрите бесплатные обучающие курсы в открытой группе,'
                 ' чем больше полезной инфы, тем быстрее вы начнёте рубить капусточку!</i>'
                 '</blockquote>\n\n')
