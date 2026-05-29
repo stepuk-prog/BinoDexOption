@@ -86,6 +86,8 @@ async def bot():
 
     for _sig in (signal.SIGTERM, signal.SIGINT):
         try:
+            # *args у add_signal_handler опционален — ложное срабатывание инспекции
+            # noinspection PyArgumentList
             loop.add_signal_handler(_sig, _on_stop_signal)
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен

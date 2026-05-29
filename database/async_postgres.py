@@ -56,6 +56,8 @@ class AsyncDatabase:
                 else:
                     logger.error(f"❌ Не удалось создать пул соединений '{database}' после всех попыток.")
                     raise
+        # Недостижимо: на последней попытке цикл либо вернёт pool, либо пробросит исключение
+        raise RuntimeError(f"Не удалось создать пул соединений '{database}'")
 
     async def connect(self, retries: int = 5, delay: float = 2.0):
         """
