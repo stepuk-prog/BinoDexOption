@@ -9,8 +9,11 @@ NEW_FORECAST_IMAGES = [
     'pictures/new_prognoz/new_prognoz_3.png',
 ]
 
-# Картинка для follow-up «оставь отзыв» (dop_plus_message)
-PLUS_SERIES_IMAGE = 'pictures/new_seria.png'
+# Картинка для follow-up «оставь отзыв» (dop_plus_message → dop_plus10_message)
+PLUS_SERIES_IMAGE = 'pictures/seria_plus.png'
+
+# Серии плюсов: картинка по числу плюсов подряд — pictures/pluses/{N}.png (5, 10, … 50)
+PLUS_IMAGE_DIR = 'pictures/pluses'
 
 # Догоны — выбираем рандомно без повторов внутри одного прогноза.
 # В каждом цикле main() из этого списка берётся перетасованная копия,

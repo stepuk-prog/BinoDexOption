@@ -9,19 +9,17 @@ from playwright.async_api import Page
 
 from apps.browser_app import init_valute_browser
 from apps.exit_app import close_program
-from apps.my_exeptions import lost_connection_photo, lost_connection
+from apps.my_exeptions import lost_connection_photo
 from database import AsyncDatabase
 from logs import init_logger
-from settings.Option_class import Option
-from messages import (main_bug_message, dop_plus10_message, plus50_message, plus5_message,
-                      plus10_message, plus15_message, plus20_message, plus25_message, plus30_message, plus35_message,
-                      plus40_message, plus45_message)
+from classes.Option_class import Option
+from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
 from settings.config import channel_id, option_data, get_app, binary, program_id, shot_path, screenshot_path
 from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
 from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY
-from settings.image_paths import PLUS_SERIES_IMAGE
+from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
 if TYPE_CHECKING:
     from apps.browser_app import BrowserManager
@@ -50,18 +48,6 @@ async def get_database() -> AsyncDatabase:
     return _database
 
 
-def check_work_hour() -> bool:
-    """
-    Проверка времени работы стандартных пар
-    :return:
-    """
-    current_hour = datetime.now().hour
-    if 6 < current_hour < 22:
-        return True
-    else:
-        return False
-
-
 def get_water():
     """Загрузка QR-оверлеев (qr110, qr85)"""
     try:
@@ -79,28 +65,21 @@ async def check_plus():
     kol_plus = await database.plus_counter(program_id=program_id)
     await asyncio.sleep(CHECK_PLUS_DELAY)
 
-    plus_messages = {
-        5: plus5_message,
-        10: plus10_message,
-        15: plus15_message,
-        20: plus20_message,
-        25: plus25_message,
-        30: plus30_message,
-        35: plus35_message,
-        40: plus40_message,
-        45: plus45_message,
-        50: plus50_message,
-    }
+    if not kol_plus:  # False/None — ошибка пула или нет строки счётчика
+        return True, ''
+    plus_milestones = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
+    count = kol_plus['plus']
 
-    if kol_plus['plus'] in plus_messages:
-        message_text = plus_messages[kol_plus['plus']]()
+    if count in plus_milestones:
+        caption = plus_message(count)
+        photo = f'{PLUS_IMAGE_DIR}/{count}.png'
         try:
-            await get_app().send_message(chat_id=channel_id, text=message_text)
+            await get_app().send_photo(chat_id=channel_id, photo=photo, caption=caption)
         except (Exception,) as error:
-            bug_fix = await lost_connection(error=error, text=message_text,
-                                            mes_type=f'сообщение {kol_plus["plus"]} плюс')
+            bug_fix = await lost_connection_photo(error=error, photo=photo, text=caption,
+                                                  mes_type=f'сообщение {count} плюс')
             if not bug_fix[0]:
-                error_text = f'Ошибка отправки сообщения {kol_plus["plus"]} плюс! - {bug_fix[1]}'
+                error_text = f'Ошибка отправки сообщения {count} плюс! - {bug_fix[1]}'
                 return False, error_text
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
         bug_fix = await dop_plus_message()

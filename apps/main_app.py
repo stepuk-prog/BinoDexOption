@@ -31,7 +31,6 @@ async def main(manager: "BrowserManager", qr):
     logger.info("📑 Доступные страницы: %s", list(manager.pages.keys()))
 
     if binary:
-        pic_str = ''
         logger.info("🔍 Вызов find_option_data...")
         await find_option_data(manager=manager, log_data=option_data, used_val=used_val)
         logger.info("✅ find_option_data завершён")
@@ -39,7 +38,6 @@ async def main(manager: "BrowserManager", qr):
         screen_shot = await screenshot(manager=manager, screen=None, qr=qr)
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
-        pic_str = '_otc'
         result = await parce_otc(manager=manager, log_data=option_data, valute=used_val)
         if not result:
             return await exit_main(channel_mess=False, result=False,
@@ -70,7 +68,7 @@ async def main(manager: "BrowserManager", qr):
             return await exit_main(channel_mess=False, result=False, bug_text=bug_fix[1], check_cookies=count_price)
 
     used_val.append(option_data.id_val)
-    if len(used_val) >= 5:
+    if len(used_val) >= 4:  # держим последние 3 id → актив не повторяется в окне из 4 рынков подряд
         del used_val[0]
 
     await asyncio.sleep(BETWEEN_MESSAGES_DELAY)
@@ -141,7 +139,7 @@ async def main(manager: "BrowserManager", qr):
     # Перетасованный список картинок для перекрытий — без повторов в рамках одного прогноза.
     dogon_pool = random.sample(DOGON_IMAGES, len(DOGON_IMAGES))
 
-    for index in range(overlap + 1):
+    for index in range(min(overlap + 1, len(option_data.dogon_par))):
         dogon = option_data.dogon_par[index]
         option_data.dogon_settings(dogon_par=dogon)
         if index + 1 > overlap - overlap_random:
@@ -151,7 +149,7 @@ async def main(manager: "BrowserManager", qr):
         try:
             await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
         except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=message_text,
+            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
                                                   mes_type='первое сообщение о догоне')
             if not bug_fix[0]:
                 return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
@@ -164,7 +162,7 @@ async def main(manager: "BrowserManager", qr):
         try:
             await bot.send_photo(chat_id=channel_id, photo=img, caption=text_message)
         except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=img, text=message_text,
+            bug_fix = await lost_connection_photo(error=error, photo=img, text=text_message,
                                                   mes_type='доп. сообщение догона')
             if not bug_fix[0]:
                 return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
@@ -194,7 +192,7 @@ async def main(manager: "BrowserManager", qr):
         try:
             await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
         except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=message_text,
+            bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
                                                   mes_type='Сообщение о догоне')
             if not bug_fix[0]:
                 return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1], check_cookies=count_price)
@@ -226,7 +224,7 @@ async def main(manager: "BrowserManager", qr):
                 await bot.send_photo(chat_id=channel_id, photo=screenshot_path, caption=text_message)
                 return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
             except (Exception,) as error:
-                bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=message_text,
+                bug_fix = await lost_connection_photo(error=error, photo=screenshot_path, text=text_message,
                                                       mes_type='итоговое сообщение')
                 if not bug_fix[0]:
                     return await exit_main(channel_mess=True, result=False, bug_text=bug_fix[1],

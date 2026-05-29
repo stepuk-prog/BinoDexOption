@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from database import Database
 from pyrogram import Client
-from settings.Option_class import Option
+from classes.Option_class import Option
 from settings.database_config import pg_name_fin
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm

@@ -1,8 +1,8 @@
 /.env
 /files/*
 !/files/.gitkeep
-/logs/option_1m_bin.log
-/logs/option_1m_otc.log
+/logs/option_*.log
+/logs/option_*/
 /pictures/screenshot_1m_bin.png
 /pictures/screenshot_1m_otc.png
 /pictures/shot_1m_bin.png

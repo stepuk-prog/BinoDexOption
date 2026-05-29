@@ -36,6 +36,8 @@ if timeframe in ['1m', '3m', '5m', '10m']:
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')
 elif timeframe == '15m':
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_3')
+else:
+    tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')  # дефолт — чтобы не словить NameError на импорте
 
 #---------- Настройки для OTC-------------------------------------------------------------------------------------------
 otc_setting = database.otc_setting()

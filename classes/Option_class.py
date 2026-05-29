@@ -2,7 +2,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
-from settings.Data_set import spr_timeframe, find_timeframe
+from settings.constant import spr_timeframe, find_timeframe
 from settings.browser_constant import link1, link2
 
 
@@ -353,17 +353,3 @@ class Option:
             return 'минуты'
         else:
             return 'минут'
-
-    @staticmethod
-    def random_otc(par) -> dict:
-        # поиск рандомных параметров для ОТС
-        result_dict = {}
-        if par == 1:
-            mean = random.randint(65, 70)
-        elif par == 2:
-            mean = random.randint(70, 83)
-        else:
-            mean = random.randint(84, 92)
-        mean2 = mean - random.randint(2, 4)
-        result_dict.update(par1=mean2, par2=mean)
-        return result_dict

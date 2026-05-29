@@ -10,6 +10,7 @@ from apps.main_app import main
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id
+from settings.constant import start_trade, weekend
 
 logger = init_logger(__name__)
 
@@ -30,11 +31,11 @@ async def bot():
     if binary:
         if datetime.now().isoweekday() == 1 and datetime.now().hour == 3 and datetime.now().minute < 25:
             try:
-                await app.send_message(chat_id=channel_id, text=start_message())
+                await app.send_photo(chat_id=channel_id, photo=start_trade, caption=start_message())
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки стартового сообщения - {error}')
         if datetime.weekday(datetime.now() + timedelta(hours=2)) >= 5:
-            await app.send_message(chat_id=channel_id, text=weekend_message())
+            await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
             database.close_program(program_id=program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
@@ -94,7 +95,7 @@ async def bot():
                 if not res_option[1]:
                     await asyncio.sleep(await time_sleep())
                     continue
-                await app.send_message(chat_id=channel_id, text=weekend_message())
+                await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
                 await app.stop()
                 database.close_program(program_id=program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')

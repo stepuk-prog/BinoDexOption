@@ -18,7 +18,7 @@ token = os.getenv("TOKEN")
 timeframe = os.getenv("TIMEFRAME", "unknown")
 binary = parse_bool(os.getenv("BINARY"))
 if binary:
-    prog_name = '🎢 Smoke FX FIN'
+    prog_name = '⚡️ Bimodex Smoke FX FIN'
 else:
-    prog_name = '🎲 Smoke FX OTC'
+    prog_name = '⚡️ Bimodex Smoke FX OTC'
 frame = f"{prog_name} — {timeframe} "

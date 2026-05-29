@@ -33,7 +33,8 @@ class Database:
                     user=pg_user,
                     password=pg_password,
                     host=pg_host,
-                    port=pg_port
+                    port=pg_port,
+                    connect_timeout=10
                 )
                 logger.info(f"✅ Подключение к БД '{self.db_name}' через PgBouncer установлено.")
                 return conn
@@ -192,17 +193,6 @@ class Database:
         sql = "SELECT * FROM settings.pocket_settings"
         return self.execute_query_with_retries(sql, fetch_mode='all')
 
-    def option_setting(self, timeframe: str, binary=False):
-        """
-        # поиск настроек для опционов
-        :param timeframe: таймфрейм
-        :param binary: True - если опцион на обычных валютных парах
-        :return: либо результат, если не найден - перезагрузка программы
-        """
-        sql = (f"SELECT * FROM settings.option_setting_view os "
-               f"WHERE os.timeframe = %s AND os.binary = %s")
-        return self.execute_query_with_retries(sql, (timeframe, binary,), fetch_mode='row')
-
     def pages(self, program: str, mode: str):
         """
         Страницы браузера из общей binodex.cookies.pages по (program, mode).
@@ -257,16 +247,6 @@ class Database:
         """
         sql = "SELECT api_id, api_hash, session_string FROM telegram.telegram WHERE id_telegram = %s"
         return self.execute_query_with_retries(sql, (id_telegram,), fetch_mode='row')
-
-    def save_session_string(self, id_telegram: int, session_string: str) -> bool:
-        """
-        Сохранить session string Pyrogram юзербота в Program (telegram.telegram).
-        :param id_telegram: id юзербота (telegram.telegram.id_telegram)
-        :param session_string: строка сессии из Client.export_session_string()
-        :return: True при успехе
-        """
-        sql = "UPDATE telegram.telegram SET session_string = %s WHERE id_telegram = %s"
-        return self.execute_query_with_retries(sql, (session_string, id_telegram), fetch_mode='execute', commit=True)
 
     def tv_cookies(self, user_id: int):
         """

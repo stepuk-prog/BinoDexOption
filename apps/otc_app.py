@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING
 from PIL import Image
 from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeout, WebSocket
 
-from settings.Option_class import Option
-from settings.config import get_app, channel_id, cookies, shot_path, screenshot_path
-from settings.cookie_utils import add_cookies_to_context
+from classes.Option_class import Option
+from settings.config import cookies, shot_path, screenshot_path
+from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
     TIMEOUT_SHORT, TIMEOUT_LONG,
     ELEMENT_RETRY_DELAY, MAX_SCREENSHOT_ATTEMPTS, MAX_PRICE_ATTEMPTS
 )
-from settings.result_types import OperationResult
+from classes.result_types import OperationResult
 from apps.exit_app import close_program
 from database import AsyncDatabase
 from logs import init_logger
@@ -138,13 +138,16 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
     database = await get_database()
     page = manager.pages['main']
     active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
+    if not active_otc_list:  # None/False (ошибка пула) или пустой список
+        return False
     for otc in active_otc_list:
         log_data.add_option_data(otc)
         result = await change_otc(valute=log_data.name, page=page)
         if result == 1:
             log_data.name = log_data.name + ' OTC'
             return True
-        continue
+        if result == 0:  # сбой переключения (а не «пара неактивна») — логируем, пробуем следующую
+            logger.warning(f"Сбой переключения OTC-пары {log_data.name}, пробую следующую")
     return False
 
 
@@ -297,7 +300,7 @@ async def change_otc(valute: str, page: Page) -> int:
         # Находим нужный элемент
         element = await find_valute(page=page)
         if element['active']:
-            await element['element'].click()
+            await element['element'].click(timeout=TIMEOUT_SHORT)
             return 1
         else:
             return 2

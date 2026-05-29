@@ -44,7 +44,8 @@ class AsyncDatabase:
                     database=database,
                     min_size=self.min_size,
                     max_size=self.max_size,
-                    statement_cache_size=0  # Для PgBouncer
+                    statement_cache_size=0,  # Для PgBouncer
+                    command_timeout=30  # таймаут запроса — не зависать на мёртвом соединении
                 )
                 logger.info(f"✅ Пул соединений '{database}' создан (min={self.min_size}, max={self.max_size}).")
                 return pool
@@ -255,32 +256,6 @@ class AsyncDatabase:
         sql = "SELECT * FROM settings.pocket_settings"
         return await self.execute_query(sql, fetch_mode='all', func='otc_setting')
 
-    async def option_setting(self, timeframe: str, binary: bool, program: str) -> dict | None:
-        """
-        Оркестрация настроек экземпляра поверх двух физических БД.
-        База берётся из binodex (option_setting_base), креды юзербота — из Program
-        (telegram_creds), затем склеиваются в один dict. Заменяет кросс-БД вью
-        settings.option_setting_view, который между двумя БД не работает.
-        :param timeframe: Таймфрейм
-        :param binary: True для обычных валютных пар
-        :param program: ключ программы (PROG_KEY) — фильтр своих строк
-        :return: dict с настройками и api_id/api_hash, либо None
-        """
-        option = await self.option_setting_base(timeframe, binary, program)
-        if not option:
-            logger.error(f"Не найдены настройки option_setting для tf={timeframe}, binary={binary}, program={program}")
-            return None
-
-        creds = await self.telegram_creds(id_telegram=option['user_bot'])
-        if not creds:
-            logger.error(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
-            return None
-
-        merged = dict(option)
-        merged['api_id'] = creds['api_id']
-        merged['api_hash'] = creds['api_hash']
-        return merged
-
     async def option_setting_base(self, timeframe: str, binary: bool, program: str) -> dict | bool | None:
         """
         Базовые настройки экземпляра из базы данных опционов (pg_name_fin).
@@ -296,29 +271,6 @@ class AsyncDatabase:
                'WHERE timeframe = $1 AND "binary" = $2 AND program = $3')
         return await self.execute_query(sql, timeframe, binary, program, fetch_mode='row',
                                         func='option_setting_base', use_data_pool=True)
-
-    async def telegram_creds(self, id_telegram: int) -> dict | bool | None:
-        """
-        Креды юзербота из Program — telegram.telegram не переносим.
-        :param id_telegram: id юзербота (option_setting.user_bot)
-        :return: строка с api_id, api_hash, session_string либо None
-        """
-        sql = "SELECT api_id, api_hash, session_string FROM telegram.telegram WHERE id_telegram = $1"
-        return await self.execute_query(sql, id_telegram, fetch_mode='row', func='telegram_creds')
-
-    async def pages_setting(self, timeframe: str) -> list | bool:
-        """
-        Поиск страниц для браузера TradingView.
-        :param timeframe: Таймфрейм
-        :return: Список страниц или False
-        """
-        sql = '''
-            SELECT cp.* FROM cookies.cook_page cp
-            JOIN settings.option_setting os ON cp.user_id = os.cookies_tv
-            WHERE os.timeframe = $1 AND os.binary = true
-            ORDER BY cp.page_id
-        '''
-        return await self.execute_query(sql, timeframe, fetch_mode='all', func='pages_setting')
 
     async def close_program(self, program_id: int) -> bool:
         """

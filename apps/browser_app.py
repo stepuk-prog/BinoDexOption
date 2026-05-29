@@ -12,12 +12,12 @@ from settings.browser_set import browser_launch_options, context_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
     tf_link_price, pop_up2, pop_up3
 from settings.config import cookies, database_fin, binary, prog_key
-from settings.cookie_utils import add_cookies_to_context
+from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
     POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY,
     TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG
 )
-from settings.result_types import BrowserInitResult, OperationResult
+from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
 
@@ -249,11 +249,6 @@ STEALTH_JS = """
 """
 
 
-async def setup_stealth(page: Page):
-    """Добавление скрипта маскировки на страницу"""
-    await page.add_init_script(STEALTH_JS)
-
-
 async def init_browser() -> BrowserInitResult:
     """Инициализация браузера Playwright"""
     try:
@@ -323,7 +318,7 @@ async def open_tv_browser(manager: BrowserManager):
 
                 page = await new_page_info.value
                 manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл
-                await page.wait_for_load_state('domcontentloaded')
+                await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_MEDIUM)
                 await page.set_viewport_size({'width': win_x, 'height': win_y})
                 setup_dialog_handler(page)
             except (Exception,) as error:
@@ -415,7 +410,7 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
         for page_name, page in manager.pages.items():
             logger.info(f"🔄 Переключение валюты на странице: {page_name}")
             await page.bring_to_front()
-            await page.wait_for_load_state('domcontentloaded')
+            await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_MEDIUM)
             await close_dom_popups(page)
 
             # Открыть поиск символа (force-фолбэк на случай перехвата клика оверлеем)
