@@ -45,11 +45,10 @@ async def _close_database():
 
 
 async def _close_telegram_logger():
-    """Финальный report и закрытие aiogram-сессии логгера (последним)."""
+    """Закрытие aiogram-сессии логгера (последним; единственный report о закрытии — в close_program)."""
     try:
         from logs.log_init import close_telegram_bot
-        logger.report("Закрываюсь")              # последнее сообщение в message_channel
-        await asyncio.sleep(LOGGER_FLUSH_DELAY)  # дать aiogram дослать pending-сообщения
+        await asyncio.sleep(LOGGER_FLUSH_DELAY)  # дать aiogram дослать pending-сообщения (последний report)
         await close_telegram_bot()               # aiogram 3.x: закрываем aiohttp-сессию (если бот создан)
     except (Exception,) as e:
         print(f"Ошибка закрытия aiogram-бота: {e}")  # logger уже могут быть погашены

@@ -128,8 +128,7 @@ async def bot():
                 return
 
     # Сюда — только по SIGTERM/SIGINT: помечаем программу остановленной (status=false)
-    # и чисто закрываемся (как штатный выходной выход).
-    logger.report('🛑 Сигнал остановки — graceful shutdown, status=false')
+    # и чисто закрываемся. Единственное сообщение о закрытии шлёт close_program(text=...) ниже.
     try:
         await app.stop()
     except (Exception,):
