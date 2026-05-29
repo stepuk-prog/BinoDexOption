@@ -43,7 +43,11 @@ class BrowserManager:
             if self.playwright:
                 await self.playwright.stop()
         except (Exception,) as e:
-            logger.error(f"Ошибка при закрытии браузера: {e}")
+            # «Connection closed/lost» при закрытии = драйвер уже мёртв (штатная остановка/краш) — не сбой
+            if 'Connection closed' in str(e) or 'Connection lost' in str(e):
+                logger.warning(f"Браузер уже закрыт (соединение с драйвером потеряно): {e}")
+            else:
+                logger.error(f"Ошибка при закрытии браузера: {e}")
 
 
 def setup_dialog_handler(page: Page):

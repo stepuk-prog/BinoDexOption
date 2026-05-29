@@ -1,3 +1,6 @@
+from pyrogram.errors import Unauthorized
+
+from apps.exit_app import session_dead_shutdown
 from logs import init_logger
 from settings.config import get_app, channel_id
 
@@ -14,6 +17,8 @@ async def lost_connection_photo(error, photo, text, mes_type):
     :return: возвращает True, либо False, если исправить ошибку не удалось
     """
     bot = get_app()
+    if isinstance(error, Unauthorized):
+        await session_dead_shutdown(error)  # session мертва — штатный стоп без рестарта (sys.exit)
     if 'Connection lost' in str(error):
         try:
             await bot.restart()

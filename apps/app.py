@@ -217,7 +217,11 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
         return True, price_text or ""
     except (Exception,) as error:
         error_text = f"Не удалось загрузить цену - {error}"
-        logger.error(error_text)
+        # при штатной остановке драйвер уже снесён — это не сбой, не шумим в error-канал
+        if _shutdown_requested:
+            logger.warning(error_text)
+        else:
+            logger.error(error_text)
         return False, error_text
 
 

@@ -3,14 +3,17 @@ import signal
 import sys
 from datetime import datetime, timedelta
 
+from pyrogram.errors import Unauthorized
+
 from apps.app import get_water, time_sleep, request_shutdown
 from apps.browser_app import init_load
-from apps.exit_app import close_program
+from apps.exit_app import close_program, session_dead_shutdown
 from apps.main_app import main
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id
 from settings.constant import start_trade, weekend
+from settings.timing import USERBOT_RETRY_DELAY
 
 logger = init_logger(__name__)
 
@@ -22,11 +25,27 @@ async def bot():
     # Создаём Pyrogram Client внутри event loop
     app = get_app()
 
-    try:
-        await app.start()
-    except (Exception,) as error:
-        logger.error(f"Не прогрузился юзер-бот. Останавливаюсь и жду решения проблемы. Ошибка {error}")
-        sys.exit(0)
+    # Запуск юзербота. Недействительная session → штатный стоп с записью в БД и алертом,
+    # без перезапуска (пока не обновят данные). Прочие сбои — до 5 попыток переподключения.
+    attempts = 5
+    for attempt in range(1, attempts + 1):
+        try:
+            await app.start()
+            break
+        except Unauthorized as error:
+            await session_dead_shutdown(error)
+        except (Exception,) as error:
+            logger.warning(f"Попытка {attempt}/{attempts} запуска юзербота не удалась: {error}")
+            try:
+                if getattr(app, "is_connected", False):
+                    await app.stop()
+            except (Exception,):
+                pass
+            if attempt < attempts:
+                await asyncio.sleep(USERBOT_RETRY_DELAY)
+            else:
+                logger.error(f"Юзербот не подключился после {attempts} попыток: {error}")
+                sys.exit(1)
 
     if binary:
         if datetime.now().isoweekday() == 1 and datetime.now().hour == 3 and datetime.now().minute < 25:

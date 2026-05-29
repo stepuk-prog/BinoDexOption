@@ -89,3 +89,19 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     await _close_telegram_logger()
 
     sys.exit(status)
+
+
+async def session_dead_shutdown(error):
+    """
+    Недействительна session юзербота → штатный стоп: ошибка в error-канал, отдельный
+    алерт (как cookies), запись status=false в БД, graceful-выход (status=0, без рестарта,
+    пока не обновят session). Вызывается и на старте, и при отвале во время отправки.
+    """
+    from settings.config import database, program_id  # lazy — избегаем циклических импортов
+    logger.error(f"Недействительна session юзербота: {error}")
+    logger.cookies("🔒 Отвал юзербота — недействительна session, требуется обновление данных. Останавливаюсь.")
+    try:
+        database.close_program(program_id=program_id)
+    except (Exception,) as e:
+        logger.warning(f"Не удалось записать close_program в БД: {e}")
+    await close_program(manager=None, status=0, text="Отвал юзербота (session) 🔒")
