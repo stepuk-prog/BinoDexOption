@@ -105,28 +105,9 @@ async def main():
     app = get_app()
     app.sleep_threshold = 300  # сам пережидать FLOOD_WAIT до 5 мин, а не падать
     async with app:
-        await _block(app, 'Стартовое сообщение (подготовка актива)', first_message, NEW_FORECAST_IMAGES[0])
-        await _block(app, 'Аналитика и прогноз', second_message, SCREENSHOT)
-
-        def _third_plus():
-            option_data.plus, option_data.vozvrat = True, False
-            return third_message()
-
-        def _third_vozvrat():
-            option_data.plus, option_data.vozvrat = False, True
-            return third_message()
-
-        await _block(app, 'Итог прогноза — плюс', _third_plus, SCREENSHOT)
-        await _block(app, 'Итог прогноза — возврат', _third_vozvrat, SCREENSHOT)
-
-        _dogon_desc = ['Подготовка 1-го перекрытия (догон)', 'Подготовка 2-го перекрытия',
-                       'Подготовка следующего перекрытия']
-        for i in range(3):
-            await _block(app, _dogon_desc[i], lambda i=i: prepare_dogon_message(i), SCREENSHOT)
-
-        await _block(app, 'Условия повторного входа (догон)', dop_dogon_message, DOGON_IMAGES[0])
-        await _block(app, 'Сообщение о перекрытии', dogon_message, SCREENSHOT)
-        await _block(app, 'Итог догона — минус', minus_dogon_message, SCREENSHOT)
+        for n in (5, 10, 15, 20, 25, 30, 35, 40, 45, 50):
+            await _block(app, f'Серия {n} плюсов подряд', lambda n=n: plus_message(n),
+                        f'{PLUS_IMAGE_DIR}/{n}.png')
 
     print('✅ Готово')
 
