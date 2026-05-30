@@ -9,7 +9,7 @@ from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
-    tf_link_price, pop_up2, pop_up3
+    tf_link_price, pop_up2, pop_up3, scope_chip
 from settings.config import cookies, database, binary, prog_key
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
@@ -360,6 +360,22 @@ async def _reset_search_category(page) -> None:
         logger.warning(f"Не удалось сбросить категорию поиска TV: {e}")
 
 
+async def _remove_fxcm_chip(page) -> None:
+    """Снятие вторичного чипа биржи (FXCM-scope) в диалоге поиска. TV запоминает scope
+    после выбора FXCM-символа и иначе отсеивает поиск по формату EXCHANGE:SYMBOL.
+    Без падений (если чипа нет — просто выходим)."""
+    chip = page.locator(scope_chip).first
+    try:
+        if await chip.count() > 0 and await chip.is_visible():
+            # Сначала крестик × внутри чипа, иначе повторный клик по чипу снимает фильтр
+            try:
+                await chip.locator("button").first.click(timeout=TIMEOUT_SHORT)
+            except (Exception,):
+                await chip.click(timeout=TIMEOUT_SHORT)
+    except (Exception,) as e:
+        logger.warning(f"Не удалось снять FXCM-чип поиска TV: {e}")
+
+
 async def _click_fxcm_pair(page, pair: str) -> bool:
     """Клик по FXCM-строке в диалоге поиска по data-symbol-name="FX:<pair>" + фолбэки.
     Строки рендерятся через overlap-manager-root → ищем на уровне page; visibility
@@ -425,6 +441,8 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
             # Сброс категории на «Все» (sticky-фильтр TV иначе ломает поиск).
             # Диалог дождётся через wait_for внутри — фиксированный sleep не нужен.
             await _reset_search_category(page)
+            # И снятие FXCM-чипа: иначе scope от прошлого выбора отсеивает EXCHANGE:SYMBOL.
+            await _remove_fxcm_chip(page)
 
             # Ввод символа в формате FX:<pair> (FXCM): exchange-префикс поднимает
             # нужный фид наверх вместо строк всех провайдеров.
