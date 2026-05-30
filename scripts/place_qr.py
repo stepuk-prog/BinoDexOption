@@ -16,8 +16,8 @@ from PIL import Image
 
 from settings.screenshot_set import qr110_x, qr110_y, qr85_x, qr85_y, otc_qr_x, otc_qr_y
 
-QR110_PATH = "pictures/qr-code_110.png"
-QR85_PATH = "pictures/qr-code_85.png"
+QR110_PATH = "../pictures/qr-code_110.png"
+QR85_PATH = "../pictures/qr-code_85.png"
 
 
 def _newest_shot() -> Path | None:
@@ -34,7 +34,7 @@ def _load_overlay(path: str):
 def _config(mode: str):
     """(shot, out, spec): spec = [(key, путь_к_QR, стартовая_координата), ...]."""
     if mode == 'otc':
-        return (Path("pictures/shot_1m_otc.png"), Path("pictures/screenshot_otc_preview.png"),
+        return (Path("../pictures/shot_1m_otc.png"), Path("pictures/screenshot_otc_preview.png"),
                 [('110', QR110_PATH, (otc_qr_x, otc_qr_y))])
     return (_newest_shot(), Path("pictures/screenshot_preview.png"),
             [('110', QR110_PATH, (qr110_x, qr110_y)), ('85', QR85_PATH, (qr85_x, qr85_y))])
