@@ -43,8 +43,8 @@ def second_message():
     # option_data.name мутируется в otc_app.py до 'AUD/CAD OTC' для скриншота; для текста нужен голый "AUD/CAD"
     name_clean = option_data.name.replace(' OTC', '')
     s_message = f'<i>{asset_label}: </i>{option_data.name_emoji}\n\n'
-    s_message += f'<i>Прогноз:</i> {option_data.message_forecast}\n'
-    s_message += (f'<i>Время экспирации: </i><b><i>{option_data.name_tf.upper()}</i></b> '
+    s_message += f'<i>Прогноз:</i> {option_data.message_forecast.lower()}\n'
+    s_message += (f'<i>Время экспирации: </i><b><i>{option_data.name_tf.lower()}</i></b> '
                   f'<emoji id="5433825729060018456">🧭</emoji>\n')
     s_message += (f'<i>Текущая котировка: </i><b><i>{option_data.price:.{option_data.round}f}</i></b> '
                   f'{option_data.message_emoji_quotation}\n\n')
@@ -169,10 +169,10 @@ def dogon_message():
     :return: текст поста
     """
     if option_data.buy:
-        dg_message = f'<i>Итог прогноза: <b>ПЕРЕКРЫТИЕ ВВЕРХ</b></i> {option_data.trade_emoji}\n'
+        dg_message = f'<i>Итог прогноза: <b>перекрытие вверх</b></i> {option_data.trade_emoji}\n'
     else:
-        dg_message = f'<i>Итог прогноза: <b>ПЕРЕКРЫТИЕ ВНИЗ</b></i> {option_data.trade_emoji}\n'
-    dg_message += f'<i>Время экспирации: <b>{option_data.dgn_time_str.upper()}</b></i> ' \
+        dg_message = f'<i>Итог прогноза: <b>перекрытие вниз</b></i> {option_data.trade_emoji}\n'
+    dg_message += f'<i>Время экспирации: <b>{option_data.dgn_time_str.lower()}</b></i> ' \
                   f'<emoji id="5451646226975955576">⌛️</emoji>\n'
     dg_message += f'<i>Котировка актива: <b>{option_data.price:.{option_data.round}f}</b></i> ' \
                   f'<emoji id="5231200819986047254">📊</emoji>'
