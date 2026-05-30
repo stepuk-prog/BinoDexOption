@@ -252,12 +252,14 @@ def _plus_earn(amount: str) -> str:
 def plus_message(count: int) -> str:
     """
     Подпись к картинке серии плюсов (pictures/pluses/{count}.png).
-    Текст единый для всех порогов; меняется число плюсов (заголовок) и сумма (count × 10000).
+    Текст единый для всех порогов; меняется число плюсов (заголовок) и сумма.
+    Множитель суммы: 5–25 плюсов → ×1000, от 30 → ×10000.
     Кириллические «О» вместо нулей в сумме — анти-модерация.
     :param count: число плюсов подряд (5, 10, … 50)
     :return: текст подписи
     """
-    amount = f"{count * 10000:,}".replace(",", ".").replace("0", "О")
+    multiplier = 1000 if count <= 25 else 10000
+    amount = f"{count * multiplier:,}".replace(",", ".").replace("0", "О")
     # return _plus_head(str(count)) + _plus_earn(amount) # 5→5О.ООО … 50→5ОО.ООО
     return _plus_head(str(count)) + _plus_earn(amount) + pl_mes
 
