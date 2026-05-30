@@ -13,6 +13,21 @@
   (`await database.connect()`). Убраны дублирующие `get_database()` в `apps/app.py`/
   `apps/otc_app.py`; `close_program`/`pages` переведены на `await`.
 
+### Надёжность и чистка (по итогам аудита)
+- `open_tv_browser`: guard на пустой/ошибочный ответ `database.pages` (был краш
+  `enumerate(False)` и осиротевший браузер).
+- `BrowserManager.close`: пошаговое best-effort закрытие — ошибка на page/context
+  больше не мешает `browser.close()`/`playwright.stop()` (нет утечки процессов).
+- Таймауты на всех прямых Pyrogram-отправках (`asyncio.wait_for`, `TG_SEND_TIMEOUT`/
+  `TG_RECONNECT_TIMEOUT`); `_try_send` — таймаут по умолчанию; `my_exeptions`:
+  явный возврат после `session_dead_shutdown` + таймаут на restart+resend.
+- `Option`: `if result:` вместо неверного `is not None` (был латентный `IndexError`);
+  исправлен fallback-глиф 📉 на сигнале «ВХОД ВНИЗ»; блок направления вынесен в
+  `_apply_direction()`. Удалены 12 мёртвых полей и мёртвая ветка `clear_data`.
+- `price_tracker`: удалены `last_message`/`_debug_mode`, проглатывания логируются.
+- `screenshot(...)`: булев `take_shot` вместо игнорируемого `screen='...'`.
+- `messages`: подпись актива вынесена в `_asset_label()`.
+
 ## [2.1.0] - 2026-05-29
 
 ### Рефакторинг и реорганизация

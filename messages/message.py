@@ -1,6 +1,11 @@
 from settings.config import option_data, binary
 
 
+def _asset_label() -> str:
+    """Подпись актива в шапке постов: FIN — «Торговый актив», OTC — «Торговый актив OTC»."""
+    return 'Торговый актив' if binary else 'Торговый актив OTC'
+
+
 def first_message():
     """
     # стартовое сообщение опциона
@@ -29,7 +34,7 @@ def second_message():
     # второе сообщение - пост с аналитикой и прогнозом
     :return: текст поста
     """
-    asset_label = 'Торговый актив' if binary else 'Торговый актив OTC'
+    asset_label = _asset_label()
     sila = '<emoji id="5292142381531931487">🐻</emoji>'
     txt_str = 'продажу'
     if 'ПОКУПАТЬ' in option_data.resume:  # формирование строки вывода для пары Активно покупать
@@ -74,7 +79,7 @@ def third_message():
     """
     price_data = option_data.different_price(start_price=option_data.price, itog_price=option_data.itg_price,
                                              rnd=option_data.round)
-    asset_label = 'Торговый актив' if binary else 'Торговый актив OTC'
+    asset_label = _asset_label()
     kat1 = '<emoji id="5373001317042101552">📈</emoji>'
     kat2 = '<emoji id="5361748661640372834">📉</emoji>'
     raznica = '<emoji id="5431577498364158238">📊</emoji>'
@@ -108,7 +113,7 @@ def prepare_dogon_message(idx: int):
     :param idx: индекс для определения поста
     :return: текст поста
     """
-    asset_label = 'Торговый актив' if binary else 'Торговый актив OTC'
+    asset_label = _asset_label()
     trade_emoji = f'<b><i>{option_data.trade_emoji}</i></b>'
     if idx == 0:
         dop_str = (f'<b><i>Подготовьте перекрытие </i></b>{trade_emoji}<b><i> — </i></b>'
@@ -179,7 +184,7 @@ def minus_dogon_message():
     # сообщение об итоге догона (входные данные, итоговые данные)
     :return: текст поста
     """
-    asset_label = 'Торговый актив' if binary else 'Торговый актив OTC'
+    asset_label = _asset_label()
     s_message = f'<i>{asset_label}: <b>{option_data.name_emoji}</b></i> {option_data.trade_emoji}\n\n'
     s_message += (f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> '
                   f'<emoji id="5231200819986047254">📊</emoji>\n')

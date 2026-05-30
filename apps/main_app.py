@@ -21,11 +21,11 @@ count_price = 0  # счетчик количества одинаковой це
 logger = init_logger(__name__)
 
 
-async def _try_send(bot, photo, caption, mes_type: str, timeout: float | None = None) -> tuple[bool, str]:
-    """Отправка поста с обработкой обрыва связи. Возврат (ok, текст_ошибки)."""
+async def _try_send(bot, photo, caption, mes_type: str, timeout: float = 30.0) -> tuple[bool, str]:
+    """Отправка поста с обработкой обрыва связи и таймаутом (не зависать). Возврат (ok, текст_ошибки)."""
     try:
         coro = bot.send_photo(chat_id=channel_id, photo=photo, caption=caption)
-        await (asyncio.wait_for(coro, timeout=timeout) if timeout else coro)
+        await asyncio.wait_for(coro, timeout=timeout)
         return True, ''
     except asyncio.TimeoutError:
         logger.error("❌ Таймаут отправки (%s)", mes_type)
@@ -49,7 +49,7 @@ async def main(manager: "BrowserManager", qr):
         await find_option_data(manager=manager, log_data=option_data, used_val=used_val)
         logger.info("✅ find_option_data завершён")
         logger.info("📸 Вызов screenshot(screen=None)...")
-        screen_shot = await screenshot(manager=manager, screen=None, qr=qr)
+        screen_shot = await screenshot(manager=manager, take_shot=False, qr=qr)
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
         result = await parce_otc(manager=manager, log_data=option_data, valute=used_val)
@@ -77,7 +77,7 @@ async def main(manager: "BrowserManager", qr):
 
     if binary:
         await find_point(manager, option_data.resume)
-        screen_shot = await screenshot(manager=manager, screen='main', qr=qr)
+        screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
     else:
         page = manager.pages['main']
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
@@ -101,7 +101,7 @@ async def main(manager: "BrowserManager", qr):
     await asyncio.sleep(option_data.option_time)
 
     if binary:
-        screen_shot = await screenshot(manager=manager, screen='itog', qr=qr)
+        screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
     else:
         page = manager.pages['main']
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
@@ -154,7 +154,7 @@ async def main(manager: "BrowserManager", qr):
 
         if binary:
             await find_point(manager=manager, resume=option_data.resume)
-            screen_shot = await screenshot(manager=manager, screen='dogon', qr=qr)
+            screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
         else:
             page = manager.pages['main']
             screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
@@ -179,7 +179,7 @@ async def main(manager: "BrowserManager", qr):
         await asyncio.sleep(option_data.dgn_time)
 
         if binary:
-            screen_shot = await screenshot(manager=manager, screen='itog', qr=qr)
+            screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
         else:
             page = manager.pages['main']
             screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
@@ -197,16 +197,11 @@ async def main(manager: "BrowserManager", qr):
                                                           count=count_price)
 
         if option_data.comparing_lists_dogon():
-            option_data.kol_dogon = index + 1
             text_message = third_message()
             ok, err = await _try_send(bot, screenshot_path, text_message, 'итоговое сообщение')
             if not ok:
                 return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
             return await exit_main(channel_mess=False, result=True, fall=False, check_cookies=count_price)
-
-        index = index + 1
-        if len(option_data.dogon_par) == index:
-            break
 
     option_data.minus = True
     option_data.plus = False

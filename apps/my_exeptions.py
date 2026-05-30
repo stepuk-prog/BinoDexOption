@@ -1,8 +1,11 @@
+import asyncio
+
 from pyrogram.errors import Unauthorized
 
 from apps.exit_app import session_dead_shutdown
 from logs import init_logger
 from settings.config import get_app, channel_id
+from settings.timing import TG_RECONNECT_TIMEOUT
 
 logger = init_logger(__name__)
 
@@ -19,11 +22,15 @@ async def lost_connection_photo(error, photo, text, mes_type):
     bot = get_app()
     if isinstance(error, Unauthorized):
         await session_dead_shutdown(error)  # session мертва — штатный стоп без рестарта (sys.exit)
+        return False, 'Сессия юзербота недействительна'  # явный возврат: не полагаемся только на sys.exit
     if 'Connection lost' in str(error):
         try:
-            await bot.restart()
+            # Таймаут на restart+resend — зависший reconnect не должен вешать цикл (правило 6)
+            await asyncio.wait_for(bot.restart(), timeout=TG_RECONNECT_TIMEOUT)
             logger.error(f'Потеря соединения ({mes_type}). Ошибка - {error}.Переподключился')
-            await bot.send_photo(chat_id=channel_id, photo=photo, caption=text)
+            await asyncio.wait_for(
+                bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
+                timeout=TG_RECONNECT_TIMEOUT)
             return True, ''
         except (Exception,) as err:
             return False, f'Переподключиться не удалось - {err}'

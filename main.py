@@ -105,6 +105,7 @@ async def bot():
         # OTC: подозрение на отвал cookies (одинаковая цена N раз подряд) → перезагрузка
         if not binary and res_option[4] > 2:
             await close_program(manager=manager, status=1, text='Подозрение на отвал cookies')
+            return  # close_program делает sys.exit; явный выход (правило 9)
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —
         # это штатный стоп, не сбой; уходим в graceful-ветку ниже (status=false).
@@ -114,6 +115,7 @@ async def bot():
         if not res_option[0] and res_option[2]:
             await app.stop()
             await close_program(manager=manager, status=1, text=f'Перезагрузка бота ☄️. Ошибка - {res_option[3]}')
+            return  # close_program делает sys.exit; явный выход (правило 9)
 
         # Прерываемый сон: проснёмся сразу при сигнале остановки
         try:

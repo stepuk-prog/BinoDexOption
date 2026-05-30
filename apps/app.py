@@ -61,7 +61,9 @@ async def check_plus():
         caption = plus_message(count)
         photo = f'{PLUS_IMAGE_DIR}/{count}.png'
         try:
-            await get_app().send_photo(chat_id=channel_id, photo=photo, caption=caption)
+            await asyncio.wait_for(
+                get_app().send_photo(chat_id=channel_id, photo=photo, caption=caption),
+                timeout=TG_SEND_TIMEOUT)
         except (Exception,) as error:
             bug_fix = await lost_connection_photo(error=error, photo=photo, text=caption,
                                                   mes_type=f'сообщение {count} плюс')
@@ -100,8 +102,10 @@ async def exit_main(channel_mess: bool,
     plus = False
     if channel_mess and not _shutdown_requested:
         try:
-            await get_app().send_photo(chat_id=channel_id, photo='pictures/bug.png',
-                                       caption=main_bug_message())
+            await asyncio.wait_for(
+                get_app().send_photo(chat_id=channel_id, photo='pictures/bug.png',
+                                     caption=main_bug_message()),
+                timeout=TG_SEND_TIMEOUT)
         except (Exception,) as error:
             logger.error(f'Ошибка отправки сообщения о сбое программы - {error}')
     else:
@@ -211,11 +215,11 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
         return False, error_text
 
 
-async def screenshot(manager: "BrowserManager", screen: str | None, qr) -> tuple[bool, float | str]:
+async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
     """
     Снятие скриншота с окна main.
     :param manager: менеджер браузера
-    :param screen: None — только цена без скриншота; иначе снимаем скрин и кладём QR.
+    :param take_shot: False — только цена без скриншота; True — снимаем скрин и кладём QR.
     :param qr: кортеж (qr110, qr85) — QR-оверлеи
     :return: (success, price или error_message)
     """
@@ -224,7 +228,7 @@ async def screenshot(manager: "BrowserManager", screen: str | None, qr) -> tuple
         if not price_result[0]:
             return False, price_result[1]
 
-        if screen is None:  # если требуется только цена без скриншота
+        if not take_shot:  # если требуется только цена без скриншота
             return True, price_result[1]
 
         # Грузится только окно main — все скрины снимаются с него.
@@ -337,7 +341,9 @@ async def dop_plus_message():
     """Дополнительное сообщение для плюсов"""
     message_text = dop_plus10_message()
     try:
-        await get_app().send_photo(chat_id=channel_id, photo=PLUS_SERIES_IMAGE, caption=message_text)
+        await asyncio.wait_for(
+            get_app().send_photo(chat_id=channel_id, photo=PLUS_SERIES_IMAGE, caption=message_text),
+            timeout=TG_SEND_TIMEOUT)
         return True, ''
     except (Exception,) as error:
         bug_fix = await lost_connection_photo(error=error, photo=PLUS_SERIES_IMAGE, text=message_text,

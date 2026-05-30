@@ -18,20 +18,25 @@ class BrowserManager:
     playwright: Optional[Playwright] = None
 
     async def close(self):
-        """Закрытие браузера и всех страниц"""
-        try:
-            for page in self.pages.values():
-                if not page.is_closed():
-                    await page.close()
-            if self.context:
-                await self.context.close()
-            if self.browser:
-                await self.browser.close()
-            if self.playwright:
-                await self.playwright.stop()
-        except (Exception,) as e:
-            # «Connection closed/lost» при закрытии = драйвер уже мёртв (штатная остановка/краш) — не сбой
-            if 'Connection closed' in str(e) or 'Connection lost' in str(e):
-                logger.warning(f"Браузер уже закрыт (соединение с драйвером потеряно): {e}")
-            else:
-                logger.error(f"Ошибка при закрытии браузера: {e}")
+        """Закрытие браузера и всех страниц.
+
+        Каждый шаг — независимый best-effort: ошибка на раннем (page/context) НЕ должна
+        помешать `browser.close()`/`playwright.stop()`, иначе утечёт Firefox-процесс и драйвер.
+        «Connection closed/lost» = драйвер уже мёртв (штатная остановка/краш) — это не сбой.
+        """
+        steps = (
+            *[(f"page[{name}]", page.close) for name, page in self.pages.items()],
+            ("context", self.context.close if self.context else None),
+            ("browser", self.browser.close if self.browser else None),
+            ("playwright", self.playwright.stop if self.playwright else None),
+        )
+        for label, action in steps:
+            if action is None:
+                continue
+            try:
+                await action()
+            except (Exception,) as e:
+                if 'Connection closed' in str(e) or 'Connection lost' in str(e):
+                    logger.warning(f"{label}: соединение с драйвером уже потеряно — {e}")
+                else:
+                    logger.error(f"Ошибка при закрытии ({label}): {e}")

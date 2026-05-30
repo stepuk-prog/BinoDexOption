@@ -11,9 +11,7 @@ class WebSocketPriceTracker:
 
     def __init__(self):
         self.prices: dict[str, float] = {}  # asset_name -> price
-        self.last_message: str = ""
         self.ws_connected: bool = False
-        self._debug_mode: bool = False  # Отключено
 
     def handle_message(self, payload):
         """Обработка входящего WebSocket сообщения"""
@@ -21,14 +19,9 @@ class WebSocketPriceTracker:
         if isinstance(payload, bytes):
             try:
                 payload = payload.decode('utf-8')
-            except (Exception,):
+            except (Exception,) as error:
+                logger.debug(f"WS: не удалось декодировать payload — {error}")
                 return
-
-        self.last_message = payload
-
-        # Временное логирование для отладки
-        if self._debug_mode and payload.startswith('[['):
-            logger.info(f"WS DATA: {payload[:200]}")
 
         # Парсим данные
         try:
@@ -37,9 +30,9 @@ class WebSocketPriceTracker:
                 data = json.loads(payload)
                 self._parse_stream_data(data)
         except json.JSONDecodeError:
-            pass
-        except (Exception,):
-            pass
+            pass  # шумный поток PocketOption — не-JSON кадры это норма
+        except (Exception,) as error:
+            logger.debug(f"WS: ошибка разбора котировки — {error}")
 
     def _parse_stream_data(self, data):
         """Парсинг потоковых данных котировок PocketOption"""
