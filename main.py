@@ -13,7 +13,7 @@ from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id
 from settings.constant import start_trade, weekend
-from settings.timing import USERBOT_RETRY_DELAY
+from settings.timing import USERBOT_RETRY_DELAY, TG_SEND_TIMEOUT
 
 logger = init_logger(__name__)
 
@@ -21,6 +21,10 @@ logger = init_logger(__name__)
 async def bot():
     """Запуск бота"""
     logger.report('🚀 Стартую')
+
+    # Поднимаем пулы БД (program + binodex) до первого запроса. Раньше get_app/
+    # session_dead_shutdown — последний пишет close_program в БД при отвале юзербота.
+    await database.connect()
 
     # Создаём Pyrogram Client внутри event loop
     app = get_app()
@@ -51,15 +55,19 @@ async def bot():
     if binary:
         if datetime.now().isoweekday() == 1 and datetime.now().hour == 3 and datetime.now().minute < 25:
             try:
-                await app.send_photo(chat_id=channel_id, photo=start_trade, caption=start_message())
+                await asyncio.wait_for(
+                    app.send_photo(chat_id=channel_id, photo=start_trade, caption=start_message()),
+                    timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки стартового сообщения - {error}')
         if datetime.weekday(datetime.now() + timedelta(hours=2)) >= 5:
             try:
-                await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+                await asyncio.wait_for(
+                    app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message()),
+                    timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки сообщения о выходных - {error}')
-            database.close_program(program_id=program_id)
+            await database.close_program(program_id=program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
 
@@ -119,11 +127,13 @@ async def bot():
                     await asyncio.sleep(await time_sleep())
                     continue
                 try:
-                    await app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message())
+                    await asyncio.wait_for(
+                        app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message()),
+                        timeout=TG_SEND_TIMEOUT)
                 except (Exception,) as error:
                     logger.error(f'Ошибка отправки сообщения о выходных - {error}')
                 await app.stop()
-                database.close_program(program_id=program_id)
+                await database.close_program(program_id=program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')
                 return
 
@@ -133,7 +143,7 @@ async def bot():
         await app.stop()
     except (Exception,):
         pass
-    database.close_program(program_id=program_id)
+    await database.close_program(program_id=program_id)
     await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
 
 

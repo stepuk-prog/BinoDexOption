@@ -7,7 +7,7 @@ from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeou
 
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker
-from settings.config import cookies, shot_path, screenshot_path
+from settings.config import cookies, shot_path, screenshot_path, database
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
     TIMEOUT_SHORT, TIMEOUT_LONG,
@@ -15,7 +15,6 @@ from settings.timing import (
 )
 from classes.result_types import OperationResult
 from apps.exit_app import close_program
-from database import AsyncDatabase
 from logs import init_logger
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (input_otc, otc_val_list_close, otc_val_list_open, screen_zone_otc, otcprice,
@@ -29,10 +28,6 @@ PRICE_RE = re.compile(r"\d+\.\d+")
 
 logger = init_logger(__name__)
 
-# Глобальный экземпляр асинхронной базы данных
-_database: AsyncDatabase | None = None
-
-
 # Глобальный трекер цен
 _price_tracker: WebSocketPriceTracker | None = None
 
@@ -45,15 +40,6 @@ def get_price_tracker() -> WebSocketPriceTracker:
     return _price_tracker
 
 
-async def get_database() -> AsyncDatabase:
-    """Получение асинхронного подключения к базе данных."""
-    global _database
-    if _database is None:
-        _database = AsyncDatabase()
-        await _database.connect()
-    return _database
-
-
 async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
     """
     Определение валюты для опциона OTC
@@ -62,7 +48,6 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
     :param valute: список с отработанными валютами
     :return: True в случае успешного завершения
     """
-    database = await get_database()
     page = manager.pages['main']
     active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
     if not active_otc_list:  # None/False (ошибка пула) или пустой список

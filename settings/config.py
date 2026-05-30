@@ -5,13 +5,16 @@ from dotenv import load_dotenv
 from database import Database
 from pyrogram import Client
 from classes.Option_class import Option
-from settings.database_config import pg_name_fin
+from settings._bootstrap import bootstrap_fetch
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
 
 logger = logging.getLogger(__name__)
-database = Database()  # Program: настройки браузера, cookies, telegram, программа
-database_fin = Database(db_name=pg_name_fin)  # binodex: данные опционов и option_setting
+# Единый async-интерфейс к БД (asyncpg, пулы program+binodex). Пулы поднимает
+# main.py::bot через `await database.connect()`; здесь только создаём объект.
+# Конфиг/креды/cookies на старте читаются синхронно через bootstrap_fetch (пулов
+# ещё нет), рантайм-запросы — через методы database.* внутри event loop.
+database = Database()
 
 
 def parse_bool(value: str) -> bool:
@@ -32,7 +35,12 @@ shot_path = f"pictures/shot_{file_suffix}.png"
 screenshot_path = f"pictures/screenshot_{file_suffix}.png"
 log_path = f"logs/option_{file_suffix}.log"
 # Базовые настройки экземпляра — из базы данных опционов (binodex).
-option = database_fin.option_setting_base(timeframe=timeframe, binary=binary, program=prog_key)
+# settings.option_setting общая для нескольких программ → отбираем свои по program.
+option = bootstrap_fetch(
+    'binodex',
+    'SELECT * FROM settings.option_setting '
+    'WHERE timeframe = $1 AND "binary" = $2 AND program = $3',
+    timeframe, binary, prog_key, fetch_mode='row')
 if option is None:
     raise ValueError(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
 test = parse_bool(os.getenv("TEST", "0"))
@@ -48,7 +56,11 @@ if test:
 else:
     channel_id = option['channel_id']
     # Креды юзербота — из Program (telegram.telegram), таблицу не переносим.
-    creds = database.telegram_creds(id_telegram=option['user_bot'])
+    creds = bootstrap_fetch(
+        'program',
+        'SELECT api_id, api_hash, session_string FROM telegram.telegram '
+        'WHERE id_telegram = $1',
+        option['user_bot'], fetch_mode='row')
     if not creds:
         raise ValueError(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
     api_id = creds['api_id']
@@ -57,16 +69,22 @@ else:
     session_string = creds['session_string']
     session_file = f'files/{option["session_file"]}'
 prog_name = option['prog_name']
-# Куки — из Program (cookies.*), не переносим.
+# Куки — из Program (cookies.*), не переносим. jsonb → list[dict] (codec в bootstrap).
 if binary:
-    cookies = database.tv_cookies(user_id=option['cookies_tv'])
+    cookies = bootstrap_fetch(
+        'program', 'SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1',
+        option['cookies_tv'], fetch_mode='val')
 else:
-    cookies = database.get_pocket_cookies(user_id=option['cookies_pocket'])
+    cookies = bootstrap_fetch(
+        'program', 'SELECT cookies FROM cookies.pocket_cookies WHERE user_id = $1',
+        option['cookies_pocket'], fetch_mode='val')
 
 # Test override: подмена OTC-кук через env COOK_OTC (user_id в cookies.pocket_cookies), без правки БД
 cook_otc_override = os.getenv("COOK_OTC")
 if cook_otc_override and not binary:
-    cookies = database.get_pocket_cookies(user_id=int(cook_otc_override))
+    cookies = bootstrap_fetch(
+        'program', 'SELECT cookies FROM cookies.pocket_cookies WHERE user_id = $1',
+        int(cook_otc_override), fetch_mode='val')
     if not cookies:
         raise ValueError(f"COOK_OTC={cook_otc_override}: куки не найдены в cookies.pocket_cookies")
     logger.info("COOK_OTC override: загружены куки для user_id=%s", cook_otc_override)

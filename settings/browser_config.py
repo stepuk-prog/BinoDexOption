@@ -1,7 +1,8 @@
 from apps.setting_app import find_par
-from settings.config import database, timeframe
+from settings.config import timeframe
+from settings._bootstrap import bootstrap_fetch
 
-vib_all_kat = database.tv_setting()
+vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
 
 vib_kat = find_par(data=vib_all_kat, par='vib_kat')
 # Закрытие окна выбора котировок
@@ -40,7 +41,7 @@ else:
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')  # дефолт — чтобы не словить NameError на импорте
 
 #---------- Настройки для OTC-------------------------------------------------------------------------------------------
-otc_setting = database.otc_setting()
+otc_setting = bootstrap_fetch('program', "SELECT * FROM settings.pocket_settings")
 # открытие списка валют OTC
 otc_val_list_open = find_par(data=otc_setting, par='list_open')
 # Выбор места на сайте для отключения списка валют

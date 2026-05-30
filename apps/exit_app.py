@@ -23,25 +23,12 @@ async def _close_userbot():
 
 
 async def _close_database():
-    """Закрытие async-пулов и sync-соединений БД."""
-    # Async-пулы (apps.app / apps.otc_app)
+    """Закрытие пулов БД (единый async-интерфейс settings.config.database)."""
     try:
-        from apps.app import _database as app_db
-        from apps.otc_app import _database as otc_db
-        for db in (app_db, otc_db):
-            if db is not None:
-                await db.close()
+        from settings.config import database  # lazy — избегаем циклических импортов
+        await database.close()
     except (Exception,) as e:
-        logger.warning(f"Ошибка закрытия async-пулов БД: {e}")
-    # Sync-соединения (Program + binodex)
-    try:
-        from settings.config import database, database_fin
-        for db in (database, database_fin):
-            conn = getattr(db, "connection", None)
-            if conn is not None and getattr(conn, "closed", 1) == 0:
-                conn.close()
-    except (Exception,) as e:
-        logger.warning(f"Ошибка закрытия sync-соединений БД: {e}")
+        logger.warning(f"Ошибка закрытия пулов БД: {e}")
 
 
 async def _close_telegram_logger():
@@ -99,7 +86,7 @@ async def session_dead_shutdown(error):
     logger.error(f"Недействительна session юзербота: {error}")
     logger.cookies("🔒 Отвал юзербота — недействительна session, требуется обновление данных. Останавливаюсь.")
     try:
-        database.close_program(program_id=program_id)
+        await database.close_program(program_id=program_id)
     except (Exception,) as e:
         logger.warning(f"Не удалось записать close_program в БД: {e}")
     await close_program(manager=None, status=0, text="Отвал юзербота (session) 🔒")

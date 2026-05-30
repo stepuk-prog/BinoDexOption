@@ -10,23 +10,20 @@ from playwright.async_api import Page
 from apps.browser_app import init_valute_browser
 from apps.exit_app import close_program
 from apps.my_exeptions import lost_connection_photo
-from database import AsyncDatabase
 from logs import init_logger
 from classes.Option_class import Option
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
-from settings.config import channel_id, option_data, get_app, binary, program_id, shot_path, screenshot_path
+from settings.config import (channel_id, option_data, get_app, binary, program_id,
+                            shot_path, screenshot_path, database)
 from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
-from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY
+from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
-# Глобальный экземпляр асинхронной базы данных
-# Инициализируется при первом использовании через get_database()
-_database: AsyncDatabase | None = None
 logger = init_logger(__name__)
 
 # Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
@@ -37,15 +34,6 @@ def request_shutdown():
     """Пометить штатную остановку — подавляет сообщение о сбое (main_bug_message)."""
     global _shutdown_requested
     _shutdown_requested = True
-
-
-async def get_database() -> AsyncDatabase:
-    """Получение асинхронного подключения к базе данных."""
-    global _database
-    if _database is None:
-        _database = AsyncDatabase()
-        await _database.connect()
-    return _database
 
 
 def get_water():
@@ -61,7 +49,6 @@ def get_water():
 
 async def check_plus():
     """Проверка количества плюсов"""
-    database = await get_database()
     kol_plus = await database.plus_counter(program_id=program_id)
     await asyncio.sleep(CHECK_PLUS_DELAY)
 
@@ -93,7 +80,6 @@ async def check_plus():
 
 async def check_minus():
     """Сброс серии плюсов при минусе — инкремент счётчика минусов в БД."""
-    database = await get_database()
     await database.minus_counter(program_id=program_id)
     return True, ''
 
@@ -333,7 +319,6 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     :param log_data: класс с данными
     :return: словарь с данными для опциона
     """
-    database = await get_database()
     active_binary_list = await database.option_data_tv(tf=log_data.find_timeframe, exclude_ids=used_val)
     if not active_binary_list:  # None или пустой список
         await close_program(manager=manager, status=1, text='Не найдено валютных пар для опциона')

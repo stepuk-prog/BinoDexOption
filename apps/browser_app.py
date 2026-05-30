@@ -10,7 +10,7 @@ from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
     tf_link_price, pop_up2, pop_up3
-from settings.config import cookies, database_fin, binary, prog_key
+from settings.config import cookies, database, binary, prog_key
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
     POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY,
@@ -277,7 +277,11 @@ async def open_tv_browser(manager: BrowserManager):
     # Страницы TV из общей binodex.cookies.pages по (program, mode='tv').
     # Таблица содержит только нужные страницы (main, price) в порядке order_idx —
     # main идёт первой (idx == 0), все скриншоты снимаются с неё.
-    list_screen = database_fin.pages(program=prog_key, mode='tv')
+    list_screen = await database.pages(program=prog_key, mode='tv')
+    if not list_screen:  # False (сбой БД) или пусто — без страниц браузер не поднять
+        await close_program(manager=manager, status=1,
+                            text='Не удалось получить страницы браузера из БД')
+        return OperationResult(success=False)
 
     for idx, page_data in enumerate(list_screen):
         page_name = page_data['description']  # ключ из БД: main, price

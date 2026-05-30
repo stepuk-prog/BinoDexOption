@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### БД: единый async-интерфейс (миграция с psycopg2)
+- Синхронный `database/postgres.py` (psycopg2) заменён единым async-классом `Database`
+  на asyncpg: два пула (`program` + `binodex`), json/jsonb-codec, retry и
+  PgBouncer-recovery. `database/async_postgres.py` удалён (слит в `postgres.py`).
+- `settings/_bootstrap.py` — синхронное чтение конфига/кред/cookies на import-time
+  (одноразовые `asyncpg.connect`, свой event loop) до подъёма пулов.
+- `settings/config.py` и `settings/browser_config.py` читают настройки через
+  `bootstrap_fetch`; единый `database = Database()`, пулы поднимаются в `main.py`
+  (`await database.connect()`). Убраны дублирующие `get_database()` в `apps/app.py`/
+  `apps/otc_app.py`; `close_program`/`pages` переведены на `await`.
+
 ## [2.1.0] - 2026-05-29
 
 ### Рефакторинг и реорганизация
