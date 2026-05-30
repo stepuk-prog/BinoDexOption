@@ -32,7 +32,9 @@ async def _init_connection(conn: asyncpg.Connection):
 async def _fetch(db: str, sql: str, args, fetch_mode: str):
     conn = await asyncpg.connect(
         user=pg_user, password=pg_password, host=pg_host, port=pg_port,
-        database=_DB_NAMES[db], statement_cache_size=0, timeout=10,
+        database=_DB_NAMES[db], statement_cache_size=0,
+        timeout=10,           # таймаут установки соединения
+        command_timeout=15,   # таймаут самого запроса — не зависнуть на старте навсегда
     )
     await _init_connection(conn)
     try:

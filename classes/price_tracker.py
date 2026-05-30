@@ -60,13 +60,16 @@ class WebSocketPriceTracker:
             if otc_key in self.prices:
                 return self.prices[otc_key]
 
-            # Ищем частичное совпадение
+            # Ищем частичное совпадение (регистронезависимо по суффиксу _otc)
             for key, price in self.prices.items():
-                key_normalized = key.replace('_otc', '').upper()
+                key_normalized = key.replace('_otc', '').replace('_OTC', '').upper()
                 if normalized.replace('_OTC', '') == key_normalized:
                     return price
+            # asset задан, но не найден — НЕ отдаём цену чужого актива (молча неверная
+            # цена на скриншоте); пусть сработает tooltip-fallback в get_price.
+            return None
 
-        # Вернуть последнюю полученную цену, если актив не указан
+        # asset не указан — последняя полученная цена
         if self.prices:
             return list(self.prices.values())[-1]
         return None

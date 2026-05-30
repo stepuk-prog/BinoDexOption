@@ -84,9 +84,17 @@ class Database:
                     raise
 
     async def connect(self, retries: int = 5, delay: float = 2.0):
-        """Поднимает оба пула. Если один из них падает — всё прерывается."""
-        for name in ('program', 'binodex'):
-            await self._connect_pool(name, retries=retries, delay=delay)
+        """Поднимает оба пула. Идемпотентно (уже поднятый пул не пересоздаём — иначе
+        утечка). При частичном сбое (один пул поднялся, второй упал) закрываем всё
+        перед пробросом — не оставляем висящий пул/соединения к PgBouncer."""
+        try:
+            for name in ('program', 'binodex'):
+                if self._pools[name] is not None:
+                    continue
+                await self._connect_pool(name, retries=retries, delay=delay)
+        except (Exception,):
+            await self.close()
+            raise
 
     async def close(self):
         for name, pool in list(self._pools.items()):

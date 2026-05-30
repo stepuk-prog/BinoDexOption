@@ -150,7 +150,7 @@ def dop_dogon_message():
         direction_word = 'вверх'
         # direction_arrow = '<emoji id="5269460053651366623">📈</emoji>'
     else:
-        direction_word = 'ВНИЗ'
+        direction_word = 'вниз'
         # direction_arrow = '<emoji id="5271811599785534382">📈</emoji>'
     dg_message = ('<b><i><emoji id="5472146462362048818">💡</emoji></i></b>'
                   '<b><i>Условия повторного входа в рынок:</i></b>\n\n')
@@ -173,7 +173,7 @@ def dogon_message():
     else:
         dg_message = f'<i>Итог прогноза: <b>перекрытие вниз</b></i> {option_data.trade_emoji}\n'
     dg_message += f'<i>Время экспирации: <b>{option_data.dgn_time_str.lower()}</b></i> ' \
-                  f'<emoji id="5451646226975955576">⌛️</emoji>\n'
+                  f'<emoji id="5433825729060018456">🧭</emoji>\n'
     dg_message += f'<i>Котировка актива: <b>{option_data.price:.{option_data.round}f}</b></i> ' \
                   f'<emoji id="5231200819986047254">📊</emoji>'
     return dg_message

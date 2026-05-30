@@ -101,7 +101,7 @@ async def bot():
             pass  # Windows — graceful по сигналам недоступен
 
     while not stop_event.is_set():
-        res_option = await main(manager=manager, qr=qr)
+        res_option = await main(manager=manager, qr=qr, stop_event=stop_event)
         # OTC: подозрение на отвал cookies (одинаковая цена N раз подряд) → перезагрузка
         if not binary and res_option[4] > 2:
             await close_program(manager=manager, status=1, text='Подозрение на отвал cookies')

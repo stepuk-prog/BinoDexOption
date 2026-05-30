@@ -100,7 +100,13 @@ async def exit_main(channel_mess: bool,
     :return: result, plus - если окончился плюсом, fall - перезапуск
     """
     plus = False
-    if channel_mess and not _shutdown_requested:
+    # Штатная остановка (SIGTERM/SIGINT): ничего не шлём в канал и не трогаем счётчики —
+    # просто чистим состояние и выходим. Иначе ошибочный выход на shutdown ушёл бы
+    # в plus-ветку (check_plus/dop_plus в канал + инкремент серии).
+    if _shutdown_requested:
+        option_data.clear_data()
+        return result, plus, fall, bug_text, check_cookies
+    if channel_mess:
         try:
             await asyncio.wait_for(
                 get_app().send_photo(chat_id=channel_id, photo='pictures/bug.png',
@@ -162,7 +168,7 @@ async def mouse_move(page: Page, element_xpath: str, move: int) -> bool:
             await page.mouse.move(center_x, center_y)
         return True
     except (Exception,) as error:
-        logger.report(f'Ошибка имитации движения мыши - {error}')
+        logger.warning(f'Ошибка имитации движения мыши - {error}')
         return False
 
 

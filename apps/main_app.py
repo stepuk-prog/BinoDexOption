@@ -35,7 +35,17 @@ async def _try_send(bot, photo, caption, mes_type: str, timeout: float = 30.0) -
         return await lost_connection_photo(error=error, photo=photo, text=caption, mes_type=mes_type)
 
 
-async def main(manager: "BrowserManager", qr):
+async def _sleep_or_stop(stop_event, seconds: float):
+    """Прерываемый сон: вернётся по таймауту ИЛИ при выставленном stop_event
+    (SIGTERM/SIGINT). Иначе долгий sleep(option_time/dgn_time) блокировал бы
+    graceful-shutdown на минуты (риск SIGKILL и недозакрытия БД/браузера)."""
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def main(manager: "BrowserManager", qr, stop_event):
     global used_val, prev_price, count_price
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
@@ -76,7 +86,9 @@ async def main(manager: "BrowserManager", qr):
     await asyncio.sleep(BETWEEN_MESSAGES_DELAY)
 
     if binary:
-        await find_point(manager, option_data.resume)
+        fp_ok, fp_err = await find_point(manager, option_data.resume)
+        if not fp_ok:
+            logger.warning("find_point не нашёл точку входа (%s) — продолжаю по текущей цене", fp_err)
         screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
     else:
         page = manager.pages['main']
@@ -98,7 +110,9 @@ async def main(manager: "BrowserManager", qr):
     if not ok:
         return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-    await asyncio.sleep(option_data.option_time)
+    await _sleep_or_stop(stop_event, option_data.option_time)
+    if stop_event.is_set():  # SIGTERM во время ожидания экспирации — выходим без постов
+        return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
     if binary:
         screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
@@ -153,7 +167,9 @@ async def main(manager: "BrowserManager", qr):
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
 
         if binary:
-            await find_point(manager=manager, resume=option_data.resume)
+            fp_ok, fp_err = await find_point(manager=manager, resume=option_data.resume)
+            if not fp_ok:
+                logger.warning("find_point (догон) не нашёл точку входа (%s) — продолжаю", fp_err)
             screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)
         else:
             page = manager.pages['main']
@@ -176,7 +192,9 @@ async def main(manager: "BrowserManager", qr):
         if not ok:
             return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-        await asyncio.sleep(option_data.dgn_time)
+        await _sleep_or_stop(stop_event, option_data.dgn_time)
+        if stop_event.is_set():  # SIGTERM во время ожидания итога догона — выходим без постов
+            return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
         if binary:
             screen_shot = await screenshot(manager=manager, take_shot=True, qr=qr)

@@ -292,7 +292,7 @@ async def design_customization(page: Page) -> bool:
             span = items.nth(i)
             text = (await span.text_content() or "").strip()
             if text == "S30":
-                await span.click()
+                await span.click(timeout=TIMEOUT_SHORT)
                 break
     except (Exception,) as error:
         logger.error(f'Не удалось выбрать масштаб свечи - {error}')
