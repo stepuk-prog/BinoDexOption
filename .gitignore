@@ -5,8 +5,10 @@
 /logs/option_*/
 /pictures/screenshot_1m_bin.png
 /pictures/screenshot_1m_otc.png
+/pictures/screenshot_3m_otc.png
 /pictures/shot_1m_bin.png
 /pictures/shot_1m_otc.png
+/pictures/shot_3m_otc.png
 /pictures/screenshot_preview.png
 /pictures/screenshot_otc_preview.png
 
@@ -14,3 +16,4 @@
 /.idea/
 __pycache__/
 *.pyc
+/pictures/new/

@@ -11,7 +11,6 @@ def first_message():
     # стартовое сообщение опциона
     :return: текст поста
     """
-    # f_message = f'<a href="{first_pic}">&#8205;</a>'
     f_message = f'<b><i>Подготовьте торговый актив{"" if binary else " OTC"}: {option_data.name_emoji} </i></b>\n\n'
     if binary:
         f_message += (f'<i>Ссылка на торговый актив: <a href="{option_data.link_val}"><b>Жми сюда</b></a></i> '
@@ -120,12 +119,9 @@ def prepare_dogon_message(idx: int):
                    f'<a href="https://teletype.in/@smoke_fx/0IGYyrwdTYX"><b><i> </i></b></a>'
                    f'<b><i>поиск точки входа</i></b> '
                    f'<emoji id="5188217332748527444">🔍</emoji>\n\n')
-    elif idx == 1:
-        dop_str = (f'<b><i>Подготовьте второе перекрытие </i></b>{trade_emoji}'
-                   f'<b><i> — поиск точки входа</i></b> '
-                   f'<emoji id="5188217332748527444">🔍</emoji>\n\n')
     else:
-        dop_str = (f'<b><i>Подготовьте следующее перекрытие </i></b>{trade_emoji}'
+        order_word = 'второе' if idx == 1 else 'следующее'
+        dop_str = (f'<b><i>Подготовьте {order_word} перекрытие </i></b>{trade_emoji}'
                    f'<b><i> — поиск точки входа</i></b> '
                    f'<emoji id="5188217332748527444">🔍</emoji>\n\n')
     price_data = option_data.different_price(start_price=option_data.price, itog_price=option_data.itg_price,
@@ -146,12 +142,7 @@ def dop_dogon_message():
     """
     :return: текст поста
     """
-    if option_data.buy:
-        direction_word = 'вверх'
-        # direction_arrow = '<emoji id="5269460053651366623">📈</emoji>'
-    else:
-        direction_word = 'вниз'
-        # direction_arrow = '<emoji id="5271811599785534382">📈</emoji>'
+    direction_word = 'вверх' if option_data.buy else 'вниз'
     dg_message = ('<b><i><emoji id="5472146462362048818">💡</emoji></i></b>'
                   '<b><i>Условия повторного входа в рынок:</i></b>\n\n')
     dg_message += (f'<emoji id="5337068216189464647">🤔</emoji> <i><b>Повторный</b> вход будет осуществляться: </i>'
@@ -168,10 +159,8 @@ def dogon_message():
     # сообщение о первом догоне в телеграм (данные по валютной паре, время догона, цена входа)
     :return: текст поста
     """
-    if option_data.buy:
-        dg_message = f'<i>Итог прогноза: <b>перекрытие вверх</b></i> {option_data.trade_emoji}\n'
-    else:
-        dg_message = f'<i>Итог прогноза: <b>перекрытие вниз</b></i> {option_data.trade_emoji}\n'
+    direction_word = 'вверх' if option_data.buy else 'вниз'
+    dg_message = f'<i>Итог прогноза: <b>перекрытие {direction_word}</b></i> {option_data.trade_emoji}\n'
     dg_message += f'<i>Время экспирации: <b>{option_data.dgn_time_str.lower()}</b></i> ' \
                   f'<emoji id="5433825729060018456">🧭</emoji>\n'
     dg_message += f'<i>Котировка актива: <b>{option_data.price:.{option_data.round}f}</b></i> ' \
@@ -260,12 +249,10 @@ def plus_message(count: int) -> str:
     """
     multiplier = 1000 if count <= 25 else 10000
     amount = f"{count * multiplier:,}".replace(",", ".").replace("0", "О")
-    # return _plus_head(str(count)) + _plus_earn(amount) # 5→5О.ООО … 50→5ОО.ООО
     return _plus_head(str(count)) + _plus_earn(amount) + pl_mes
 
 
 def dop_plus10_message():
-    # message = f'<a href="https://i.ibb.co/YjfFQxd/photo-2023-06-16-22-15-02.jpg">&#8205;</a>'
     message = ('<b><i>Алгоритм Smoke FX AI выдаёт серию плюсов в ряд!</i></b> '
                '<emoji id="5431449001532594346">⚡️</emoji>\n\n')
     message += ('<i>Если ты принимал участие в торговле <b>и попал на эту серию плюсов</b>, '

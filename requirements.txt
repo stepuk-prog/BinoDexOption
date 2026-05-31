@@ -1,8 +1,7 @@
-Pillow==11.0.0
+Pillow==12.2.0
 playwright==1.57.0
-python-dotenv~=1.1.1
-pyrofork
-tgcrypto-pyrofork
-aiogram==3.17.0
-psycopg2-binary~=2.9.10
-asyncpg~=0.30.0
+python-dotenv~=1.2.2
+pyrofork~=2.3.69
+tgcrypto-pyrofork~=1.2.8
+aiogram==3.28.2
+asyncpg~=0.31.0

@@ -22,7 +22,6 @@ os.environ['TEST'] = '0'
 
 from settings.config import get_app, option_data
 from settings.image_paths import NEW_FORECAST_IMAGES, DOGON_IMAGES, PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
-from settings.constant import weekend as WEEKEND_IMG, start_trade as START_IMG
 import messages.message as msg
 from messages.message import (
     first_message, second_message, third_message, prepare_dogon_message,

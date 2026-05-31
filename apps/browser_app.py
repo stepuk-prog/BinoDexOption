@@ -231,7 +231,15 @@ async def init_browser() -> BrowserInitResult:
     try:
         pw = await async_playwright().start()
         browser = await pw.firefox.launch(**browser_launch_options)
-        context = await browser.new_context(**context_options)
+        # OTC (binodex): контекст со storage_state (Privy держит сессию в localStorage,
+        # одних cookies мало). FIN (TV): обычный контекст, куки добавляются позже add_cookies.
+        if not binary and isinstance(cookies, dict):
+            # cookies здесь — storage_state-dict из jsonb (Playwright принимает обычный dict);
+            # тип StorageState — TypedDict, поэтому инспекцию типа подавляем.
+            # noinspection PyTypeChecker
+            context = await browser.new_context(storage_state=cookies, **context_options)
+        else:
+            context = await browser.new_context(**context_options)
 
         # Добавляем stealth скрипт на уровне контекста (для всех страниц)
         await context.add_init_script(STEALTH_JS)

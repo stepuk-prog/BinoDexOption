@@ -6,6 +6,7 @@ from database import Database
 from pyrogram import Client
 from classes.Option_class import Option
 from settings._bootstrap import bootstrap_fetch
+from settings.logger_config import parse_bool  # единый безопасный парсер (без падения на None)
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
 
@@ -17,9 +18,12 @@ logger = logging.getLogger(__name__)
 database = Database()
 
 
-def parse_bool(value: str) -> bool:
-    """Парсинг bool из строки (поддержка 1/0, true/false, yes/no)"""
-    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+def _env_int(name: str, default: str | None = None) -> int:
+    """int из env с дефолтом; при отсутствии и без дефолта — понятная ошибка вместо TypeError."""
+    value = os.getenv(name, default)
+    if value is None:
+        raise ValueError(f"Не задана обязательная переменная окружения {name}")
+    return int(value)
 
 
 timeframe = os.getenv("TIMEFRAME")
@@ -44,11 +48,11 @@ option = bootstrap_fetch(
 if option is None:
     raise ValueError(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
 test = parse_bool(os.getenv("TEST", "0"))
-overlap = int(os.getenv("OVERLAP"))
+overlap = _env_int("OVERLAP", "0")
 program_id = option['program_id']
-overlap_random = int(os.getenv("OVERLAP_RANDOM"))
+overlap_random = _env_int("OVERLAP_RANDOM", "0")
 if test:
-    channel_id = int(os.getenv("CHANNEL"))
+    channel_id = _env_int("CHANNEL")
     api_id = os.getenv("TEST_API_ID")
     api_hash = os.getenv("TEST_API_HASH")
     session_file = os.getenv("TEST_SESSION_FILE")
@@ -69,24 +73,26 @@ else:
     session_string = creds['session_string']
     session_file = f'files/{option["session_file"]}'
 prog_name = option['prog_name']
-# Куки — из Program (cookies.*), не переносим. jsonb → list[dict] (codec в bootstrap).
+# Куки. FIN (TV) — плоский list[dict] из Program.cookies.tv_cookies (add_cookies).
+# OTC (binodex) — storage_state {cookies, origins} из binodex.cookies.binodex_cookies
+# (Privy держит сессию в localStorage, одних cookies мало → new_context(storage_state=...)).
 if binary:
     cookies = bootstrap_fetch(
         'program', 'SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1',
         option['cookies_tv'], fetch_mode='val')
 else:
     cookies = bootstrap_fetch(
-        'program', 'SELECT cookies FROM cookies.pocket_cookies WHERE user_id = $1',
+        'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',
         option['cookies_pocket'], fetch_mode='val')
 
-# Test override: подмена OTC-кук через env COOK_OTC (user_id в cookies.pocket_cookies), без правки БД
+# Test override: подмена OTC storage_state через env COOK_OTC (user_id в binodex_cookies), без правки БД
 cook_otc_override = os.getenv("COOK_OTC")
 if cook_otc_override and not binary:
     cookies = bootstrap_fetch(
-        'program', 'SELECT cookies FROM cookies.pocket_cookies WHERE user_id = $1',
+        'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',
         int(cook_otc_override), fetch_mode='val')
     if not cookies:
-        raise ValueError(f"COOK_OTC={cook_otc_override}: куки не найдены в cookies.pocket_cookies")
+        raise ValueError(f"COOK_OTC={cook_otc_override}: storage_state не найден в cookies.binodex_cookies")
     logger.info("COOK_OTC override: загружены куки для user_id=%s", cook_otc_override)
 
 # Test override: переадресация основных сигналов в другой канал через env SIGNAL_CHANNEL

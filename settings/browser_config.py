@@ -43,35 +43,19 @@ elif timeframe == '15m':
 else:
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')  # дефолт — чтобы не словить NameError на импорте
 
-#---------- Настройки для OTC-------------------------------------------------------------------------------------------
-otc_setting = bootstrap_fetch('program', "SELECT * FROM settings.pocket_settings")
-# открытие списка валют OTC
-otc_val_list_open = find_par(data=otc_setting, par='list_open')
-# Выбор места на сайте для отключения списка валют
-otc_val_list_close = find_par(data=otc_setting, par='list_close_header')
-# Класс окна поиска валют (input)
-input_otc = find_par(data=otc_setting, par='input_otc')
-# tooltip с ценой
-otcprice = find_par(data=otc_setting, par='price_css')
-# Зона для скриншота
-screen_zone_otc = find_par(data=otc_setting, par='screen_zone_class')
-# страница в Pocket для торговли OTC
-otc_screen = 'https://pocketoption.com/ru/cabinet/quick-high-low/'
-# Текущая выбранная валюта
-tek_val = find_par(data=otc_setting, par='tek_val_css')
-# Кнопка выбора таймфрейма
-timeframe_otc = find_par(data=otc_setting, par='timeframe')
-# Элемент H4 в списке таймфремов
-change_tf = find_par(data=otc_setting, par='change_tf')
-# Включение окна выбора масштаба свечи
-chart_type = find_par(data=otc_setting, par='chart_type')
-# Выбор масштаба свечи
-s30 = find_par(data=otc_setting, par='s30_css')
-# Список валютных пар
-list_valute_css = find_par(data=otc_setting, par='list_valute_css')
-# Имя валютной пары в списке
-name_valute_list_css = find_par(data=otc_setting, par='name_valute_list_css')
-# Процент по выплате по валютной паре
-percent_value = find_par(data=otc_setting, par='percent_value')
-# Кнопка Google - проверка на загрузку Cookies
-check_google = find_par(data=otc_setting, par='check_google')
+#---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
+# Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).
+# Страница OTC берётся из binodex.cookies.pages (bino_option/otc), не хардкодим.
+otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_settings")
+# Открытие/закрытие окна выбора актива (одна кнопка-переключатель)
+otc_select_pair = find_par(data=otc_setting, par='select_pair_add')
+# Кнопка категории «Валюты» в модалке выбора
+otc_category_valute = find_par(data=otc_setting, par='category_valute')
+# Поле ввода имени пары (div-обёртка; реальный input внутри)
+otc_input_pair = find_par(data=otc_setting, par='input_pair')
+# Элемент пары в списке модалки (текст: '<pair> OTC <payout>%')
+otc_modal_pair_item = find_par(data=otc_setting, par='modal_pair_item')
+# Текущая выбранная пара в сайдбаре (проверка на 'OTC')
+otc_tek_val = find_par(data=otc_setting, par='tek_val')
+# Зона графика для скриншота (canvas)
+screen_zone_otc = find_par(data=otc_setting, par='screen_zone')

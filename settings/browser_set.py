@@ -10,8 +10,6 @@ browser_launch_options = {
     'firefox_user_prefs': {
         # Отключить детекцию webdriver
         'dom.webdriver.enabled': False,
-        # Скрыть признаки автоматизации
-        'useragentoverride': useragent,
         # Отключить телеметрию
         'toolkit.telemetry.enabled': False,
         'toolkit.telemetry.unified': False,

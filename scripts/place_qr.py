@@ -1,8 +1,8 @@
 """Интерактивный подбор координат QR-оверлеев на скрине (FIN: 2 QR, OTC: 1 QR).
 
-Запуск (нужен интерактивный терминал):
-    python place_qr.py            # FIN: QR110 + QR85, самый свежий pictures/shot*.png
-    python place_qr.py otc        # OTC: QR110, pictures/shot_1m_otc.png
+Запуск (из корня проекта, нужен интерактивный терминал):
+    python scripts/place_qr.py            # FIN: QR110 + QR85, самый свежий pictures/shot*.png
+    python scripts/place_qr.py otc        # OTC: QR110, pictures/shot_1m_otc.png
 
 Команды: 'x y' — переместить активный QR; для FIN '110'/'85' — переключить активный; Enter — выход.
 Стартовые координаты берутся из settings/screenshot_set.py; подобранные значения перенеси туда же.
@@ -12,16 +12,20 @@ import os
 import sys
 from pathlib import Path
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)  # корень проекта в sys.path — для импорта settings.* при запуске из scripts/
+
 from PIL import Image
 
 from settings.screenshot_set import qr110_x, qr110_y, qr85_x, qr85_y, otc_qr_x, otc_qr_y
 
-QR110_PATH = "../pictures/qr-code_110.png"
-QR85_PATH = "../pictures/qr-code_85.png"
+_PICS = os.path.join(_ROOT, "pictures")
+QR110_PATH = os.path.join(_PICS, "qr-code_110.png")
+QR85_PATH = os.path.join(_PICS, "qr-code_85.png")
 
 
 def _newest_shot() -> Path | None:
-    shots = sorted(glob.glob("pictures/shot*.png"), key=os.path.getmtime, reverse=True)
+    shots = sorted(glob.glob(os.path.join(_PICS, "shot*.png")), key=os.path.getmtime, reverse=True)
     return Path(shots[0]) if shots else None
 
 
@@ -34,9 +38,9 @@ def _load_overlay(path: str):
 def _config(mode: str):
     """(shot, out, spec): spec = [(key, путь_к_QR, стартовая_координата), ...]."""
     if mode == 'otc':
-        return (Path("../pictures/shot_1m_otc.png"), Path("pictures/screenshot_otc_preview.png"),
+        return (Path(_PICS) / "shot_1m_otc.png", Path(_PICS) / "screenshot_otc_preview.png",
                 [('110', QR110_PATH, (otc_qr_x, otc_qr_y))])
-    return (_newest_shot(), Path("pictures/screenshot_preview.png"),
+    return (_newest_shot(), Path(_PICS) / "screenshot_preview.png",
             [('110', QR110_PATH, (qr110_x, qr110_y)), ('85', QR85_PATH, (qr85_x, qr85_y))])
 
 

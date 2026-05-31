@@ -11,9 +11,9 @@ qr85_y = 850    # QR85 по вертикали
 # размеры окна для скрина (viewport в Playwright)
 win_x_otc = 1712
 win_y_otc = 990  # было 910, добавлено ~80px для компенсации
-# координата QR на OTC-скрине (один QR — qr-code_110)
-otc_qr_x = 1320
-otc_qr_y = 820
+# координата QR на OTC-скрине (один QR — qr-code_110); подобрано под binodex-канвас 1452×870
+otc_qr_x = 1340
+otc_qr_y = 757
 
 
 def paste_overlay(img, overlay, x, y):

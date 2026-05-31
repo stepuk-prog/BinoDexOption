@@ -3,7 +3,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from logs import init_logger
-from settings.timing import LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY
+from settings.timing import LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY, SHUTDOWN_STEP_TIMEOUT
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -17,7 +17,7 @@ async def _close_userbot():
         from settings.config import get_app  # lazy — избегаем циклических импортов
         app = get_app()
         if getattr(app, "is_connected", False):
-            await app.stop()
+            await asyncio.wait_for(app.stop(), timeout=SHUTDOWN_STEP_TIMEOUT)
     except (Exception,) as e:
         logger.warning(f"Ошибка остановки юзербота: {e}")
 
@@ -52,7 +52,7 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     # 1. Браузер (на ранних выходах manager может отсутствовать)
     if manager is not None:
         try:
-            await manager.close()
+            await asyncio.wait_for(manager.close(), timeout=SHUTDOWN_STEP_TIMEOUT)
         except (Exception,) as e:
             logger.warning(f"Ошибка закрытия браузера: {e}")
 

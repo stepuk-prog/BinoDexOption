@@ -9,7 +9,6 @@
 (одноразовые коннекты ДО создания этих пулов).
 """
 import asyncio
-import json
 from typing import Awaitable, cast
 
 import asyncpg
@@ -17,7 +16,7 @@ from asyncpg.exceptions import (CannotConnectNowError, ConnectionDoesNotExistErr
                                 InterfaceError)
 
 from logs import init_logger
-from settings.database_config import (pg_name, pg_name_fin, pg_user,
+from settings.database_config import (DB_NAMES, init_json_codec, pg_user,
                                       pg_password, pg_host, pg_port)
 
 logger = init_logger(__name__)
@@ -30,19 +29,8 @@ _PGBOUNCER_RECOVERABLE = (
     "canceling statement due to",
 )
 
-# Ключи пулов → имена БД. 'program' — Program, 'binodex' — база данных опционов.
-_DB_NAMES = {'program': pg_name, 'binodex': pg_name_fin}
-
 # Таймаут ожидания свободного соединения из пула (правило: не зависать).
 _ACQUIRE_TIMEOUT = 30
-
-
-async def _init_connection(conn: asyncpg.Connection):
-    """json/jsonb codec — иначе asyncpg отдаёт их как str (psycopg2 парсил сам)."""
-    for t in ('json', 'jsonb'):
-        await conn.set_type_codec(
-            t, encoder=json.dumps, decoder=json.loads, schema='pg_catalog'
-        )
 
 
 class Database:
@@ -58,7 +46,7 @@ class Database:
         }
 
     async def _connect_pool(self, name: str, retries: int = 5, delay: float = 2.0):
-        db_name = _DB_NAMES[name]
+        db_name = DB_NAMES[name]
         for attempt in range(1, retries + 1):
             try:
                 pool_factory = cast(Awaitable[asyncpg.Pool], asyncpg.create_pool(
@@ -68,7 +56,7 @@ class Database:
                     statement_cache_size=0,   # обязательно для PgBouncer transaction mode
                     timeout=10,
                     command_timeout=30,       # не зависать на мёртвом соединении
-                    init=_init_connection,
+                    init=init_json_codec,
                 ))
                 self._pools[name] = await pool_factory
                 logger.info(f"✅ Пул '{name}' (→ {db_name}) создан "

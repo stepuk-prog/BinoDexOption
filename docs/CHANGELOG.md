@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Аудит и оптимизация
+- env: дефолты/валидация (`OVERLAP`/`OVERLAP_RANDOM`/`PG_PORT`, обязательные каналы) —
+  понятная ошибка вместо `TypeError` на отсутствующем env; добавлен `.env.example`.
+- OTC `select_otc_pair`: слепые `asyncio.sleep` → auto-wait (ожидание поля ввода и
+  нужного пункта списка); `_close_pair_modal` — поллинг до закрытия вместо фикс-пауз.
+  Проверено на живом binodex (выбор пары ~1.15с против ~4с, скриншот + цена ок).
+- `Option`: убран вводящий в заблуждение `@dataclass` при ручном `__init__`
+  (поля → обычные атрибуты-дефолты, мутабельный `dogon_par` только в `__init__`).
+- Дедуп: `init_json_codec`/`DB_NAMES` в `database_config` (общие для `postgres.py`
+  и `_bootstrap.py`), единый `parse_bool`, `_close_popup` в `app.py`.
+- `main.py`: прерываемый сон на выходных (SIGTERM не зависает), `datetime.now()` один раз.
+- Логгер: ссылки на fire-and-forget задачи отправки + таймаут; `exit_app`:
+  таймауты на закрытие браузера/юзербота; `screenshot_otc` отдаёт текст ошибки.
+- Чистка: удалён неиспользуемый `psycopg2-binary` (БД на asyncpg), мёртвая
+  `MAX_PRICE_ATTEMPTS`, невалидный pref `useragentoverride`, закомментированный код
+  в `messages`; удалён устаревший `docs/MIGRATION_SELENIUM_TO_PLAYWRIGHT.md`.
+- Доки: README (структура), DEPLOY (`PROG_KEY`, путь `Binodex`), service-файлы (путь).
+
 ### БД: единый async-интерфейс (миграция с psycopg2)
 - Синхронный `database/postgres.py` (psycopg2) заменён единым async-классом `Database`
   на asyncpg: два пула (`program` + `binodex`), json/jsonb-codec, retry и
@@ -18,7 +36,7 @@
   `enumerate(False)` и осиротевший браузер).
 - `BrowserManager.close`: пошаговое best-effort закрытие — ошибка на page/context
   больше не мешает `browser.close()`/`playwright.stop()` (нет утечки процессов).
-- Таймауты на всех прямых Pyrogram-отправках (`asyncio.wait_for`, `TG_SEND_TIMEOUT`/
+- Таймауты на всех прямых Pyrogram-отправках (`asyncio.wait_for`, `TG_SEND_TIMEOUT`/да
   `TG_RECONNECT_TIMEOUT`); `_try_send` — таймаут по умолчанию; `my_exeptions`:
   явный возврат после `session_dead_shutdown` + таймаут на restart+resend.
 - `Option`: `if result:` вместо неверного `is not None` (был латентный `IndexError`);

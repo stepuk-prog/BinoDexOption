@@ -1,59 +1,57 @@
 import random
-from dataclasses import dataclass, field
-from typing import List
 
 from settings.constant import spr_timeframe, find_timeframe
 from settings.browser_constant import link1, link2
 
 
-@dataclass  # Класс структуры хранения данных в списке
-class Option:
+class Option:  # Класс структуры хранения данных в списке
+    # Классовые атрибуты-дефолты (общие fallback'и; экземпляр заполняют __init__ /
+    # clear_data / fill_*). Все дефолты неизменяемые — общего мутабельного состояния нет.
+    # dogon_par (изменяемый список) намеренно не объявлен здесь, а задаётся только в __init__.
     # параметры программы
-    binary: bool = field(default=False)  # True - стандартные опционы, False - опционы OTC
-    timeframe: str = field(default='')  # рабочий таймфрейм
-    search_tf: str = field(default='')  # обозначение таймфрейма для поиска
-    name_tf: str = field(default='')  # обозначение таймфрейма для постов
-    link_val: str = field(default='')  # ссылка на валютную пару в TradingView
-    start_random: int = field(default=0)  # стартовая позиция рандома для поиска параметров уровней ПС
-    end_random: int = field(default=0)  # финишная позиция рандома для поиска параметров уровней ПС
-    option_time: int = field(default=0)  # время опциона в сек
-    dogon_par: List[int] = field(default_factory=list)  # значения догонов
+    binary: bool = False  # True - стандартные опционы, False - опционы OTC
+    timeframe: str = ''  # рабочий таймфрейм
+    search_tf: str = ''  # обозначение таймфрейма для поиска
+    name_tf: str = ''  # обозначение таймфрейма для постов
+    link_val: str = ''  # ссылка на валютную пару в TradingView
+    start_random: int = 0  # стартовая позиция рандома для поиска параметров уровней ПС
+    end_random: int = 0  # финишная позиция рандома для поиска параметров уровней ПС
+    option_time: int = 0  # время опциона в сек
     # настройки валютной пары
-    name: str = field(default='')  # название валюты
-    id_val: int = field(default=0)  # id валюты
-    browser_name: str = field(default='')  # название валюты для поиска в браузере
-    name_emoji: str = field(default='')  # название валюты с эмодзи
-    round: int = field(default=0)  # параметры округления
-    coefficient: float = field(
-        default=0.0)  # коэффициент для перерасчета параметров, если таймфреймы для поиска совпадают
+    name: str = ''  # название валюты
+    id_val: int = 0  # id валюты
+    browser_name: str = ''  # название валюты для поиска в браузере
+    name_emoji: str = ''  # название валюты с эмодзи
+    round: int = 0  # параметры округления
+    coefficient: float = 0.0  # коэффициент для перерасчета параметров, если таймфреймы для поиска совпадают
     # параметры индикаторов (рендерятся в постах)
-    volume_profile: str = field(default='')  # параметр Объемный профиль
-    interest: str = field(default='')  # параметр Усредненный интерес
-    paritet: str = field(default='')  # параметр Паритет объёмного баланса
-    direction_force: str = field(default='')  # параметр Сила направления движения
-    itog_stat: str = field(default='')  # параметр Итоговая статистика успешного исхода сделки
-    dogon: str = field(default='')  # параметр Вероятность использования перекрытий
+    volume_profile: str = ''  # параметр Объемный профиль
+    interest: str = ''  # параметр Усредненный интерес
+    paritet: str = ''  # параметр Паритет объёмного баланса
+    direction_force: str = ''  # параметр Сила направления движения
+    itog_stat: str = ''  # параметр Итоговая статистика успешного исхода сделки
+    dogon: str = ''  # параметр Вероятность использования перекрытий
     # параметры опциона
-    resume: str = field(default='')  # направление опциона
+    resume: str = ''  # направление опциона
 
-    buy: bool = field(default=False)  # если опцион на покупку
-    sell: bool = field(default=False)  # True, если опцион на продажу
-    trade_emoji: str = field(default='')  # эмодзи для отражения направления опциона
-    support: str = field(default='')  # уровень поддержки
-    resistance: str = field(default='')  # уровень сопротивления
-    price: float = field(default=0)  # цена входа
-    itg_price: float = field(default=0)  # цена итога опциона пятизначная
-    plus: bool = field(default=False)  # True, если опцион в плюс
-    minus: bool = field(default=False)  # True, если опцион в минус
-    vozvrat: bool = field(default=False)  # True, если опцион возврат
-    dgn: bool = field(default=False)  # True, если нужен догон
+    buy: bool = False  # если опцион на покупку
+    sell: bool = False  # True, если опцион на продажу
+    trade_emoji: str = ''  # эмодзи для отражения направления опциона
+    support: str = ''  # уровень поддержки
+    resistance: str = ''  # уровень сопротивления
+    price: float = 0  # цена входа
+    itg_price: float = 0  # цена итога опциона пятизначная
+    plus: bool = False  # True, если опцион в плюс
+    minus: bool = False  # True, если опцион в минус
+    vozvrat: bool = False  # True, если опцион возврат
+    dgn: bool = False  # True, если нужен догон
 
-    dgn_time: int = field(default=0)  # Время догона в секундах
-    dgn_time_str: str = field(default='')  # Время догона строкой
-    start_message_id: int = field(default=0)  # Id стартового сообщения для пересылки и записи в БД
-    itog_message_id: int = field(default=0)  # Id итогового сообщения для пересылки и записи в БД
-    message_forecast: str = field(default='')  # строка с направлением опциона для второго сообщения
-    message_emoji_quotation: str = field(default='')  # эмодзи для котировки для второго сообщения
+    dgn_time: int = 0  # Время догона в секундах
+    dgn_time_str: str = ''  # Время догона строкой
+    start_message_id: int = 0  # Id стартового сообщения для пересылки и записи в БД
+    itog_message_id: int = 0  # Id итогового сообщения для пересылки и записи в БД
+    message_forecast: str = ''  # строка с направлением опциона для второго сообщения
+    message_emoji_quotation: str = ''  # эмодзи для котировки для второго сообщения
 
     def __init__(self, tf, dogon):
         self.timeframe = tf

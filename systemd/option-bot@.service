@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/Binidex/BinoOptions
-ExecStart=/home/vova/Binidex/BinoOptions/venv/bin/python3.11 main.py
+WorkingDirectory=/home/vova/Binodex/BinoOptions
+ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
 Restart=on-failure
 RestartSec=10
 

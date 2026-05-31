@@ -12,7 +12,6 @@ from apps.main_app import main
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id
-from settings.constant import start_trade, weekend
 from settings.timing import USERBOT_RETRY_DELAY, TG_SEND_TIMEOUT
 
 logger = init_logger(__name__)
@@ -53,17 +52,18 @@ async def bot():
                 sys.exit(1)
 
     if binary:
-        if datetime.now().isoweekday() == 1 and datetime.now().hour == 3 and datetime.now().minute < 25:
+        now = datetime.now()  # один снимок времени — иначе возможен переход минуты/часа между вызовами
+        if now.isoweekday() == 1 and now.hour == 3 and now.minute < 25:
             try:
                 await asyncio.wait_for(
-                    app.send_photo(chat_id=channel_id, photo=start_trade, caption=start_message()),
+                    app.send_photo(chat_id=channel_id, photo='pictures/start_week.png', caption=start_message()),
                     timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки стартового сообщения - {error}')
-        if datetime.weekday(datetime.now() + timedelta(hours=2)) >= 5:
+        if (now + timedelta(hours=2)).weekday() >= 5:
             try:
                 await asyncio.wait_for(
-                    app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message()),
+                    app.send_photo(chat_id=channel_id, photo='pictures/end_week.png', caption=weekend_message()),
                     timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки сообщения о выходных - {error}')
@@ -124,13 +124,17 @@ async def bot():
             pass
 
         if binary and not stop_event.is_set():
-            if datetime.weekday(datetime.now() + timedelta(hours=2)) >= 5:
+            if (datetime.now() + timedelta(hours=2)).weekday() >= 5:
                 if not res_option[1]:
-                    await asyncio.sleep(await time_sleep())
+                    # Прерываемый сон (как выше) — иначе SIGTERM завис бы тут на 100–150с
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=await time_sleep())
+                    except asyncio.TimeoutError:
+                        pass
                     continue
                 try:
                     await asyncio.wait_for(
-                        app.send_photo(chat_id=channel_id, photo=weekend, caption=weekend_message()),
+                        app.send_photo(chat_id=channel_id, photo='pictures/end_week.png', caption=weekend_message()),
                         timeout=TG_SEND_TIMEOUT)
                 except (Exception,) as error:
                     logger.error(f'Ошибка отправки сообщения о выходных - {error}')

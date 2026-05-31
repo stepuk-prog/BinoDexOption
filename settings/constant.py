@@ -5,8 +5,6 @@ qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах
-weekend = 'https://i.ibb.co/Df7NKbJ/endweek.jpg'  # картинка об окончании недели
-start_trade = 'https://i.ibb.co/ZJjHc6W/startweek.jpg'  # картинка о начале торговой недели
 
 # Таблицы таймфреймов (перенесены из Data_set.py)
 spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минута', 'coefficient': False},

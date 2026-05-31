@@ -49,12 +49,11 @@ TIMEFRAME=1m BINARY=true TEST=false venv/bin/python main.py
 
 ## Документация
 
-| Документ                                                    | Описание                       |
-|-------------------------------------------------------------|--------------------------------|
-| [DATABASE.md](docs/DATABASE.md)                             | Структура БД (как используется кодом) |
-| [DEPLOY.md](docs/DEPLOY.md)                                 | Инструкция по деплою на сервер |
-| [CHANGELOG.md](docs/CHANGELOG.md)                           | История изменений              |
-| [MIGRATION.md](docs/MIGRATION_SELENIUM_TO_PLAYWRIGHT.md)    | Миграция Selenium → Playwright |
+| Документ                                                 | Описание                              |
+|----------------------------------------------------------|---------------------------------------|
+| [DATABASE.md](docs/DATABASE.md)                          | Структура БД (как используется кодом) |
+| [DEPLOY.md](docs/DEPLOY.md)                              | Инструкция по деплою на сервер        |
+| [CHANGELOG.md](docs/CHANGELOG.md)                        | История изменений                     |
 
 ## Структура проекта
 
@@ -73,12 +72,12 @@ BinoOptions/
 │   ├── exit_app.py         # Завершение/перезапуск, алерты
 │   ├── my_exeptions.py     # Обработка обрывов связи Pyrogram
 │   └── cookie_utils.py     # Подготовка cookies для Playwright
-├── database/               # Слой БД
-│   ├── postgres.py         # Синхронный клиент (бутстрап-конфиг)
-│   └── async_postgres.py   # Асинхронный клиент (горячий путь, пул)
+├── database/               # Слой БД (asyncpg)
+│   └── postgres.py         # Database — async-пулы program+binodex (горячий путь)
 ├── messages/message.py     # Тексты постов (прогнозы, итоги, догоны, плюсы)
 ├── settings/               # Конфигурация и константы
 │   ├── config.py           # Сборка настроек экземпляра (БД + env)
+│   ├── _bootstrap.py       # Синхронное чтение БД на старте (до создания пулов)
 │   ├── constant.py         # Константы + таблицы таймфреймов
 │   ├── browser_config.py   # Селекторы браузера (из БД)
 │   ├── browser_set.py      # Параметры запуска Playwright
@@ -89,8 +88,7 @@ BinoOptions/
 ├── pictures/               # Картинки постов (прогнозы, догоны, плюсы, QR)
 ├── systemd/                # Service-файлы systemd
 ├── docs/                   # Документация (DATABASE.md — схема БД)
-├── place_qr.py             # Инструмент подбора координат QR (fin/otc)
-├── check_messages.py       # Вычитка всех постов в форум-тему
+├── scripts/                # Служебные скрипты (place_qr, check_messages, probe_otc, binodex_settings.sql)
 ├── main.py                 # Точка входа (главный цикл)
 └── requirements.txt        # Зависимости
 ```

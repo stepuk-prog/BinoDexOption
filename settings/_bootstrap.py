@@ -12,31 +12,21 @@ settings/browser_config.py (tv_settings/pocket_settings) — общий хелп
 дублей. Намеренно НЕ импортирует logs/config — иначе циклический импорт.
 """
 import asyncio
-import json
 
 import asyncpg
 
-from settings.database_config import (pg_host, pg_name, pg_name_fin,
+from settings.database_config import (DB_NAMES, init_json_codec, pg_host,
                                       pg_password, pg_port, pg_user)
-
-_DB_NAMES = {'program': pg_name, 'binodex': pg_name_fin}
-
-
-async def _init_connection(conn: asyncpg.Connection):
-    for t in ('json', 'jsonb'):
-        await conn.set_type_codec(
-            t, encoder=json.dumps, decoder=json.loads, schema='pg_catalog'
-        )
 
 
 async def _fetch(db: str, sql: str, args, fetch_mode: str):
     conn = await asyncpg.connect(
         user=pg_user, password=pg_password, host=pg_host, port=pg_port,
-        database=_DB_NAMES[db], statement_cache_size=0,
+        database=DB_NAMES[db], statement_cache_size=0,
         timeout=10,           # таймаут установки соединения
         command_timeout=15,   # таймаут самого запроса — не зависнуть на старте навсегда
     )
-    await _init_connection(conn)
+    await init_json_codec(conn)
     try:
         if fetch_mode == 'row':
             return await conn.fetchrow(sql, *args)

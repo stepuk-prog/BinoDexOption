@@ -18,7 +18,7 @@ from settings.browser_config import move_field, price_field, pop_up, screen_zone
 from settings.config import (channel_id, option_data, get_app, binary, program_id,
                             shot_path, screenshot_path, database)
 from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
-from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT
+from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
 if TYPE_CHECKING:
@@ -34,6 +34,16 @@ def request_shutdown():
     """Пометить штатную остановку — подавляет сообщение о сбое (main_bug_message)."""
     global _shutdown_requested
     _shutdown_requested = True
+
+
+async def _close_popup(page):
+    """Best-effort закрытие popup по селектору pop_up (общий код для find_price/screenshot)."""
+    try:
+        popup = page.locator(f".{pop_up}")
+        if await popup.count() > 0:
+            await popup.first.click(timeout=3000)
+    except (Exception,):
+        pass
 
 
 def get_water():
@@ -201,15 +211,11 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
         await page.bring_to_front()
 
         # Закрытие popup, если есть
-        try:
-            popup = page.locator(f".{pop_up}")
-            if await popup.count() > 0:
-                await popup.first.click(timeout=3000)
-        except (Exception,):
-            pass
+        await _close_popup(page)
 
         price_element = page.locator(f"xpath={price_field}").first
-        price_text = await price_element.text_content()
+        # timeout — иначе при отсутствии элемента висим на дефолтных 30с
+        price_text = await price_element.text_content(timeout=TIMEOUT_MEDIUM)
         return True, price_text or ""
     except (Exception,) as error:
         error_text = f"Не удалось загрузить цену - {error}"
@@ -242,12 +248,7 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
         await page.bring_to_front()
 
         # Закрытие popup, если есть
-        try:
-            popup = page.locator(f".{pop_up}")
-            if await popup.count() > 0:
-                await popup.first.click(timeout=3000)
-        except (Exception,):
-            pass
+        await _close_popup(page)
 
         if not await mouse_move(page, move_field, 0):
             return False, 'Ошибка имитации движения мыши'
@@ -284,6 +285,7 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
     while_time = (datetime.now() + timedelta(minutes=find_time))
     page = manager.pages['price']
     await page.bring_to_front()
+    price_element = page.locator(f"xpath={price_field}").first  # локатор постоянен — вне цикла
 
     while i_color == 0:
         try:
@@ -292,7 +294,6 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
                 error_text = 'Время поиска точки входа превысило лимит'
                 return False, error_text
 
-            price_element = page.locator(f"xpath={price_field}").first
             await mouse_move(page, price_field, 1)
 
             # Получаем цвет элемента через evaluate

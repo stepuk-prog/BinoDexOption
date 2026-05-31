@@ -1,429 +1,258 @@
+"""OTC через binodex.app.
+
+Логин — storage_state (Privy) из binodex.cookies.binodex_cookies (контекст создаётся с
+ним в browser_app.init_browser). Страница — из binodex.cookies.pages (bino_option/otc).
+Выбор пары — модалка binodex по селекторам из binodex_settings. Цена — из WebSocket
+api-coins.binodex.io (на странице она в <canvas>); округление до decimals делает main_app
+через option_data.round (= otc_assets.decimals). Скрин — зона графика (canvas) + QR.
+"""
 import asyncio
 import re
 from typing import TYPE_CHECKING
 
 from PIL import Image
-from playwright.async_api import Page, Locator, TimeoutError as PlaywrightTimeout, WebSocket
+from playwright.async_api import Page, WebSocket
 
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker
-from settings.config import cookies, shot_path, screenshot_path, database
-from apps.cookie_utils import add_cookies_to_context
-from settings.timing import (
-    TIMEOUT_SHORT, TIMEOUT_LONG,
-    ELEMENT_RETRY_DELAY, MAX_SCREENSHOT_ATTEMPTS, MAX_PRICE_ATTEMPTS
-)
 from classes.result_types import OperationResult
 from apps.exit_app import close_program
 from logs import init_logger
+from settings.config import shot_path, screenshot_path, database, prog_key
+from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
-from settings.browser_config import (input_otc, otc_val_list_close, otc_val_list_open, screen_zone_otc, otcprice,
-                                     change_tf, chart_type, s30, timeframe_otc, otc_screen, name_valute_list_css,
-                                     list_valute_css, percent_value, check_google)
+from settings.browser_config import (otc_select_pair, otc_category_valute, otc_input_pair,
+                                     otc_modal_pair_item, screen_zone_otc)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
-PRICE_RE = re.compile(r"\d+\.\d+")
+PRICE_WS_HINT = "api-coins.binodex.io"  # WS котировок binodex
 
 logger = init_logger(__name__)
 
-# Глобальный трекер цен
+# Глобальный трекер цен (один на процесс; страница регистрирует WS-перехват в init_otc)
 _price_tracker: WebSocketPriceTracker | None = None
 
 
 def get_price_tracker() -> WebSocketPriceTracker:
-    """Получить глобальный трекер цен"""
     global _price_tracker
     if _price_tracker is None:
         _price_tracker = WebSocketPriceTracker()
     return _price_tracker
 
 
-async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
-    """
-    Определение валюты для опциона OTC
-    :param log_data: класс с данными опциона
-    :param manager: менеджер браузера
-    :param valute: список с отработанными валютами
-    :return: True в случае успешного завершения
-    """
-    page = manager.pages['main']
-    active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
-    if not active_otc_list:  # None/False (ошибка пула) или пустой список
-        return False
-    for otc in active_otc_list:
-        log_data.add_option_data(otc)
-        result = await change_otc(valute=log_data.name, page=page)
-        if result == 1:
-            log_data.name = log_data.name + ' OTC'
-            return True
-        if result == 0:  # сбой переключения (а не «пара неактивна») — логируем, пробуем следующую
-            logger.warning(f"Сбой переключения OTC-пары {log_data.name}, пробую следующую")
-    return False
-
-
-def _parse_price(text: str) -> float | None:
-    """Получение цены OTC из строки tooltip"""
-    text = text.replace(",", ".")
-    m = PRICE_RE.search(text)
-    return float(m.group(0)) if m else None
-
-
-async def get_price(page: Page, asset: str = None, timeout: int = TIMEOUT_SHORT // 1000,
-                    attempts: int = MAX_PRICE_ATTEMPTS, delay: float = ELEMENT_RETRY_DELAY) -> float | bool:
-    """
-    Возвращает текущую цену актива.
-    Сначала пробует WebSocket, затем tooltip.
-    :param page: Активная страница Playwright
-    :param asset: Название актива (например 'GBPJPY')
-    :param timeout: таймаут в секундах
-    :param attempts: число попыток
-    :param delay: пауза между попытками
-    :return: float или False
-    """
-    # Способ 1: Получить из WebSocket (быстро и надёжно)
-    tracker = get_price_tracker()
-    if tracker.ws_connected and tracker.prices:
-        price = tracker.get_price(asset)
-        if price:
-            logger.info(f"💰 Цена из WebSocket: {asset} = {price}")
-            return price
-
-    # Способ 2: Fallback на tooltip
-    logger.warning(f"WebSocket цена недоступна для {asset}, пробуем tooltip...")
-    hover_selector = "div.estimated-profit-block__tooltip, .tooltip2, [class*='estimated-profit']"
-
-    for attempt in range(1, attempts + 1):
-        try:
-            # Наводим мышь на элемент, чтобы появился tooltip
-            hover_el = page.locator(hover_selector)
-            if await hover_el.count() > 0:
-                await hover_el.first.hover(timeout=timeout * 1000)
-                await asyncio.sleep(0.3)
-
-            # Ищем tooltip с ценой
-            text_el = page.locator(otcprice)
-            count = await text_el.count()
-            if count == 0:
-                logger.warning(f"Попытка {attempt}/{attempts}: tooltip не появился")
-                await asyncio.sleep(delay)
-                continue
-
-            raw = (await text_el.first.text_content() or "").strip()
-            price = _parse_price(raw)
-            if price is not None:
-                return price
-            else:
-                logger.warning(f"Попытка {attempt}/{attempts}: не удалось извлечь число из '{raw}'")
-        except PlaywrightTimeout:
-            logger.warning(f"Попытка {attempt}/{attempts}: таймаут hover/tooltip")
-        except (Exception,) as err:
-            logger.error(f"Попытка {attempt}/{attempts}: ошибка — {err}")
-        await asyncio.sleep(delay)
-
-    logger.error("Не удалось получить цену ни из WebSocket, ни из tooltip")
-    return False
-
-
-async def screenshot_otc(page: Page, asset: str = None, qr=None) -> tuple[bool, float | bool, str] | tuple[bool, str, str]:
-    """
-    Получение скриншота Pocket (с QR-оверлеем).
-    :param page: страница браузера
-    :param asset: название актива для получения цены
-    :param qr: кортеж (qr110, qr85) — на OTC кладём только qr110
-    :return:
-    """
-    for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
-        try:
-            element = page.locator(screen_zone_otc)
-            await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
-
-            # Параллельно получаем цену и делаем скриншот для минимизации рассинхрона
-            price_task = get_price(page, asset=asset)
-            screenshot_task = element.screenshot(path=shot_path)
-            price, _ = await asyncio.gather(price_task, screenshot_task)
-
-            if not price:
-                msg = f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: не удалось получить цену OTC"
-                logger.warning(msg)
-                continue
-            with Image.open(shot_path) as img:
-                if qr:
-                    qr110 = qr[0]
-                    paste_overlay(img, qr110, otc_qr_x, otc_qr_y)
-                img.save(screenshot_path)
-            return True, price, screenshot_path
-        except (Exception,) as e:
-            logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS} скриншота OTC: {e}")
-    error_text = 'Ошибка записи скриншота'
-    return False, error_text, ''
-
-
-async def find_valute(page: Page) -> dict[str, Locator | None | bool]:
-    """Поиск активной валютной пары в списке"""
-    result: dict[str, Locator | None | bool] = {'active': False, 'element': None}
-    try:
-        # Ждём появления всех элементов списка
-        await page.locator(list_valute_css).first.wait_for(timeout=15000)
-        items = page.locator(list_valute_css)
-        count = await items.count()
-
-        for i in range(count):
-            item = items.nth(i)
-            name_el = item.locator(name_valute_list_css)
-            name = (await name_el.text_content() or "").strip()
-
-            if 'OTC' in name:
-                payout_el = item.locator(percent_value)
-                payout_text = (await payout_el.text_content() or "").strip()
-                if payout_text and payout_text.upper() != "N/A":
-                    result['active'] = True
-                    result['element'] = item
-                    break
-    except (Exception,):
-        logger.error("Ошибка поиска элемента в списке")
-    return result
-
-
-async def change_otc(valute: str, page: Page) -> int:
-    """
-    Переключение валюты на сайте Pocket
-    :param valute: имя валютной пары, на которую нужно переключиться
-    :param page: страница браузера
-    :return: 1 - Успешное переключение, 2 - пара не активна, 0 - ошибка при выполнении
-    """
-    try:
-        await check_design(page=page)
-        # Открываем список
-        button = page.locator(f".{otc_val_list_open}").first
-        await button.click(timeout=15000)
-    except (Exception,) as err:
-        logger.error(f"Ошибка раскрытия списка валют — {err}")
-        return 0
-
-    try:
-        # Вводим название пары
-        valute_input = page.locator(f".{input_otc}")
-        await valute_input.wait_for(state='visible', timeout=15000)
-        await valute_input.clear()
-        await valute_input.fill(valute)
-
-        # Находим нужный элемент
-        element = await find_valute(page=page)
-        if element['active']:
-            await element['element'].click(timeout=TIMEOUT_SHORT)
-            return 1
-        else:
-            return 2
-    except (Exception,) as error:
-        logger.error(f"Ошибка проверки состояния OTC пары - {error}")
-        return 0
-    finally:
-        try:
-            await otc_list_close(page=page)
-        except (Exception,):
-            pass
-    return 0  # fallback, не должен достигаться
-
-
-async def otc_list_close(page: Page) -> bool:
-    """Закрытие списка валют"""
-    # Способ 1: Нажать Escape
-    try:
-        await page.keyboard.press('Escape')
-        await asyncio.sleep(0.3)
-        # Проверяем, закрылся ли список
-        input_field = page.locator(f".{input_otc}")
-        if await input_field.count() == 0 or not await input_field.is_visible():
-            return True
-    except (Exception,):
-        pass
-
-    # Способ 2: Клик по селектору из БД
-    try:
-        clicker = page.locator(otc_val_list_close)
-        if await clicker.count() > 0:
-            await clicker.first.click(timeout=3000)
-            return True
-    except (Exception,):
-        pass
-
-    # Способ 3: Клик по графику (вне списка)
-    try:
-        chart = page.locator(".chart-area, .trading-chart, canvas")
-        if await chart.count() > 0:
-            await chart.first.click(timeout=3000)
-            return True
-    except (Exception,):
-        pass
-
-    logger.warning("Не удалось закрыть меню выбора валют")
-    return False
-
-
-async def design_customization(page: Page) -> bool:
-    """Настройка свечей на графике"""
-    try:
-        clicker = page.locator(f".{timeframe_otc}").first
-        await clicker.click(timeout=15000)
-    except (Exception,) as error:
-        logger.error(f'Не удалось открыть список выбора таймфреймов - {error}')
-        return False
-
-    try:
-        clicker = page.locator(f"xpath={change_tf}").first
-        await clicker.click(timeout=15000)
-    except (Exception,) as error:
-        logger.error(f'Не удалось выбрать таймфрейм H4 из списка выбора таймфреймов - {error}')
-        return False
-
-    try:
-        clicker = page.locator(f".{chart_type}").first
-        await clicker.click(timeout=15000)
-    except (Exception,) as error:
-        logger.error(f'Не удалось открыть окно выбора масштаба свечи - {error}')
-        return False
-
-    try:
-        items = page.locator(s30)
-        count = await items.count()
-        for i in range(count):
-            span = items.nth(i)
-            text = (await span.text_content() or "").strip()
-            if text == "S30":
-                await span.click(timeout=TIMEOUT_SHORT)
-                break
-    except (Exception,) as error:
-        logger.error(f'Не удалось выбрать масштаб свечи - {error}')
-        return False
-
-    if not await otc_list_close(page=page):
-        return False
-    return True
-
-
-async def check_design(page: Page):
-    """Проверка дизайна графика"""
-    try:
-        elem = page.locator(f".{timeframe_otc}").first
-        await elem.wait_for(state='visible', timeout=10000)
-        tf = (await elem.text_content() or "").strip()
-    except PlaywrightTimeout:
-        logger.error("⏰ Ошибка проверки дизайна графика - не дождался элемента с классом %s за 10 с", timeframe_otc)
-        return None
-    except (Exception,) as error:
-        logger.error(f"Ошибка проверки дизайна графика - не удалось найти элемент {timeframe_otc} для определения "
-                     f"дизайна графика - {error}")
-        return None
-
-    if tf != 'H2':
-        await design_customization(page=page)
-    return None
-
-
-async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
-    """Открытие браузера для OTC торговли"""
-    result = await init_otc(manager=manager)
-    return OperationResult(success=bool(result))
-
-
 def setup_websocket_tracker(page: Page):
-    """Настройка перехвата WebSocket для отслеживания цен"""
+    """Перехват WS-котировок binodex (graphic-фреймы) → трекер."""
     tracker = get_price_tracker()
 
     def on_websocket(ws: WebSocket):
-        # Фильтруем только WebSocket с котировками
-        if 'po.market' in ws.url:
-            logger.info(f"🔌 WebSocket подключен: {ws.url}")
-            tracker.ws_connected = True
+        if PRICE_WS_HINT not in ws.url:
+            return
+        logger.info(f"🔌 WS котировок binodex: {ws.url}")
+        tracker.ws_connected = True
 
-            def on_frame(data):
-                # Playwright передаёт объект с полем payload
-                if hasattr(data, 'payload'):
-                    tracker.handle_message(data.payload)
-                elif isinstance(data, (str, bytes)):
-                    tracker.handle_message(data)
-                elif isinstance(data, dict) and 'payload' in data:
-                    tracker.handle_message(data['payload'])
+        def on_frame(data):
+            # callback Playwright синхронный: исключение здесь всплыло бы в event loop
+            # и могло уронить перехват WS — глушим с логом.
+            try:
+                payload = getattr(data, 'payload', data)
+                tracker.handle_message(payload)
+            except (Exception,) as error:
+                logger.debug(f"WS on_frame: {error}")
 
-            def on_close(_ws: WebSocket):
-                logger.info("🔌 WebSocket отключен")
-                # Не сбрасываем ws_connected, если есть другие подключения
-
-            ws.on("framereceived", on_frame)
-            ws.on("close", on_close)
+        ws.on("framereceived", on_frame)
 
     page.on("websocket", on_websocket)
 
 
-async def init_otc(manager: "BrowserManager") -> bool:
-    """Инициализация OTC страницы"""
-    page = manager.pages['main']
+async def _otc_page_url() -> str | None:
+    """URL OTC-страницы из binodex.cookies.pages (bino_option/otc)."""
+    rows = await database.pages(program=prog_key, mode='otc')
+    if not rows:
+        return None
+    return rows[0]['url']
 
-    # Настраиваем перехват WebSocket ДО загрузки страницы
-    setup_websocket_tracker(page)
+
+async def _pair_modal_open(page: Page) -> bool:
+    """Модалка выбора открыта, если видна кнопка категории."""
+    try:
+        return await page.locator(otc_category_valute).first.is_visible()
+    except (Exception,):
+        return False
+
+
+async def _close_pair_modal(page: Page):
+    """Закрыть модалку выбора пары — разными способами, пока категория ещё видна
+    (модалка binodex не закрывается одним способом надёжно)."""
+    async def _click_select():
+        await page.click(otc_select_pair, timeout=TIMEOUT_SHORT)
+
+    async def _escape():
+        await page.keyboard.press('Escape')
+
+    async def _click_chart():
+        # position — TypedDict Position; dict-литерал корректен в рантайме, инспекцию типа подавляем.
+        # noinspection PyTypeChecker
+        await page.locator(screen_zone_otc).first.click(timeout=TIMEOUT_SHORT, position={'x': 8, 'y': 8})
+
+    for method in (_click_select, _escape, _click_chart, _click_select):
+        if not await _pair_modal_open(page):
+            return
+        try:
+            await method()
+        except (Exception,):
+            pass
+        # Ждём закрытия (с учётом анимации), но не слепо: выходим сразу, как закрылась.
+        for _ in range(10):  # до ~1с на метод
+            if not await _pair_modal_open(page):
+                return
+            await asyncio.sleep(0.1)
+
+
+async def select_otc_pair(page: Page, pair: str) -> bool:
+    """Выбрать '<pair> OTC' в модалке binodex (pair вида 'EUR/USD').
+    Открыть выбор → категория Валюты → ввести пару → клик по элементу '<pair> ... OTC' →
+    закрыть модалку → дождаться, пока сайт прогрузит пару (WS отдаст котировку). True при успехе."""
+    try:
+        await page.click(otc_select_pair, timeout=TIMEOUT_MEDIUM)
+        await page.locator(otc_category_valute).first.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
+        await page.click(otc_category_valute, timeout=TIMEOUT_MEDIUM)
+        # реальное поле — вложенный input/textarea внутри обёртки. fill() сам ждёт
+        # его готовность (auto-wait) — отдельная пауза не нужна.
+        inner = page.locator(otc_input_pair).locator('input, textarea').first
+        try:
+            await inner.fill(pair, timeout=TIMEOUT_SHORT)
+        except (Exception,):
+            await page.click(otc_input_pair, timeout=TIMEOUT_SHORT)
+            await page.keyboard.type(pair, delay=40)
+        # Ждём появления нужного пункта '<pair> … OTC' (auto-wait вместо слепой паузы):
+        # фильтруем по тексту пары и по 'OTC' (без регистра).
+        target_item = (page.locator(otc_modal_pair_item)
+                       .filter(has_text=pair)
+                       .filter(has_text=re.compile('OTC', re.IGNORECASE))
+                       .first)
+        try:
+            await target_item.wait_for(state='visible', timeout=TIMEOUT_SHORT)
+        except (Exception,):
+            logger.warning(f"OTC: не нашёл '{pair} … OTC' в модалке")
+            await _close_pair_modal(page)
+            return False
+        await target_item.click(timeout=TIMEOUT_SHORT)
+
+        await asyncio.sleep(1.0)            # дать сайту переключить график (WS-цена не пруф — стримятся все пары)
+        await _close_pair_modal(page)        # закрыть модалку (иначе перекрывает график и блокирует прогрузку)
+
+        # Дождаться, пока сайт прогрузит новую пару и WS отдаст её котировку (до 8с —
+        # рабочие пары приходят за 1–3с). Если не пришла, пара на binodex не грузится
+        # (бывает по отдельным парам) → возвращаем False, parce_otc возьмёт следующую.
+        tracker = get_price_tracker()
+        target = pair + ' OTC'
+        for _ in range(32):
+            if tracker.get_price(target) is not None:
+                return True
+            await asyncio.sleep(0.25)
+        logger.warning(f"OTC: пара '{pair}' не прогрузилась на binodex (нет WS-котировки за 8с) — пропускаю")
+        return False
+    except (Exception,) as error:
+        logger.warning(f"OTC: ошибка выбора пары {pair} — {error}")
+        return False
+
+
+async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
+    """Подобрать активную OTC-пару из БД и выбрать её на binodex.
+    :return: True при успешном выборе."""
+    page = manager.pages['main']
+    active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
+    if not active_otc_list:  # None/False (ошибка пула) или пусто
+        return False
+    for otc in active_otc_list:
+        log_data.add_option_data(otc)  # log_data.name = 'EUR/USD' (из БД)
+        if not await select_otc_pair(page, log_data.name):  # сам ждёт прогрузку пары (WS)
+            logger.warning(f"OTC-пара {log_data.name} не выбралась, пробую следующую")
+            continue
+        log_data.name = log_data.name + ' OTC'
+        return True
+    return False
+
+
+async def get_price(asset: str = None) -> float | bool:
+    """Текущая цена пары из WS-трекера binodex. asset вида 'EUR/USD OTC'.
+    :return: float или False (нет цены)."""
+    price = get_price_tracker().get_price(asset)
+    return price if price is not None else False  # 0.0 — валидная цена, не терять её
+
+
+async def screenshot_otc(page: Page, asset: str = None, qr=None):
+    """Скрин зоны графика binodex + цена из WS (читается вплотную к скрину) + QR.
+    :return: (success, price|error_text, screenshot_path|'')."""
+    last_error = 'нет цены OTC из WS'
+    for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
+        try:
+            element = page.locator(screen_zone_otc).first
+            await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
+            await element.screenshot(path=shot_path)
+            # Цену читаем СРАЗУ после скрина (WS уже в памяти, сетевого запроса нет) —
+            # минимальный разрыв скрин ↔ цена.
+            price = await get_price(asset=asset)
+            if not price:
+                logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены OTC из WS для {asset}")
+                await asyncio.sleep(0.5)
+                continue
+            with Image.open(shot_path) as img:
+                if qr:
+                    paste_overlay(img, qr[0], otc_qr_x, otc_qr_y)  # на OTC один QR (qr110)
+                img.save(screenshot_path)
+            return True, price, screenshot_path
+        except (Exception,) as error:
+            last_error = str(error)
+            logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS} скриншота OTC: {error}")
+    return False, f'Ошибка записи скриншота OTC - {last_error}', ''
+
+
+async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
+    """Открытие binodex для OTC."""
+    return OperationResult(success=bool(await init_otc(manager=manager)))
+
+
+async def init_otc(manager: "BrowserManager") -> bool:
+    """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → проверка
+    логина (остались на /trade) → ожидание WS-котировок."""
+    page = manager.pages['main']
+    setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
+
+    url = await _otc_page_url()
+    if not url:
+        await close_program(manager=manager, status=1, text="Нет OTC-страницы в binodex.cookies.pages")
+        return False
 
     try:
-        await page.goto(otc_screen, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
+        await page.goto(url, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
         await page.set_viewport_size({'width': win_x_otc, 'height': win_y_otc})
     except (Exception,) as error:
-        await close_program(manager=manager, status=1, text=f"Не загрузился браузер - {error}")
+        await close_program(manager=manager, status=1, text=f"Не загрузился binodex - {error}")
         return False
 
     try:
-        # Ждём полной загрузки страницы
-        await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_LONG)
+        try:
+            await page.wait_for_load_state('networkidle', timeout=TIMEOUT_LONG)
+        except (Exception,):
+            pass  # постоянный WS-поток может мешать networkidle — не критично
 
-        # Добавляем cookies
-        if cookies:
-            await add_cookies_to_context(manager.context, cookies)
-        else:
-            await close_program(manager=manager, status=1, text="Нет cookies для установки.")
+        # Логин активен, только если остались на /trade (Privy-сессия из storage_state).
+        if not page.url.rstrip('/').endswith('/trade'):
+            await close_program(manager=manager, status=1,
+                                text='binodex: вход слетел (редирект с /trade)', cookies=True)
             return False
 
-        await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
-
-        # Закрываем модальные окна
-        await close_modal(page=page)
-
-        # Проверка на кнопку Google (проверка cookies)
-        try:
-            google_button = page.locator(f".{check_google}")
-            if await google_button.count() > 0:
-                await close_program(manager=manager, text='', status=1, cookies=True)
-                return False
-        except (Exception,) as e:
-            logger.warning(f"Ошибка проверки cookies (Google-кнопка): {e}")
-
-        # Ждём подключения WebSocket
+        # Ждём поток котировок (до 10 сек)
         tracker = get_price_tracker()
-        for _ in range(10):
-            if tracker.ws_connected:
-                logger.info("✅ WebSocket для цен подключен")
+        for _ in range(20):
+            if tracker.ws_connected and tracker.prices:
+                logger.report("✅ binodex: WS котировок подключён")
                 break
             await asyncio.sleep(0.5)
-
         return True
     except (Exception,) as error:
-        await close_program(manager=manager, status=1, text=f'Ошибка загрузки страницы OTC - {error}')
+        await close_program(manager=manager, status=1, text=f'Ошибка загрузки OTC binodex - {error}')
         return False
-
-
-async def close_modal(page: Page):
-    """Подавление модального окна"""
-    try:
-        close_btn = page.locator(".mfp-close")
-        await close_btn.click(timeout=5000)
-        await page.locator(".mfp-container").wait_for(state='hidden', timeout=10000)
-    except (Exception,):
-        pass
-
-    try:
-        ok_btn = page.locator("button.free-trades-welcome-modal__btn.btn-green")
-        await ok_btn.click(timeout=5000)
-        await page.locator(".free-trades-welcome-modal__banner, .free-trades-welcome-modal__content").wait_for(
-            state='hidden', timeout=10000)
-        return True
-    except (Exception,):
-        pass

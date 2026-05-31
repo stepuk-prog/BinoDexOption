@@ -11,9 +11,17 @@ def parse_bool(value: str | None) -> bool:
     return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-error_channel = int(os.getenv("ERROR_CHANNEL"))
-message_channel = int(os.getenv("MESSAGE_CHANNEL"))
-cookies_channel = int(os.getenv("COOKIES_CHANNEL"))
+def _req_int(name: str) -> int:
+    """Обязательная int-переменная окружения с понятной ошибкой вместо TypeError на None."""
+    value = os.getenv(name)
+    if value is None:
+        raise ValueError(f"Не задана обязательная переменная окружения {name}")
+    return int(value)
+
+
+error_channel = _req_int("ERROR_CHANNEL")
+message_channel = _req_int("MESSAGE_CHANNEL")
+cookies_channel = _req_int("COOKIES_CHANNEL")
 token = os.getenv("TOKEN")
 timeframe = os.getenv("TIMEFRAME", "unknown")
 binary = parse_bool(os.getenv("BINARY"))

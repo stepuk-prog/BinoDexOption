@@ -1,6 +1,6 @@
-# Инструкция по деплою UniversalOption
+# Инструкция по деплою BinoOptions
 
-**Целевая папка на сервере:** `/home/vova/Binidex/BinoOptions`
+**Целевая папка на сервере:** `/home/vova/Binodex/BinoOptions`
 
 Заливка проекта — **копированием с dev-машины** (rsync/scp), не через git.
 
@@ -49,7 +49,7 @@ sudo apt install -y firefox
 ### 2.1. Создание структуры папок
 
 ```bash
-mkdir -p /home/vova/Binidex/BinoOptions
+mkdir -p /home/vova/Binodex/BinoOptions
 ```
 
 ### 2.2. Копирование файлов проекта
@@ -59,16 +59,16 @@ mkdir -p /home/vova/Binidex/BinoOptions
 ```bash
 rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
     --exclude 'logs/*' --exclude 'files/*' \
-    ./ vova@server:/home/vova/Binidex/BinoOptions/
+    ./ vova@server:/home/vova/Binodex/BinoOptions/
 
 # либо scp:
-# scp -r ./* vova@server:/home/vova/Binidex/BinoOptions/
+# scp -r ./* vova@server:/home/vova/Binodex/BinoOptions/
 ```
 
 ### 2.3. Создание виртуального окружения
 
 ```bash
-cd /home/vova/Binidex/BinoOptions
+cd /home/vova/Binodex/BinoOptions
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -U pip
@@ -79,7 +79,7 @@ pip install -r requirements.txt
 
 ```bash
 # Активируем venv если ещё не активирован
-source /home/vova/Binidex/BinoOptions/venv/bin/activate
+source /home/vova/Binodex/BinoOptions/venv/bin/activate
 
 # Установка Firefox для Playwright + системные зависимости
 playwright install firefox
@@ -93,7 +93,7 @@ playwright install-deps firefox
 ### 3.1. Создание файла .env
 
 ```bash
-nano /home/vova/Binidex/BinoOptions/.env
+nano /home/vova/Binodex/BinoOptions/.env
 ```
 
 `.env` содержит только общую базу (параметры экземпляра — `TIMEFRAME`/`BINARY`/`TEST` — передаются через systemd `Environment=`, не здесь):
@@ -113,12 +113,15 @@ MESSAGE_CHANNEL=-100...
 COOKIES_CHANNEL=-100...
 TOKEN=your_error_bot_token
 
+# Ключ программы — фильтр своих строк в settings.option_setting (обязателен)
+PROG_KEY=bino_option
+
 # Настройки догонов
 OVERLAP=3
 OVERLAP_RANDOM=2
 ```
 
-Сессии юзерботов и cookies хранятся в БД (`telegram.telegram.session_string`, `cookies.*`), в `.env` их нет. `.env` в `.gitignore`, не коммитим.
+Сессии юзер ботов и cookies хранятся в БД (`telegram.telegram.session_string`, `cookies.*`), в `.env` их нет. `.env` в `.gitignore`, не коммитим.
 
 ---
 
@@ -127,7 +130,7 @@ OVERLAP_RANDOM=2
 ### 4.1. Копирование service-файлов
 
 ```bash
-sudo cp /home/vova/Binidex/BinoOptions/systemd/*.service /etc/systemd/system/
+sudo cp /home/vova/Binodex/BinoOptions/systemd/*.service /etc/systemd/system/
 ```
 
 ### 4.2. Пример unit-файла
@@ -142,9 +145,9 @@ After=network.target
 [Service]
 Type=simple
 User=vova
-WorkingDirectory=/home/vova/Binidex/BinoOptions
+WorkingDirectory=/home/vova/Binodex/BinoOptions
 Environment="TIMEFRAME=1m" "BINARY=true" "TEST=false"
-ExecStart=/home/vova/Binidex/BinoOptions/venv/bin/python3.11 main.py
+ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
 Restart=on-failure
 RestartSec=10
 
@@ -177,7 +180,7 @@ sudo systemctl daemon-reload
 ### 5.1. Ручной запуск (для тестирования)
 
 ```bash
-cd /home/vova/Binidex/BinoOptions
+cd /home/vova/Binodex/BinoOptions
 source venv/bin/activate
 
 # Запуск с переменными окружения
@@ -220,24 +223,24 @@ sudo journalctl -u option-1m-bin.service -f
 
 Логи записываются в папку `logs/` с именами по шаблону:
 ```
-/home/vova/Binidex/BinoOptions/logs/option_{timeframe}_{type}.log
+/home/vova/Binodex/BinoOptions/logs/option_{timeframe}_{type}.log
 ```
 
 Примеры:
-- `/home/vova/Binidex/BinoOptions/logs/option_1m_bin.log`
-- `/home/vova/Binidex/BinoOptions/logs/option_1m_otc.log`
+- `/home/vova/Binodex/BinoOptions/logs/option_1m_bin.log`
+- `/home/vova/Binodex/BinoOptions/logs/option_1m_otc.log`
 
 ### 6.2. Просмотр логов
 
 ```bash
 # В реальном времени
-tail -f /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
+tail -f /home/vova/Binodex/BinoOptions/logs/option_1m_bin.log
 
 # Последние 50 строк
-tail -n 50 /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
+tail -n 50 /home/vova/Binodex/BinoOptions/logs/option_1m_bin.log
 
 # Поиск ошибок
-grep "ERROR" /home/vova/Binidex/BinoOptions/logs/option_1m_bin.log
+grep "ERROR" /home/vova/Binodex/BinoOptions/logs/option_1m_bin.log
 ```
 
 ---
@@ -251,10 +254,10 @@ sudo systemctl stop option-1m-bin.service
 # Перезаливка кода с dev-машины (rsync, как при установке)
 rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
     --exclude 'logs/*' --exclude 'files/*' \
-    ./ vova@server:/home/vova/Binidex/BinoOptions/
+    ./ vova@server:/home/vova/Binodex/BinoOptions/
 
 # Обновление зависимостей (если менялись)
-cd /home/vova/Binidex/BinoOptions
+cd /home/vova/Binodex/BinoOptions
 source venv/bin/activate
 pip install -r requirements.txt
 playwright install firefox
@@ -270,7 +273,7 @@ sudo systemctl start option-1m-bin.service
 ### Ошибка "Browser closed unexpectedly"
 ```bash
 # Переустановка браузеров Playwright
-source /home/vova/Binidex/BinoOptions/venv/bin/activate
+source /home/vova/Binodex/BinoOptions/venv/bin/activate
 playwright install firefox --force
 playwright install-deps firefox
 ```
@@ -281,11 +284,11 @@ playwright install-deps firefox
 pg_isready -h localhost -p 6442
 
 # Проверка переменных окружения
-cat /home/vova/Binidex/BinoOptions/.env | grep PG_
+cat /home/vova/Binodex/BinoOptions/.env | grep PG_
 ```
 
 ### Проверка работы Playwright
 ```bash
-source /home/vova/Binidex/BinoOptions/venv/bin/activate
+source /home/vova/Binodex/BinoOptions/venv/bin/activate
 python -c "from playwright.sync_api import sync_playwright; print('Playwright OK')"
 ```
