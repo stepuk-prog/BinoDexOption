@@ -40,7 +40,7 @@ pip install -U pip
 pip install -r requirements.txt
 playwright install firefox
 
-# 4. .env — заполнить вручную (в git не коммитим)
+# 4. .env — заполнить вручную (в git не коммитим)ять
 nano .env
 
 # 5. Запуск экземпляра вручную (параметры передаются через env)
@@ -109,17 +109,17 @@ BinoOptions/
 
 Unit-файлы в папке `systemd/` (`WorkingDirectory=/home/vova/Binodex/BinoOptions`, запуск `venv/bin/python3.11 main.py`, параметры экземпляра — в `Environment=`):
 
-- `option-1m-bin.service`, `option-5m-bin.service` — Binary
-- `option-1m-otc.service`, `option-3m-otc.service`, `option-5m-otc.service` — OTC
+- `binodex-1m-bin.service`, `binodex-5m-bin.service` — Binary
+- `binodex-1m-otc.service`, `binodex-3m-otc.service`, `binodex-5m-otc.service` — OTC
 
 Установка:
 
 ```bash
-sudo cp systemd/option-*.service /etc/systemd/system/
+sudo cp systemd/binodex-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now option-1m-bin.service
-sudo systemctl status option-1m-bin.service
-sudo journalctl -u option-1m-bin -f
+sudo systemctl enable --now binodex-1m-bin.service
+sudo systemctl status binodex-1m-bin.service
+sudo journalctl -u binodex-1m-bin -f
 ```
 
 Подробнее: [DEPLOY.md](docs/DEPLOY.md)

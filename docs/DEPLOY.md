@@ -139,7 +139,7 @@ sudo cp /home/vova/Binodex/BinoOptions/systemd/*.service /etc/systemd/system/
 
 ```ini
 [Unit]
-Description=Option Bot 1m Binary
+Description=Binodex 1m Binary
 After=network.target
 
 [Service]
@@ -159,11 +159,11 @@ WantedBy=multi-user.target
 
 | Сервис                  | Таймфрейм | Тип    |
 |-------------------------|-----------|--------|
-| `option-1m-bin.service` | 1 минута  | Binary |
-| `option-1m-otc.service` | 1 минута  | OTC    |
-| `option-3m-otc.service` | 3 минуты  | OTC    |
-| `option-5m-bin.service` | 5 минут   | Binary |
-| `option-5m-otc.service` | 5 минут   | OTC    |
+| `binodex-1m-bin.service` | 1 минута  | Binary |
+| `binodex-1m-otc.service` | 1 минута  | OTC    |
+| `binodex-3m-otc.service` | 3 минуты  | OTC    |
+| `binodex-5m-bin.service` | 5 минут   | Binary |
+| `binodex-5m-otc.service` | 5 минут   | OTC    |
 
 Под другие ТФ/типы — скопировать юнит и поменять `Environment="TIMEFRAME=..." "BINARY=..."`.
 
@@ -191,13 +191,13 @@ TIMEFRAME=1m BINARY=true TEST=false python main.py
 
 ```bash
 # Запуск конкретного сервиса
-sudo systemctl start option-1m-bin.service
+sudo systemctl start binodex-1m-bin.service
 
 # Проверка статуса
-sudo systemctl status option-1m-bin.service
+sudo systemctl status binodex-1m-bin.service
 
 # Включение автозапуска
-sudo systemctl enable option-1m-bin.service
+sudo systemctl enable binodex-1m-bin.service
 ```
 
 > **Важно:** Если программой управляет GlobalDispatcher — НЕ включайте автозапуск (`enable`).
@@ -206,13 +206,13 @@ sudo systemctl enable option-1m-bin.service
 
 ```bash
 # Остановка
-sudo systemctl stop option-1m-bin.service
+sudo systemctl stop binodex-1m-bin.service
 
 # Перезапуск
-sudo systemctl restart option-1m-bin.service
+sudo systemctl restart binodex-1m-bin.service
 
 # Просмотр логов systemd
-sudo journalctl -u option-1m-bin.service -f
+sudo journalctl -u binodex-1m-bin.service -f
 ```
 
 ---
@@ -249,7 +249,7 @@ grep "ERROR" /home/vova/Binodex/BinoOptions/logs/option_1m_bin.log
 
 ```bash
 # Остановка сервисов
-sudo systemctl stop option-1m-bin.service
+sudo systemctl stop binodex-1m-bin.service
 
 # Перезаливка кода с dev-машины (rsync, как при установке)
 rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
@@ -263,7 +263,7 @@ pip install -r requirements.txt
 playwright install firefox
 
 # Запуск сервисов
-sudo systemctl start option-1m-bin.service
+sudo systemctl start binodex-1m-bin.service
 ```
 
 ---

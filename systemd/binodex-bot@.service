@@ -1,14 +1,13 @@
 [Unit]
-Description=Option Bot 1m OTC
+Description=Binodex %i
 After=network.target
 
 [Service]
 Type=simple
 User=vova
 WorkingDirectory=/home/vova/Binodex/BinoOptions
-Environment="TIMEFRAME=1m" "BINARY=false" "TEST=false"
 ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
-Restart=on-failure
+Restart=no
 RestartSec=10
 
 [Install]

@@ -197,25 +197,25 @@
 
 ### Маппинг API
 
-| Selenium | Playwright |
-|----------|------------|
-| `webdriver.Firefox(options)` | `playwright.firefox.launch()` |
-| `driver.get(url)` | `page.goto(url)` |
-| `driver.find_element(By.CSS_SELECTOR, s)` | `page.locator(s)` |
-| `driver.find_element(By.ID, id)` | `page.locator(f"#{id}")` |
-| `driver.find_element(By.CLASS_NAME, c)` | `page.locator(f".{c}")` |
-| `driver.find_element(By.XPATH, x)` | `page.locator(f"xpath={x}")` |
-| `WebDriverWait().until(EC.*)` | Встроенные auto-wait |
+| Selenium                                   | Playwright                       |
+|--------------------------------------------|----------------------------------|
+| `webdriver.Firefox(options)`               | `playwright.firefox.launch()`    |
+| `driver.get(url)`                          | `page.goto(url)`                 |
+| `driver.find_element(By.CSS_SELECTOR, s)`  | `page.locator(s)`                |
+| `driver.find_element(By.ID, id)`           | `page.locator(f"#{id}")`         |
+| `driver.find_element(By.CLASS_NAME, c)`    | `page.locator(f".{c}")`          |
+| `driver.find_element(By.XPATH, x)`         | `page.locator(f"xpath={x}")`     |
+| `WebDriverWait().until(EC.*)`              | Встроенные auto-wait             |
 | `ActionChains().move_to_element().click()` | `locator.click()` / `page.mouse` |
-| `element.screenshot(path)` | `locator.screenshot(path=path)` |
-| `driver.execute_script(js)` | `page.evaluate(js)` |
-| `driver.add_cookie(cookie)` | `context.add_cookies([cookie])` |
-| `driver.switch_to.new_window('tab')` | `context.new_page()` |
-| `element.get_attribute("textContent")` | `locator.text_content()` |
-| `element.value_of_css_property(p)` | `locator.evaluate()` |
-| `element.send_keys(text)` | `locator.fill(text)` |
-| `driver.refresh()` | `page.reload()` |
-| `driver.quit()` | `browser.close()` |
+| `element.screenshot(path)`                 | `locator.screenshot(path=path)`  |
+| `driver.execute_script(js)`                | `page.evaluate(js)`              |
+| `driver.add_cookie(cookie)`                | `context.add_cookies([cookie])`  |
+| `driver.switch_to.new_window('tab')`       | `context.new_page()`             |
+| `element.get_attribute("textContent")`     | `locator.text_content()`         |
+| `element.value_of_css_property(p)`         | `locator.evaluate()`             |
+| `element.send_keys(text)`                  | `locator.fill(text)`             |
+| `driver.refresh()`                         | `page.reload()`                  |
+| `driver.quit()`                            | `browser.close()`                |
 
 ---
 
