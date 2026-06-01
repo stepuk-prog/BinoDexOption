@@ -5,10 +5,21 @@ import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
-pg_name = os.getenv("DATABASE")
-pg_user = os.getenv("PG_USER")
-pg_password = os.getenv("PG_PASSWORD")
-pg_host = os.getenv("PG_HOST")
+
+
+def _require(name: str) -> str:
+    """Обязательная str-переменная окружения — понятная ошибка на старте вместо
+    криптичного падения asyncpg.connect(None) где-то в глубине."""
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"Не задана обязательная переменная окружения {name}")
+    return value
+
+
+pg_name = _require("DATABASE")
+pg_user = _require("PG_USER")
+pg_password = _require("PG_PASSWORD")
+pg_host = _require("PG_HOST")
 pg_port = int(os.getenv("PG_PORT", "5432"))  # дефолт стандартного порта PG — не падать на старте, если env не задан
 # Отдельная база с данными опционов (сигналы FIN/OTC). Те же host/port/логин,
 # отличается только именем базы. Настройки браузера и cookies остаются в pg_name.

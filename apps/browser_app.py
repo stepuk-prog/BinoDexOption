@@ -3,6 +3,7 @@ import asyncio
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from classes.browser_manager import BrowserManager
+from classes.exceptions import CookiesExpired
 from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
 from logs import init_logger
@@ -10,7 +11,8 @@ from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
     tf_link_price, pop_up2, pop_up3, scope_chip
-from settings.config import cookies, database, binary, prog_key
+from settings.config import (cookies, database, binary, prog_key, cookies_tv_id,
+                             cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
     POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY,
@@ -19,6 +21,12 @@ from settings.timing import (
 from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
+
+
+def _is_signin_url(url: str) -> bool:
+    """TradingView редиректит неавторизованных на /signin — детерминированный детект
+    отвала cookies (§4.1, основной сигнал; проверяется на init после goto+reload)."""
+    return '/signin' in url or '/accounts/signin' in url
 
 
 def setup_dialog_handler(page: Page):
@@ -224,8 +232,11 @@ STEALTH_JS = """
 """
 
 
-async def init_browser() -> BrowserInitResult:
-    """Инициализация браузера Playwright"""
+async def init_browser(storage_state=None) -> BrowserInitResult:
+    """Инициализация браузера Playwright.
+    storage_state — свежий OTC Privy-стейт из БД (Survive §4.3); None → фоллбэк на
+    import-снимок cookies (для probe-скриптов, что зовут init_browser() без БД-перечитки)."""
+    state = storage_state if storage_state is not None else cookies
     pw = None
     browser = None
     try:
@@ -233,11 +244,11 @@ async def init_browser() -> BrowserInitResult:
         browser = await pw.firefox.launch(**browser_launch_options)
         # OTC (binodex): контекст со storage_state (Privy держит сессию в localStorage,
         # одних cookies мало). FIN (TV): обычный контекст, куки добавляются позже add_cookies.
-        if not binary and isinstance(cookies, dict):
-            # cookies здесь — storage_state-dict из jsonb (Playwright принимает обычный dict);
+        if not binary and isinstance(state, dict):
+            # state здесь — storage_state-dict из jsonb (Playwright принимает обычный dict);
             # тип StorageState — TypedDict, поэтому инспекцию типа подавляем.
             # noinspection PyTypeChecker
-            context = await browser.new_context(storage_state=cookies, **context_options)
+            context = await browser.new_context(storage_state=state, **context_options)
         else:
             context = await browser.new_context(**context_options)
 
@@ -276,12 +287,14 @@ async def init_browser() -> BrowserInitResult:
         return BrowserInitResult(success=False, manager_or_error=f"Ошибка подключения браузера - {error}")
 
 
-async def open_tv_browser(manager: BrowserManager):
+async def open_tv_browser(manager: BrowserManager, cookies_override=None):
     """
     Загрузка браузера по cookies для TradingView
     :param manager: менеджер браузера
+    :param cookies_override: свежие TV-куки из БД (Survive §4.3); None → import-снимок cookies
     :return: tuple (success, error_message)
     """
+    tv_cookies = cookies_override if cookies_override is not None else cookies
     # Страницы TV из общей binodex.cookies.pages по (program, mode='tv').
     # Таблица содержит только нужные страницы (main, price) в порядке order_idx —
     # main идёт первой (idx == 0), все скриншоты снимаются с неё.
@@ -300,14 +313,24 @@ async def open_tv_browser(manager: BrowserManager):
             try:
                 await page.goto(page_data['url'], wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
 
-                # Добавляем cookies
-                await add_cookies_to_context(manager.context, cookies)
+                # Добавляем cookies (свежие из БД — Survive §4.3)
+                await add_cookies_to_context(manager.context, tv_cookies)
+                # NB: проактивный TTL (§4.4a) для TV здесь НЕ делаем — у TV-кук этого деплоя
+                # `expires` уже в прошлом, а сессия живёт (TV держит её server-side/sliding),
+                # т.е. срок в куке не отражает жизнь сессии (тот же капкан, что у Privy) →
+                # давал ложные «истекла». Реальную смерть TV-кук ловит реактивный /signin-детект.
 
                 await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
             except (Exception,) as error:
                 await close_program(manager=manager, status=1,
                                     text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
                 return OperationResult(success=False)
+
+            # Отвал cookies TV (§4.1/§4.3): после goto+reload остались на /signin → куки
+            # мертвы. CookiesExpired → init_load → _init_with_retry (backoff + пересоздание,
+            # БЕЗ выхода; куки перечитаются из БД на следующем init).
+            if _is_signin_url(page.url):
+                raise CookiesExpired(f'TradingView: редирект на /signin ({page.url}) — куки протухли')
         else:
             # Открываем новую вкладку через JavaScript
             try:
@@ -473,20 +496,39 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
 
 async def init_load() -> BrowserManager | bool:
     """
-    Запуск загрузки и настройки браузера
+    Запуск загрузки и настройки браузера. Survive §4.3: куки перечитываются из БД на
+    КАЖДОМ init — пересоздание браузера после отвала cookies подхватывает свежий refresh
+    без рестарта процесса. CookiesExpired пробрасывается наружу (после cleanup) →
+    main.py::_init_with_retry (backoff + повтор).
     :return: BrowserManager либо False
     """
-    result = await init_browser()
+    tv_override = None       # свежие TV-куки из БД (только в FIN-ветке; иначе не используется)
+    storage_state = None     # свежий OTC storage_state из БД (только в OTC-ветке)
+    if binary:
+        fresh = await database.get_tv_cookies(cookies_tv_id)  # list[dict] | None | False
+        tv_override = fresh if fresh else None                # DB-сбой/пусто → import-снимок
+    else:
+        fresh = await database.get_otc_cookies(cookies_pocket_id)  # storage_state dict | None | False
+        storage_state = fresh if fresh else cookies                # DB-сбой → import-снимок
+        if not storage_state:
+            logger.error('Нет storage_state OTC (ни в БД, ни в import-снимке) — init провалился')
+            return False
+
+    result = await init_browser(storage_state=storage_state)
     if not result.success:
         logger.error(result.manager_or_error)
         return False
 
     manager = result.manager
 
-    if binary:
-        browser_result = await open_tv_browser(manager)
-    else:
-        browser_result = await open_otc_browser(manager)
+    try:
+        if binary:
+            browser_result = await open_tv_browser(manager, cookies_override=tv_override)
+        else:
+            browser_result = await open_otc_browser(manager)
+    except CookiesExpired:
+        await manager.close()  # cleanup перед пробросом — не оставить осиротевший Firefox
+        raise
 
     if not browser_result.success:
         logger.error(browser_result.error)

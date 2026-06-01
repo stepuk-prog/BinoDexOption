@@ -9,14 +9,15 @@ from playwright.async_api import Page
 
 from apps.browser_app import init_valute_browser
 from apps.exit_app import close_program
-from apps.my_exeptions import lost_connection_photo
+from apps.my_exeptions import send_photo_safe
 from logs import init_logger
 from classes.Option_class import Option
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
 from settings.config import (channel_id, option_data, get_app, binary, program_id,
-                            shot_path, screenshot_path, database)
+                            shot_path, screenshot_path, database,
+                            main_cycle_pause_min, main_cycle_pause_max)
 from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
 from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
@@ -60,26 +61,18 @@ def get_water():
 async def check_plus():
     """Проверка количества плюсов"""
     kol_plus = await database.plus_counter(program_id=program_id)
-    await asyncio.sleep(CHECK_PLUS_DELAY)
-
     if not kol_plus:  # False/None — ошибка пула или нет строки счётчика
         return True, ''
     plus_milestones = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
     count = kol_plus['plus']
 
     if count in plus_milestones:
+        await asyncio.sleep(CHECK_PLUS_DELAY)  # пауза перед постом-вехой (не в каждом плюсовом цикле)
         caption = plus_message(count)
         photo = f'{PLUS_IMAGE_DIR}/{count}.png'
-        try:
-            await asyncio.wait_for(
-                get_app().send_photo(chat_id=channel_id, photo=photo, caption=caption),
-                timeout=TG_SEND_TIMEOUT)
-        except (Exception,) as error:
-            bug_fix = await lost_connection_photo(error=error, photo=photo, text=caption,
-                                                  mes_type=f'сообщение {count} плюс')
-            if not bug_fix[0]:
-                error_text = f'Ошибка отправки сообщения {count} плюс! - {bug_fix[1]}'
-                return False, error_text
+        ok, err = await send_photo_safe(photo, caption, mes_type=f'сообщение {count} плюс')
+        if not ok:
+            return False, f'Ошибка отправки сообщения {count} плюс! - {err}'
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
         bug_fix = await dop_plus_message()
         if bug_fix[0]:
@@ -276,7 +269,6 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
     :param resume: направление сигнала
     :return: (success, error_message)
     """
-    i_color = 0
     if 'ПОКУПАТЬ' in resume:
         color = bull_color
     else:
@@ -287,7 +279,8 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
     await page.bring_to_front()
     price_element = page.locator(f"xpath={price_field}").first  # локатор постоянен — вне цикла
 
-    while i_color == 0:
+    # Выход только изнутри: нашли цвет (True), превысили лимит времени или ошибка (False).
+    while True:
         try:
             # Проверка тайм-аута в начале итерации
             if datetime.now() > while_time:
@@ -309,8 +302,6 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
         except (Exception,) as error:
             error_text = f'Ошибка определения входа в опцион - {str(error)}'
             return False, error_text
-
-    return True, ''
 
 
 def clear_price(price_str: str) -> str:
@@ -347,24 +338,17 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
 async def dop_plus_message():
     """Дополнительное сообщение для плюсов"""
     message_text = dop_plus10_message()
-    try:
-        await asyncio.wait_for(
-            get_app().send_photo(chat_id=channel_id, photo=PLUS_SERIES_IMAGE, caption=message_text),
-            timeout=TG_SEND_TIMEOUT)
+    ok, err = await send_photo_safe(PLUS_SERIES_IMAGE, message_text,
+                                    mes_type='дополнительное сообщение плюсов')
+    if ok:
         return True, ''
-    except (Exception,) as error:
-        bug_fix = await lost_connection_photo(error=error, photo=PLUS_SERIES_IMAGE, text=message_text,
-                                              mes_type='дополнительное сообщение плюсов')
-        if not bug_fix[0]:
-            error_text = f"Ошибка отправки дополнительного сообщения плюсов - {str(error)}"
-            return False, error_text
-        else:
-            return True, ''
+    return False, f"Ошибка отправки дополнительного сообщения плюсов - {err}"
 
 
 async def time_sleep():
-    """Случайная задержка"""
-    sleep_time = random.randint(100, 120)
+    """Случайная пауза между циклами main (§7: границы в .env MAIN_CYCLE_PAUSE_MIN/MAX,
+    дефолты = историческому хардкоду 100/120; для OTC +30, как было)."""
+    sleep_time = random.randint(main_cycle_pause_min, main_cycle_pause_max)
     if binary:
         return sleep_time
     else:

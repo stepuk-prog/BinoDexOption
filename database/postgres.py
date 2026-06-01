@@ -222,6 +222,20 @@ class Database:
         return await self.execute_query(sql, program, mode, fetch_mode='all',
                                         func='pages', db='binodex')
 
+    async def get_tv_cookies(self, user_id: int):
+        """TV-куки (list[dict]) из Program.cookies.tv_cookies. Перечитываются на каждом
+        init (Survive §4.3) — чтобы пересоздание после отвала подхватило свежий refresh."""
+        sql = "SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1"
+        return await self.execute_query(sql, user_id, fetch_mode='val',
+                                        func='get_tv_cookies', db='program')
+
+    async def get_otc_cookies(self, user_id: int):
+        """Privy storage_state binodex (OTC) из binodex.cookies.binodex_cookies.
+        Перечитывается на каждом init (Survive §4.3) — подхват ручного/авто refresh."""
+        sql = "SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1"
+        return await self.execute_query(sql, user_id, fetch_mode='val',
+                                        func='get_otc_cookies', db='binodex')
+
     async def close_program(self, program_id: int):
         """status=false в program.programdata (Program) — сигнал диспетчеру, что
         программа штатно остановлена и не должна перезапускаться до вмешательства."""

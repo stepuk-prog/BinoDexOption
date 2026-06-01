@@ -1,20 +1,101 @@
 import asyncio
 import signal
-import sys
-from datetime import datetime, timedelta
 
-from pyrogram.errors import Unauthorized
+from datetime import datetime, timedelta
 
 from apps.app import get_water, time_sleep, request_shutdown
 from apps.browser_app import init_load
-from apps.exit_app import close_program, session_dead_shutdown
+from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
+                           write_status_offline)
 from apps.main_app import main
+from apps.otc_app import otc_session_dead
+from classes.exceptions import CookiesExpired
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id
-from settings.timing import USERBOT_RETRY_DELAY, TG_SEND_TIMEOUT
+from settings.timing import USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, TG_SEND_TIMEOUT
 
 logger = init_logger(__name__)
+
+# Отвал cookies (TV/OTC) — НЕ выход (политика Survive §4.3): пауза + пересоздание браузера
+# (куки перечитываются из БД). Анти-спам бэкофф: первые COOKIES_FAST_ATTEMPTS попыток через
+# 120с, далее — 300с. Программа крутится, пока куки не починят. Прочий провал init — пауза и повтор.
+INIT_RETRY_DELAY = 10
+COOKIES_RETRY_DELAY_FAST = 120
+COOKIES_RETRY_DELAY_SLOW = 300
+COOKIES_FAST_ATTEMPTS = 5
+
+# Счётчик подряд идущих отвалов cookies (для бэкоффа). Сбрасывается при успешном init.
+_cookie_fails = 0
+# Событие остановки (SIGTERM/SIGINT). Глобально — чтобы cookies-backoff (до 300с) в
+# _init_with_retry прерывался сигналом, а не ждал SIGKILL. Ставится в bot() ДО первого init.
+_stop_event: asyncio.Event | None = None
+
+
+def _reset_cookie_fails():
+    global _cookie_fails
+    _cookie_fails = 0
+
+
+async def _interruptible_sleep(seconds: float) -> bool:
+    """Сон, прерываемый сигналом остановки. True — проснулись по сигналу (надо завершаться),
+    False — по таймауту. До установки _stop_event (самый первый init) — обычный sleep."""
+    if _stop_event is None:
+        await asyncio.sleep(seconds)
+        return False
+    if _stop_event.is_set():
+        return True
+    try:
+        await asyncio.wait_for(_stop_event.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def _handle_cookie_failure(detail: str = '') -> bool:
+    """Отвал cookies — сообщение в cookies-канал + анти-спам пауза (120с×N, далее 300с) +
+    возврат (caller пересоздаёт браузер, init перечитает куки из БД). См. §4.3.
+    :return: True, если пауза прервана сигналом остановки (надо завершаться)."""
+    global _cookie_fails
+    _cookie_fails += 1
+    delay = (COOKIES_RETRY_DELAY_FAST if _cookie_fails <= COOKIES_FAST_ATTEMPTS
+             else COOKIES_RETRY_DELAY_SLOW)
+    mode_label = 'TV' if binary else 'OTC'
+    logger.cookies(f'{mode_label}: отвал cookies (попытка {_cookie_fails}, пауза {delay // 60} мин, '
+                   f'пересоздаю браузер). {detail}'.rstrip())
+    return await _interruptible_sleep(delay)
+
+
+async def _init_with_retry():
+    """init_load с обработкой отвала cookies (Survive §4.3): CookiesExpired → cookies-backoff
+    (сообщение + пауза, на повторе init перечитает куки из БД) → повтор, БЕЗ выхода. Прочий
+    провал init_load → пауза INIT_RETRY_DELAY и повтор. Паузы прерываются сигналом остановки.
+    :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
+    while True:
+        if _stop_event is not None and _stop_event.is_set():
+            return None
+        try:
+            manager = await init_load()
+        except CookiesExpired as error:
+            if await _handle_cookie_failure(str(error)):  # пауза прервана сигналом
+                return None
+            continue  # пересоздаём на новом витке — init перечитает куки
+        if manager:
+            _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
+            return manager
+        logger.error(f'init_load провалился — пауза {INIT_RETRY_DELAY}с и повтор')
+        if await _interruptible_sleep(INIT_RETRY_DELAY):
+            return None
+
+
+async def _recreate_browser(manager):
+    """Закрыть текущий браузер и поднять заново через _init_with_retry (Survive §4.3).
+    :return: новый BrowserManager либо None (остановлены сигналом)."""
+    try:
+        await manager.close()
+    except (Exception,):
+        pass
+    return await _init_with_retry()
 
 
 async def bot():
@@ -28,28 +109,33 @@ async def bot():
     # Создаём Pyrogram Client внутри event loop
     app = get_app()
 
-    # Запуск юзербота. Недействительная session → штатный стоп с записью в БД и алертом,
-    # без перезапуска (пока не обновят данные). Прочие сбои — до 5 попыток переподключения.
-    attempts = 5
-    for attempt in range(1, attempts + 1):
+    # Запуск юзербота — две ветки (§3.2). A: ключ доказано мёртв (session_failed) →
+    # сразу штатный стоп с записью status=false и session-алертом, без ретраев (каждая
+    # попытка пойдёт с тем же отозванным ключом). B: transient-обрыв (сеть/таймаут) →
+    # до USERBOT_CONNECT_ATTEMPTS попыток; не переподключились → тот же плановый выход.
+    last_error = None
+    for attempt in range(1, USERBOT_CONNECT_ATTEMPTS + 1):
         try:
             await app.start()
             break
-        except Unauthorized as error:
-            await session_dead_shutdown(error)  # делает sys.exit(0); return — страховка
-            return
         except (Exception,) as error:
-            logger.warning(f"Попытка {attempt}/{attempts} запуска юзербота не удалась: {error}")
+            if session_failed(error):                # ветка A — без ретраев
+                await session_dead_shutdown(error)   # sys.exit(0); return — страховка
+                return
+            last_error = error                       # ветка B — копим и ретраим
+            logger.warning(f"Попытка {attempt}/{USERBOT_CONNECT_ATTEMPTS} запуска юзербота: {error}")
             try:
                 if getattr(app, "is_connected", False):
                     await app.stop()
             except (Exception,):
                 pass
-            if attempt < attempts:
+            if attempt < USERBOT_CONNECT_ATTEMPTS:
                 await asyncio.sleep(USERBOT_RETRY_DELAY)
-            else:
-                logger.error(f"Юзербот не подключился после {attempts} попыток: {error}")
-                sys.exit(1)
+    else:
+        # Все попытки исчерпаны без переподключения → session невалидна (§3.2) → плановый выход.
+        await session_dead_shutdown(last_error,
+                                    reason=f'нет переподключения за {USERBOT_CONNECT_ATTEMPTS} попыток')
+        return
 
     if binary:
         now = datetime.now()  # один снимок времени — иначе возможен переход минуты/часа между вызовами
@@ -67,51 +153,74 @@ async def bot():
                     timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.error(f'Ошибка отправки сообщения о выходных - {error}')
-            await database.close_program(program_id=program_id)
+            await write_status_offline(program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
 
     water_naked = get_water()
     qr = water_naked[1] if water_naked[0] else None
 
-    manager = await init_load()
-    if not manager:
-        logger.error("Перезагрузка бота - не загрузился драйвер")
-        sys.exit(1)
-
-    logger.info("✅ Браузер инициализирован, страницы: %s", list(manager.pages.keys()))
-    logger.info("🔄 Переход в main loop...")
-
-    # Graceful shutdown по SIGTERM/SIGINT (systemctl stop / диспетчер) — как в
-    # примере, но async-вариант: signal.signal+KeyboardInterrupt в asyncio не
-    # ловится внутри корутины, поэтому через loop.add_signal_handler + Event.
+    # Graceful shutdown по SIGTERM/SIGINT (systemctl stop / диспетчер) — async-вариант:
+    # signal.signal+KeyboardInterrupt в asyncio не ловится внутри корутины, поэтому через
+    # loop.add_signal_handler + Event. Ставим ДО init: cookies-backoff (до 300с) в
+    # _init_with_retry прерывается этим сигналом (иначе SIGTERM ждал бы SIGKILL).
+    global _stop_event
     stop_event = asyncio.Event()
+    _stop_event = stop_event
     loop = asyncio.get_running_loop()
 
     def _on_stop_signal():
         stop_event.set()
         request_shutdown()  # подавить main_bug_message — это штатная остановка, не сбой
 
+    # Через переменную — гасит ложную инспекцию сигнатуры add_signal_handler
+    # (*args в стабе ошибочно считается обязательным; рантайму он не нужен).
+    register_signal = loop.add_signal_handler
     for _sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            # *args у add_signal_handler опционален — ложное срабатывание инспекции
-            # noinspection PyArgumentList
-            loop.add_signal_handler(_sig, _on_stop_signal)
+            register_signal(_sig, _on_stop_signal)
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен
 
+    # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
+    manager = await _init_with_retry()
+    if manager is None:  # остановлены сигналом во время init/cookies-backoff
+        try:
+            await app.stop()
+        except (Exception,):
+            pass
+        await write_status_offline(program_id)
+        await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
+        return
+
+    logger.info("✅ Браузер инициализирован, страницы: %s", list(manager.pages.keys()))
+    logger.info("🔄 Переход в main loop...")
+
     while not stop_event.is_set():
         res_option = await main(manager=manager, qr=qr, stop_event=stop_event)
-        # OTC: подозрение на отвал cookies (одинаковая цена N раз подряд) → перезагрузка
-        if not binary and res_option[4] > 2:
-            await close_program(manager=manager, status=1, text='Подозрение на отвал cookies')
-            return  # close_program делает sys.exit; явный выход (правило 9)
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —
         # это штатный стоп, не сбой; уходим в graceful-ветку ниже (status=false).
         if stop_event.is_set():
             break
 
+        # OTC: отвал cookies в рантайме (§4.1/§4.3 Survive). ОСНОВНОЙ сигнал —
+        # otc_session_dead (редирект с /trade ИЛИ мёртвый WS-фид). ВТОРИЧНЫЙ — эвристика
+        # «цена не меняется N циклов» (на плоском рынке даёт ложняки). Реакция — НЕ выход,
+        # а пересоздание браузера (куки перечитаются из БД; реальный backoff сделает
+        # _init_with_retry, когда init снова упрётся в редирект → CookiesExpired).
+        if not binary:
+            dead, reason = await otc_session_dead(manager)
+            if not dead and res_option[4] > 2:
+                dead, reason = True, 'цена не меняется N циклов подряд (вторичный сигнал)'
+            if dead:
+                logger.cookies(f'OTC: отвал cookies в рантайме ({reason}) — пересоздаю браузер')
+                manager = await _recreate_browser(manager)
+                if manager is None:  # остановлены сигналом во время пересоздания
+                    break
+                continue
+
+        # Критическая ошибка (краш, НЕ cookies) → выход; диспетчер рестартит (§1).
         if not res_option[0] and res_option[2]:
             await app.stop()
             await close_program(manager=manager, status=1, text=f'Перезагрузка бота ☄️. Ошибка - {res_option[3]}')
@@ -139,7 +248,7 @@ async def bot():
                 except (Exception,) as error:
                     logger.error(f'Ошибка отправки сообщения о выходных - {error}')
                 await app.stop()
-                await database.close_program(program_id=program_id)
+                await write_status_offline(program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')
                 return
 
@@ -149,7 +258,7 @@ async def bot():
         await app.stop()
     except (Exception,):
         pass
-    await database.close_program(program_id=program_id)
+    await write_status_offline(program_id)
     await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
 
 

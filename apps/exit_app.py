@@ -2,13 +2,47 @@ import asyncio
 import sys
 from typing import TYPE_CHECKING
 
+from pyrogram.errors import Unauthorized
+
 from logs import init_logger
-from settings.timing import LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY, SHUTDOWN_STEP_TIMEOUT
+from settings.timing import (LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY, SHUTDOWN_STEP_TIMEOUT,
+                             STATUS_WRITE_TIMEOUT)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
 logger = init_logger(__name__)
+
+# Маркеры мёртвой session: pyrogram не всегда отдаёт ошибку типом Unauthorized — бывает
+# обёрнуто/прокинуто текстом. Только isinstance(Unauthorized) недостаточно (так было в
+# BinoOptions): обёрнутая ошибка ушла бы мимо детекта → диспетчер зациклил бы рестарт
+# мёртвой session. См. семейный стандарт §3.1.
+_SESSION_FAIL_MARKERS = (
+    'AUTH_KEY_UNREGISTERED', 'AUTH_KEY_INVALID', 'AUTH_KEY_DUPLICATED',
+    'SESSION_EXPIRED', 'SESSION_REVOKED', 'SESSION_PASSWORD_NEEDED',
+    'USER_DEACTIVATED', 'USER_DEACTIVATED_BAN', 'PHONE_NUMBER_UNOCCUPIED',
+    'NO SUCH FILE OR DIRECTORY',   # .session-файл пропал (тест-режим)
+)
+
+
+def session_failed(error: BaseException) -> bool:
+    """session юзербота доказано мертва: тип Unauthorized ИЛИ строковый маркер (§3.1)."""
+    return isinstance(error, Unauthorized) or any(
+        m in str(error).upper() for m in _SESSION_FAIL_MARKERS)
+
+
+async def write_status_offline(program_id: int):
+    """Запись program.programdata.status=false — НЕ глотать сбой (§1.1): это единственный
+    шаг shutdown, где тихий провал опасен (диспетчер начнёт перезапускать мёртвую
+    session/куки по кругу). Поэтому с явным таймаутом и логом ошибки."""
+    from settings.config import database  # lazy — избегаем циклических импортов
+    try:
+        if await asyncio.wait_for(database.close_program(program_id=program_id),
+                                  timeout=STATUS_WRITE_TIMEOUT) is False:
+            logger.error('Не удалось записать programdata.status=false — '
+                         'диспетчер может перезапустить мёртвую session/куки')
+    except (Exception,) as error:
+        logger.error(f'Сбой записи programdata.status=false: {error} — возможен лишний рестарт')
 
 
 async def _close_userbot():
@@ -76,17 +110,17 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     sys.exit(status)
 
 
-async def session_dead_shutdown(error):
+async def session_dead_shutdown(error, reason: str = ''):
     """
-    Недействительна session юзербота → штатный стоп: ошибка в error-канал, отдельный
-    алерт (как cookies), запись status=false в БД, graceful-выход (status=0, без рестарта,
-    пока не обновят session). Вызывается и на старте, и при отвале во время отправки.
+    session юзербота недоступна → штатный стоп: ошибка в error-канал, критичный алерт в
+    ВЫДЕЛЕННЫЙ session-канал (НЕ cookies — иначе поток cookies похоронит алерт, §3.3),
+    запись status=false в БД (громко, §1.1), graceful-выход (status=0, без рестарта, пока
+    не обновят session). Вызывается на старте (мёртвый ключ или нет переподключения за N
+    попыток) и при отвале во время работы.
     """
-    from settings.config import database, program_id  # lazy — избегаем циклических импортов
-    logger.error(f"Недействительна session юзербота: {error}")
-    logger.cookies("🔒 Отвал юзербота — недействительна session, требуется обновление данных. Останавливаюсь.")
-    try:
-        await database.close_program(program_id=program_id)
-    except (Exception,) as e:
-        logger.warning(f"Не удалось записать close_program в БД: {e}")
+    from settings.config import program_id  # lazy — избегаем циклических импортов
+    suffix = f" ({reason})" if reason else ''
+    logger.error(f"Недоступна session юзербота{suffix}: {error}")
+    logger.session(f"🔒 Отвал юзербота — session недоступна{suffix}, требуется обновление данных. Останавливаюсь.")
+    await write_status_offline(program_id)
     await close_program(manager=None, status=0, text="Отвал юзербота (session) 🔒")

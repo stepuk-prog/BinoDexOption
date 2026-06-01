@@ -22,6 +22,10 @@ def _req_int(name: str) -> int:
 error_channel = _req_int("ERROR_CHANNEL")
 message_channel = _req_int("MESSAGE_CHANNEL")
 cookies_channel = _req_int("COOKIES_CHANNEL")
+# Отвал session юзербота — в ВЫДЕЛЕННЫЙ канал (не в шумный cookies-канал, иначе поток
+# cookies-сообщений похоронит единственный критичный алерт). Опционален: фоллбэк на error.
+_session_channel_raw = os.getenv("SESSION_CHANNEL")
+session_channel = int(_session_channel_raw) if _session_channel_raw else error_channel
 token = os.getenv("TOKEN")
 timeframe = os.getenv("TIMEFRAME", "unknown")
 binary = parse_bool(os.getenv("BINARY"))

@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Ревью кода (аудит ошибок/зависаний/дублей/мёртвого кода)
+- Fail-fast для PG-кред: `DATABASE`/`PG_USER`/`PG_PASSWORD`/`PG_HOST` читаются через `_require`
+  (понятная ошибка на старте вместо криптичного `asyncpg.connect(None)`).
+- `config`: `option_setting.translocation` валидируется (список ≥2) — иначе был бы
+  `TypeError`/`IndexError` на импорте (краш до подъёма логгера).
+- Дедуп отправки в Telegram: единый `my_exeptions.send_photo_safe` (таймаут + восстановление);
+  `main_app._try_send`, `app.check_plus`, `app.dop_plus_message` сведены к нему (было 3 копии).
+- `check_plus`: `asyncio.sleep(CHECK_PLUS_DELAY)` перенесён внутрь ветки поста-вехи (не тратится
+  в каждом плюсовом цикле).
+- `find_point`: мёртвый `while i_color == 0` → `while True`, убран недостижимый `return`.
+- Убраны неиспользуемые импорты (`channel_id` в main_app, `lost_connection_photo` в app).
+
+### Приведение к семейному стандарту BinoDex (lifecycle-standard)
+- §10 OTC-цена ↔ график: трекер хранит историю тиков `(recv_wall, price)`; `screenshot_otc`
+  фиксирует `t_shot` ДО скрина и берёт `get_price_at` (тик до кадра, а не свежий после) —
+  убирает «забег вперёд». Разбор и эмпирика — `docs/BINODEX_PRICE.md`.
+- §3.1/§3.2 session-детект: `session_failed()` = `Unauthorized` + строковые `_SESSION_FAIL_MARKERS`
+  (раньше только `isinstance`); старт юзербота двумя ветками (мёртвый ключ → сразу выход;
+  transient → 3 попытки → плановый выход); рантайм-детект в `my_exeptions` через `session_failed`.
+- §3.3 выделенный канал session-алертов: уровень логгера `SESSION` (37), `logger.session`,
+  env `SESSION_CHANNEL` (фоллбэк на `error_channel`) — больше не уходит в шумный cookies-канал.
+- §1.1 запись `status=false` не глотается: `write_status_offline()` (таймаут + `logger.error`
+  при сбое), все плановые выходы переведены на неё.
+- §4.1/§4.3 cookies: детект по URL-редиректу (TV `/signin`, OTC уход с `/trade`), эвристика
+  цены — вторичная. Политика **Survive**: `CookiesExpired` → анти-спам backoff (120с×5, далее
+  300с) + пересоздание браузера, куки перечитываются из БД на каждом init (`get_tv_cookies`/
+  `get_otc_cookies`), процесс не выходит. Backoff прерывается SIGTERM.
+- §4.4 усиления детекта: runtime WS-liveness OTC (`ws.on('close')` + `feed_dead`). Проактивный
+  TTL TV — НЕ внедряли: проверка на живых данных показала, что у TV-кук `expires` уже в прошлом
+  (−229 дней), а сессия рабочая — TradingView держит её server-side, игнорируя срок куки (тот же
+  капкан, что у Privy). TTL давал ложное «истекла» → реальную смерть TV-кук ловит реактивный
+  `/signin`-детект (§4.1). `cookie_health.py` удалён.
+- §7 пауза между циклами — в `.env` (`MAIN_CYCLE_PAUSE_MIN`/`MAX`, дефолты 100/120, для OTC +30).
+
 ### Аудит и оптимизация
 - env: дефолты/валидация (`OVERLAP`/`OVERLAP_RANDOM`/`PG_PORT`, обязательные каналы) —
   понятная ошибка вместо `TypeError` на отсутствующем env; добавлен `.env.example`.

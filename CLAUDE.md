@@ -44,4 +44,4 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - `scripts/place_qr.py` — наложение QR на скрин; `scripts/probe_otc.py` — диагностика OTC-флоу на живом binodex; `scripts/binodex_settings.sql` — DDL селекторов.
 
 ## Доки
-`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.
+`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: WS-источник + синхронизация с кадром), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.

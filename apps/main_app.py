@@ -3,12 +3,12 @@ import random
 from typing import TYPE_CHECKING
 
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
-from apps.my_exeptions import lost_connection_photo
+from apps.my_exeptions import send_photo_safe
 from apps.otc_app import parce_otc, screenshot_otc
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
-from settings.config import channel_id, option_data, get_app, binary, overlap, overlap_random, screenshot_path
+from settings.config import option_data, get_app, binary, overlap, overlap_random, screenshot_path
 from settings.timing import BETWEEN_MESSAGES_DELAY, POST_SCREENSHOT_DELAY
 from settings.image_paths import DOGON_IMAGES, NEW_FORECAST_IMAGES
 
@@ -22,17 +22,9 @@ logger = init_logger(__name__)
 
 
 async def _try_send(bot, photo, caption, mes_type: str, timeout: float = 30.0) -> tuple[bool, str]:
-    """Отправка поста с обработкой обрыва связи и таймаутом (не зависать). Возврат (ok, текст_ошибки)."""
-    try:
-        coro = bot.send_photo(chat_id=channel_id, photo=photo, caption=caption)
-        await asyncio.wait_for(coro, timeout=timeout)
-        return True, ''
-    except asyncio.TimeoutError:
-        logger.error("❌ Таймаут отправки (%s)", mes_type)
-        return False, 'Таймаут Pyrogram'
-    except (Exception,) as error:
-        logger.error("❌ Ошибка отправки (%s): %s", mes_type, error)
-        return await lost_connection_photo(error=error, photo=photo, text=caption, mes_type=mes_type)
+    """Отправка поста с обработкой обрыва связи и таймаутом — тонкая обёртка над единым
+    send_photo_safe (bot не нужен: клиент берётся из get_app()-синглтона). Возврат (ok, err)."""
+    return await send_photo_safe(photo, caption, mes_type, timeout)
 
 
 async def _sleep_or_stop(stop_event, seconds: float):

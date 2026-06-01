@@ -51,8 +51,13 @@ test = parse_bool(os.getenv("TEST", "0"))
 overlap = _env_int("OVERLAP", "0")
 program_id = option['program_id']
 overlap_random = _env_int("OVERLAP_RANDOM", "0")
+# Пауза между циклами main — в .env (§7), дефолты = историческому хардкоду (для OTC +30
+# добавляет time_sleep). Тайминги retry/backoff остаются константами в коде.
+main_cycle_pause_min = _env_int("MAIN_CYCLE_PAUSE_MIN", "100")
+main_cycle_pause_max = _env_int("MAIN_CYCLE_PAUSE_MAX", "120")
 if test:
-    channel_id = _env_int("CHANNEL")
+    # Тест (§2): файловая session под files/ (TEST_SESSION_FILE), креды/канал — из .env.
+    channel_id = _env_int("TEST_CHANNEL")
     api_id = os.getenv("TEST_API_ID")
     api_hash = os.getenv("TEST_API_HASH")
     session_file = os.getenv("TEST_SESSION_FILE")
@@ -69,9 +74,13 @@ else:
         raise ValueError(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
     api_id = creds['api_id']
     api_hash = creds['api_hash']
-    # Сессия из БД (Pyrogram session string). Если пусто — fallback на файл files/*.session.
+    # Прод (§2): только session_string из БД (in_memory, без .session на диске). Пустой
+    # session_string → явная ошибка на старте (нужна переавторизация и заливка строки в БД).
     session_string = creds['session_string']
-    session_file = f'files/{option["session_file"]}'
+    if not session_string:
+        raise ValueError(f"Пустой session_string для юзербота id_telegram={option['user_bot']} "
+                         f"в telegram.telegram — нужна переавторизация и заливка строки в БД")
+    session_file = None  # прод не использует файловую session (только TEST=1)
 prog_name = option['prog_name']
 # Куки. FIN (TV) — плоский list[dict] из Program.cookies.tv_cookies (add_cookies).
 # OTC (binodex) — storage_state {cookies, origins} из binodex.cookies.binodex_cookies
@@ -95,15 +104,26 @@ if cook_otc_override and not binary:
         raise ValueError(f"COOK_OTC={cook_otc_override}: storage_state не найден в cookies.binodex_cookies")
     logger.info("COOK_OTC override: загружены куки для user_id=%s", cook_otc_override)
 
+# user_id владельцев кук — для рантайм-перечитывания из БД на каждом init (Survive §4.3:
+# пересоздание браузера после отвала cookies подхватывает свежий refresh без рестарта).
+cookies_tv_id = option['cookies_tv']
+cookies_pocket_id = int(cook_otc_override) if (cook_otc_override and not binary) else option['cookies_pocket']
+
 # Test override: переадресация основных сигналов в другой канал через env SIGNAL_CHANNEL
 signal_channel_override = os.getenv("SIGNAL_CHANNEL")
 if signal_channel_override:
     channel_id = int(signal_channel_override)
     logger.info("SIGNAL_CHANNEL override: channel_id=%s", channel_id)
 option_data = Option(tf=timeframe, dogon=option['dogon'])
-option_data.start_random = option['translocation'][0]
+# translocation — пара [start_random, end_random] из jsonb БД. Проверяем явно, иначе
+# NULL/короткий массив дал бы TypeError/IndexError на импорте (краш до подъёма логгера).
+translocation = option['translocation']
+if not isinstance(translocation, (list, tuple)) or len(translocation) < 2:
+    raise ValueError(f"Некорректный option_setting.translocation={translocation!r} — "
+                     f"ожидается массив [start_random, end_random]")
+option_data.start_random = translocation[0]
 option_data.binary = binary
-option_data.end_random = option['translocation'][1]
+option_data.end_random = translocation[1]
 option_data.timeframe = timeframe
 
 # Ленивая инициализация Pyrogram Client (создаётся при первом вызове get_app())
@@ -111,17 +131,19 @@ _app: Client | None = None
 
 
 def get_app() -> Client:
-    """Получить Pyrogram Client (создаётся лениво внутри event loop)"""
+    """Получить Pyrogram Client (создаётся лениво внутри event loop). §2: прод —
+    session_string из БД (in_memory, без файла); тест (TEST=1) — файловая session
+    (TEST_SESSION_FILE). Прод с пустым session_string уже отсечён на старте (config)."""
     global _app
     if _app is None:
         try:
-            if session_string:
-                # Сессия из БД — без файла на диске.
+            if test:
+                # Тест: файловая session files/*.session (TEST_SESSION_FILE).
+                _app = Client(name=session_file, api_id=api_id, api_hash=api_hash)
+            else:
+                # Прод: сессия из БД — без файла на диске.
                 _app = Client(name=prog_name, api_id=api_id, api_hash=api_hash,
                               session_string=session_string, in_memory=True)
-            else:
-                # Fallback: файловая сессия files/*.session.
-                _app = Client(name=session_file, api_id=api_id, api_hash=api_hash)
         except (Exception,) as e:
             logger.error(f"Ошибка создания Pyrogram Client: {e}")
             raise
