@@ -2,12 +2,19 @@
 
 Логин — storage_state (Privy) из binodex.cookies.binodex_cookies (контекст создаётся с
 ним в browser_app.init_browser). Страница — из binodex.cookies.pages (bino_option/otc).
-Выбор пары — модалка binodex по селекторам из binodex_settings. Цена — из WebSocket
-api-coins.binodex.io (на странице она в <canvas>); округление до decimals делает main_app
-через option_data.round (= otc_assets.decimals). Скрин — зона графика (canvas) + QR.
+Выбор пары — модалка binodex по селекторам из binodex_settings.
+
+Цена кадра — медиана нескольких быстрых чтений window.chartData.price вокруг screenshot
+(см. docs/BINODEX_PRICE.md): это значение, которое движок рисует на ярлыке графика. Оно
+точнее WS-тика — WS опережает график на ~150 мс (график плавно доезжает до свежего тика),
+поэтому WS-цена «убегала вперёд» от картинки. WS-трекер оставлен как фолбэк (если chartData
+недоступен) и под liveness (подтверждение загрузки пары, init, feed_dead). Округление до
+decimals делает main_app через option_data.round (= otc_assets.decimals). Скрин — зона
+графика (canvas) + QR.
 """
 import asyncio
 import re
+import statistics
 import time
 from typing import TYPE_CHECKING
 
@@ -15,7 +22,7 @@ from PIL import Image
 from playwright.async_api import Page, WebSocket
 
 from classes.Option_class import Option
-from classes.price_tracker import WebSocketPriceTracker
+from classes.price_tracker import WebSocketPriceTracker, _symbol_key
 from classes.result_types import OperationResult
 from classes.exceptions import CookiesExpired
 from apps.exit_app import close_program
@@ -30,6 +37,16 @@ if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
 PRICE_WS_HINT = "api-coins.binodex.io"  # WS котировок binodex
+
+# Цена графика прямо со страницы: движок binodex держит её в window.chartData = {symbol, price}.
+# price — анимированное значение, которое рисуется на ярлыке (округляется до decimals в main_app).
+CHART_DATA_JS = ("() => { const c = window.chartData;"
+                 " return (c && typeof c.price === 'number')"
+                 " ? { symbol: c.symbol, price: c.price } : null; }")
+# Медиана нескольких быстрых чтений вокруг кадра гасит редкий анимационный выброс ярлыка
+# (проверено: 3+3 чтения → 9/10 совпадений с нарисованным ценником; см. docs/BINODEX_PRICE.md).
+CHART_READS_BEFORE = 3  # чтений chartData вплотную ДО screenshot
+CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
 
 logger = init_logger(__name__)
 
@@ -198,22 +215,48 @@ async def get_price(asset: str = None) -> float | bool:
     return price if price is not None else False  # 0.0 — валидная цена, не терять её
 
 
+async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list[float]:
+    """`count` быстрых чтений window.chartData.price. Если symbol задан — берём только тики
+    этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары сразу после
+    переключения. Ошибки evaluate глушим (страница могла моргнуть) — вернём что успели."""
+    out: list[float] = []
+    for _ in range(count):
+        try:
+            data = await page.evaluate(CHART_DATA_JS)
+        except (Exception,):
+            data = None
+        if not isinstance(data, dict):
+            continue
+        if symbol and data.get('symbol') != symbol:
+            continue
+        price = data.get('price')
+        if isinstance(price, (int, float)):
+            out.append(float(price))
+    return out
+
+
 async def screenshot_otc(page: Page, asset: str = None, qr=None):
-    """Скрин зоны графика binodex + цена из WS (читается вплотную к скрину) + QR.
+    """Скрин зоны графика binodex + цена графика (медиана чтений window.chartData.price
+    вокруг кадра) + QR. chartData.price — то значение, что движок рисует на ярлыке; это
+    точнее WS-тика, который опережает график на ~150 мс (см. docs/BINODEX_PRICE.md). Если
+    chartData недоступен — фолбэк на WS-цену по моменту кадра (get_price_at).
     :return: (success, price|error_text, screenshot_path|'')."""
-    last_error = 'нет цены OTC из WS'
+    symbol = _symbol_key(asset)
+    last_error = 'нет цены графика OTC'
     for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
         try:
             element = page.locator(screen_zone_otc).first
             await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
-            # t_shot — момент кадра (фиксируем ВПЛОТНУЮ перед screenshot). Цену берём как
-            # тик, отрисованный на этот момент (последний тик до t_shot), а не самый свежий
-            # из памяти — он часто приходит уже ПОСЛЕ кадра и «убегает» от графика.
+            # Цена графика = медиана быстрых чтений chartData.price ВОКРУГ кадра (несколько
+            # до screenshot + несколько после). Медиана гасит редкий анимационный выброс
+            # ярлыка. t_shot фиксируем для фолбэка на WS, если chartData не отдал значений.
+            reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
             t_shot = time.time()
             await element.screenshot(path=shot_path)
-            price = get_price_tracker().get_price_at(asset, t_shot)
-            if not price and price != 0:  # None/False → цены нет; 0.0 — валидная цена
-                logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены OTC из WS для {asset}")
+            reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
+            price = statistics.median(reads) if reads else get_price_tracker().get_price_at(asset, t_shot)
+            if price is None:  # ни chartData, ни WS не дали цену
+                logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены графика OTC для {asset}")
                 await asyncio.sleep(0.5)
                 continue
             with Image.open(shot_path) as img:

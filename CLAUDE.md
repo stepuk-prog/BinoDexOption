@@ -28,7 +28,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 
 ## OTC / binodex (важное)
 - Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `COOKIES_BINODEX.md`.
-- Цена OTC — из **WebSocket** `api-coins.binodex.io` (на странице она в `<canvas>`), трекер `classes/price_tracker.py`.
+- Цена кадра OTC — из **`window.chartData.price`** (значение, которое движок рисует на ярлыке; медиана нескольких чтений вокруг скрина в `screenshot_otc`). **WS** `api-coins.binodex.io` (трекер `classes/price_tracker.py`) — для liveness/детекта и как фолбэк: WS опережает график на ~150 мс, поэтому как цену кадра не годится. Подробно: `docs/BINODEX_PRICE.md`.
 - Выбор пары — модалка binodex по селекторам из `settings.binodex_settings`; **auto-wait вместо sleep** (проверено на живом сайте, ~1.15с).
 
 ## Конвенции / гочи
@@ -42,6 +42,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 ## Скрипты
 - `scripts/check_messages.py` — отправка всех постов с картинками в форум-тему (вычитка вёрстки), юзербот OTC 1m. Запуск: `PYTHONPATH=. .venv/bin/python scripts/check_messages.py`.
 - `scripts/place_qr.py` — наложение QR на скрин; `scripts/probe_otc.py` — диагностика OTC-флоу на живом binodex; `scripts/binodex_settings.sql` — DDL селекторов.
+- Диагностика цены OTC: `scripts/probe_lag.py` — замер лага график↔WS (~150 мс); `scripts/probe_chartdata_median.py` — сверка медианы `chartData` с нарисованным ярлыком. Запуск: `TIMEFRAME=1m BINARY=0 PYTHONPATH=. .venv/bin/python scripts/<name>.py`.
 
 ## Доки
-`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: WS-источник + синхронизация с кадром), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.
+`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: `window.chartData` + медиана; WS — фолбэк/liveness), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.
