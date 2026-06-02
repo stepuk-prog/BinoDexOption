@@ -83,7 +83,10 @@ async def _recover_otc_cookies() -> bool:
     for attempt in range(1, RECOVER_ATTEMPTS + 1):
         if _stop_event is not None and _stop_event.is_set():
             return False
-        if await refresh_otc_cookies():
+        # do_setup=True: холодный перелогин даёт свежий storage_state с ДЕФОЛТНЫМИ настройками
+        # графика — поэтому при восстановлении заодно прокликиваем настройку сайта (иначе чарт
+        # без индикатора/масштабов/темы). Сбой настройки воркер глушит (куки всё равно сохранит).
+        if await refresh_otc_cookies(do_setup=True):
             logger.cookies(f'Куки для {cook_name_otc} успешно восстановлены. Продолжаю работу')
             return True
         logger.warning(f'Восстановление куки для {cook_name_otc}: попытка {attempt}/{RECOVER_ATTEMPTS} не удалась')
