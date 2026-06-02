@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Авто-восстановление OTC-кук binodex (Privy email-OTP)
+- Новый портативный DB-free воркер `apps/binodex_session.py`: получает на stdin
+  `{mail, app_pass, selectors, do_setup}`, делает холодный вход binodex (Privy email-OTP),
+  читает 6-значный код по IMAP (Gmail), при `do_setup` прокликивает настройку сайта
+  (индикатор/масштабы/тема), отдаёт `storage_state` в stdout. Зависимости — только playwright+stdlib.
+- Оркестратор `apps/cookie_refresh.py` (async): через asyncpg читает креды/селекторы, запускает
+  воркер подпроцессом (`sys.executable`, sync-Playwright нельзя в asyncio-loop), пишет
+  `storage_state` в БД. Один драйвер БД (asyncpg) — `psycopg2` не нужен.
+- `main.py`: при отвале OTC-кук политика **Recover-3→Exit** (§4.3): до 3 попыток рефреша
+  (`_recover_otc_cookies`) с алертами «Куки отвалились/восстановлены/не восстановить для {name}»,
+  при неуспехе — `status=false` + выход (TV остаётся Survive).
+- Новые методы `Database`: `get_mail_creds`, `binodex_selectors`, `save_otc_cookies`.
+- БД: колонка `telegram.telegram.mail_app_pass` (16-симв. Gmail app-password); строки `login_*`/
+  `setup_*` в `binodex.settings.binodex_settings`; FK+UNIQUE `programdata.cookies_binodex` →
+  `telegram.telegram(id_telegram)`; колонки `programdata.phone_topup`(numeric)/`phone_topup_date`.
+- Гочи: Privy шлёт код с ДВУХ адресов (`no-reply@privy.io` и `no-reply@mail.privy.io`) — фильтр по
+  домену `privy.io`; письма Privy чистятся после входа (Gmail Trash).
+- §4.1.1 (стандарт): на init после URL-проверки — gate готовности UI (зависший `/trade` без
+  редиректа = отвал cookies → `CookiesExpired`). Реализовано в `init_otc`.
+
+### Таймфрейм графика
+- FIN 1m: фикс — график показывал **5 минут** вместо 1 минуты (`1m` ошибочно был в группе с
+  `5m/10m`). Теперь чарт по `find_timeframe`: 1m/3m → 1 мин, 5m/10m → 5 мин, 15m → 15 мин.
+- Рандомное время опциона распространено на OTC 3m/5m (как у FIN): `set_option_time` без гейта
+  `binary`; константа `fin_option_time` → `option_time_variants`.
+
+### Тексты постов
+- «Разница пунктов» ВЕЗДЕ внутри цитаты (`third_message`, `prepare_dogon_message`,
+  `minus_dogon_message`) — через пустую строку после котировок.
+- Чистка вёрстки: лишние смежные спаны слиты (эмодзи-обёртки `<b><i>…</i></b>`), строка
+  чат-бота отзывов в одном теге.
+
+### Аудит/рефактор (3 прогона)
+- Единый `settings/env.py` (`parse_bool/req_int/opt_int/req_str`) вместо трёх копий парсеров;
+  единый `file_suffix` (logger_config) — убрано тройное дублирование формулы `{tf}_{bin|otc}`.
+- `MainResult` (NamedTuple) вместо «магического» 5-tuple результата `main()`/`exit_main`.
+- `main_app._capture` — дедуп 4 копий блока скриншота (FIN+find_point / OTC).
+- `_recreate_pool`: `acquire(timeout=…)` (без зависания пула под локом); непредвиденная
+  SQL-ошибка логируется с `exc_info`. `close_telegram_bot` ждёт отправку критичных алертов
+  перед закрытием сессии. Убраны лишние `app.stop()` перед `close_program`.
+- `config` через `init_logger` (раньше логи терялись в немом root). Мёртвый код
+  (`log_path`, `BrowserInitResult.error`, `otc.get_price`, параметр `bot` в `_try_send`).
+- Единый стиль `except (Exception,):`; правки по замечаниям PyCharm.
+- `scripts/` убран из git (локальные диагностики); `.gitignore` — глобы рабочих скринов.
+
 ### OTC-цена кадра: window.chartData вместо WS-тика
 - Цена кадра OTC берётся из **`window.chartData.price`** (значение, которое движок рисует на
   ярлыке графика), а не из WS-тика. Причина: график **отстаёт от WS на ~150 мс** (замер

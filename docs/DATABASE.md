@@ -41,15 +41,19 @@
 Селекторы/параметры браузера (TradingView / PocketOption). Читаются целиком (`tv_setting` / `otc_setting`), затем `find_par(data, par=...)` достаёт значение по имени параметра. Строки — пары «имя параметра → значение (селектор/класс/xpath)».
 
 ### `telegram.telegram`
-Креды Pyrogram-юзербота (`telegram_creds`).
+Креды Pyrogram-юзербота (`telegram_creds`) + почта для авто-рефреша binodex-кук.
 
-- **Фильтр:** `id_telegram` (= `option_setting.user_bot`).
-- Колонки: `api_id`, `api_hash`, `session_string`.
+- **Фильтр:** `id_telegram` (= `option_setting.user_bot`; для рефреша кук — `= option_setting.cookies_pocket`).
+- Колонки: `api_id`, `api_hash`, `session_string`; `name` (имя владельца — в текстах cookies-алертов, §4.2);
+  `mail` + **`mail_app_pass`** (16-символьный Gmail app-password для IMAP; читает `database.get_mail_creds`
+  → воркер `apps/binodex_session.py`). Обычный пароль для IMAP не годится — нужен app-password (требует 2FA).
 
 ### `program.programdata`
 Статус программы (для диспетчера). `close_program`: `UPDATE program.programdata SET status = false WHERE program_id = %s`.
 
-- Колонки: `program_id`, `status`.
+- Колонки (используемые ботом в рантайме): `program_id`, `status`.
+- Прочие (вне рантайма бота): `cookies_binodex` (bigint, UNIQUE, FK → `telegram.telegram(id_telegram)`);
+  `phone_topup` (numeric(10,2)) / `phone_topup_date` (date) — учёт пополнения телефона аккаунта.
 
 ### `cookies.pages`
 Страницы браузера по программе/режиму (`pages`).
