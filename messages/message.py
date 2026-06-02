@@ -112,17 +112,9 @@ def prepare_dogon_message(idx: int):
     :return: текст поста
     """
     asset_label = _asset_label()
-    trade_emoji = f'<b><i>{option_data.trade_emoji}</i></b>'
-    if idx == 0:
-        dop_str = (f'<b><i>Подготовьте перекрытие </i></b>{trade_emoji}<b><i> — </i></b>'
-                   f'<a href="https://teletype.in/@smoke_fx/0IGYyrwdTYX"><b><i> </i></b></a>'
-                   f'<b><i>поиск точки входа</i></b> '
-                   f'<emoji id="5188217332748527444">🔍</emoji>\n\n')
-    else:
-        order_word = 'второе' if idx == 1 else 'следующее'
-        dop_str = (f'<b><i>Подготовьте {order_word} перекрытие </i></b>{trade_emoji}'
-                   f'<b><i> — поиск точки входа</i></b> '
-                   f'<emoji id="5188217332748527444">🔍</emoji>\n\n')
+    order_word = '' if idx == 0 else ('второе ' if idx == 1 else 'следующее ')
+    dop_str = (f'<b><i>Подготовьте {order_word}перекрытие {option_data.trade_emoji} — '
+               f'поиск точки входа</i></b> <emoji id="5188217332748527444">🔍</emoji>\n\n')
     price_data = option_data.different_price(start_price=option_data.price, itog_price=option_data.itg_price,
                                              rnd=option_data.round)
     dg_message = f'<i>{asset_label}: </i><b><i>{option_data.name_emoji} </i></b>\n\n' + dop_str
