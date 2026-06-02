@@ -22,7 +22,7 @@ from PIL import Image
 from playwright.async_api import Page, WebSocket
 
 from classes.Option_class import Option
-from classes.price_tracker import WebSocketPriceTracker, _symbol_key
+from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
 from classes.exceptions import CookiesExpired
 from apps.exit_app import close_program
@@ -208,13 +208,6 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
     return False
 
 
-async def get_price(asset: str = None) -> float | bool:
-    """Текущая цена пары из WS-трекера binodex. asset вида 'EUR/USD OTC'.
-    :return: float или False (нет цены)."""
-    price = get_price_tracker().get_price(asset)
-    return price if price is not None else False  # 0.0 — валидная цена, не терять её
-
-
 async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list[float]:
     """`count` быстрых чтений window.chartData.price. Если symbol задан — берём только тики
     этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары сразу после
@@ -241,7 +234,7 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
     точнее WS-тика, который опережает график на ~150 мс (см. docs/BINODEX_PRICE.md). Если
     chartData недоступен — фолбэк на WS-цену по моменту кадра (get_price_at).
     :return: (success, price|error_text, screenshot_path|'')."""
-    symbol = _symbol_key(asset)
+    symbol = symbol_key(asset)
     last_error = 'нет цены графика OTC'
     for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
         try:
@@ -304,6 +297,20 @@ async def init_otc(manager: "BrowserManager") -> bool:
         # main.py::_init_with_retry (backoff + пересоздание, БЕЗ выхода; куки перечитаются из БД).
         if not on_trade(page.url):
             raise CookiesExpired(f'binodex OTC: вход слетел (редирект с /trade на {page.url})')
+
+        # Остались на /trade — но это ещё не гарантия, что SPA доехала. При протухшем Privy-токене
+        # без редиректа страница виснет на сплеше: торговый UI не рендерится, кнопка выбора пары
+        # отсутствует. URL-детект (on_trade) такой случай НЕ ловит → дальше main-цикл таймаутит по
+        # всем парам на otc_select_pair (.row_w). Поэтому жёстко ждём готовность UI; не дождались —
+        # это тот же отвал cookies (§4.3): CookiesExpired → _init_with_retry (алерт в cookies-канал +
+        # backoff + пересоздание браузера, куки перечитаются из БД).
+        try:
+            await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
+        except CookiesExpired:
+            raise
+        except (Exception,):
+            raise CookiesExpired('binodex OTC: торговый UI не прогрузился (завис на /trade, '
+                                 'кнопка выбора пары не появилась) — storage_state протух')
 
         # Ждём поток котировок (до 10 сек)
         tracker = get_price_tracker()

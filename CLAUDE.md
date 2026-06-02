@@ -34,6 +34,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 ## Конвенции / гочи
 - Классы — в `classes/` отдельными файлами; **предпочитать Playwright auto-wait вместо `asyncio.sleep`**; таймауты на всех внешних вызовах (БД/Playwright/Pyrogram); по-уровневые логи.
 - Все обязательные env-int читаются с дефолтом/понятной ошибкой (не `TypeError`).
+- Перехват исключений — **`except (Exception,):`**, а не `except Exception:` (единый стиль по всему проекту).
 - В постах серии плюсов **кириллические «О» вместо нулей в суммах — анти-модерация, НЕ нормализовать**.
 - `option_data.name` мутируется в `otc_app` до `'EUR/USD OTC'` для скрина; для текста берут голый `'EUR/USD'`.
 - Под Dispatcher в юнитах `Restart` должен быть **выключен** (иначе systemd мешает failover); деплоит/проверяет это **DeployManager** (`../../../Helpers/DeployManager`).
@@ -43,6 +44,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - `scripts/check_messages.py` — отправка всех постов с картинками в форум-тему (вычитка вёрстки), юзербот OTC 1m. Запуск: `PYTHONPATH=. .venv/bin/python scripts/check_messages.py`.
 - `scripts/place_qr.py` — наложение QR на скрин; `scripts/probe_otc.py` — диагностика OTC-флоу на живом binodex; `scripts/binodex_settings.sql` — DDL селекторов.
 - Диагностика цены OTC: `scripts/probe_lag.py` — замер лага график↔WS (~150 мс); `scripts/probe_chartdata_median.py` — сверка медианы `chartData` с нарисованным ярлыком. Запуск: `TIMEFRAME=1m BINARY=0 PYTHONPATH=. .venv/bin/python scripts/<name>.py`.
+б- `scripts/reauth_userbot.py` — переавторизация юзербота при пустом/протухшем `telegram.telegram.session_string` (старт падает на `config.py:80`): интерактивный логин Pyrogram (телефон+код), экспорт свежей строки и заливка в Program-БД. Пишет в БД из текущего `.env` (`DATABASE`/`PG_*`). Запуск: `PYTHONPATH=. .venv/bin/python scripts/reauth_userbot.py <id_telegram>`.
 
 ## Доки
 `docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: `window.chartData` + медиана; WS — фолбэк/liveness), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.

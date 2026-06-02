@@ -5,7 +5,7 @@ from logging import Handler, LogRecord, handlers
 
 from aiogram import Bot
 from settings.logger_config import (error_channel, token, frame, message_channel,
-                                    cookies_channel, session_channel)
+                                    cookies_channel, session_channel, file_suffix)
 
 # Единый формат файловых/консольных хендлеров (раньше дублировался в двух местах).
 LOG_FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
@@ -15,12 +15,9 @@ _TG_LOG_SEND_TIMEOUT = 30
 
 
 def _get_log_dir() -> str:
-    """Папка логов экземпляра: logs/option_{TIMEFRAME}_{bin|otc}/ (создаётся при отсутствии)"""
-    timeframe = os.getenv("TIMEFRAME", "unknown")
-    binary_str = os.getenv("BINARY", "0")
-    is_binary = binary_str.lower() in ('1', 'true', 'yes', 'on')
-    suffix = f"{timeframe}_{'bin' if is_binary else 'otc'}"
-    path = f"logs/option_{suffix}"
+    """Папка логов экземпляра: logs/option_{TIMEFRAME}_{bin|otc}/ (создаётся при отсутствии).
+    Суффикс — единый из logger_config.file_suffix (без дублирования формулы)."""
+    path = f"logs/option_{file_suffix}"
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -70,7 +67,16 @@ def get_telegram_bot() -> Bot:
 
 
 async def close_telegram_bot():
-    """Закрыть aiohttp-сессию aiogram-бота, если он был создан."""
+    """Закрыть aiohttp-сессию aiogram-бота. Перед закрытием ДОЖИДАЕМСЯ отправки накопленных
+    fire-and-forget логов (критичные session/cookies/«закрываюсь»-алерты) — иначе sys.exit при
+    выходе мог оборвать их до отправки. Ждём ограниченно: зависшая отправка не держит выход."""
+    if _pending_sends:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*_pending_sends, return_exceptions=True),
+                timeout=_TG_LOG_SEND_TIMEOUT)
+        except (Exception,):
+            pass
     if _telegram_bot is not None:
         await _telegram_bot.session.close()
 

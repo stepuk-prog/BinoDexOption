@@ -45,7 +45,10 @@ def setup_popup_blocker(context: BrowserContext, manager: 'BrowserManager'):
         if page not in manager.pages.values() and not page.is_closed():
             url = page.url
             logger.debug(f"🚫 Закрытие popup окна: {url}")
-            await page.close()
+            try:
+                await page.close()
+            except (Exception,) as error:  # гонка: popup мог закрыться сам — не роняем event-колбэк
+                logger.debug(f"Popup закрытие (best-effort): {error}")
     context.on('page', handle_popup)
 
 
@@ -338,7 +341,8 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
 
                 # Ожидаем новую страницу и открываем её одновременно
                 async with manager.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
-                    await current_page.evaluate(f"window.open('{page_data['url']}')")
+                    # URL передаём аргументом, а не в строку JS — кавычка в URL не сломает evaluate
+                    await current_page.evaluate("u => window.open(u)", page_data['url'])
 
                 page = await new_page_info.value
                 manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл
@@ -386,7 +390,9 @@ async def _reset_search_category(page) -> None:
         await tab.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
         if await tab.get_attribute('aria-selected') != 'true':
             await tab.click(timeout=TIMEOUT_MEDIUM)
-            await asyncio.sleep(0.3)
+            # auto-wait вместо слепой паузы: ждём, пока вкладка реально станет выбранной
+            await page.locator('#symbol-search-tabs button[role="tab"][aria-selected="true"]') \
+                .first.wait_for(state='visible', timeout=TIMEOUT_SHORT)
     except (Exception,) as e:
         logger.warning(f"Не удалось сбросить категорию поиска TV: {e}")
 

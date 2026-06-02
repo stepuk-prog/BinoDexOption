@@ -34,17 +34,18 @@ symbol = find_par(data=vib_all_kat, par='symbol')
 # TV отсеивает поиск по формату EXCHANGE:SYMBOL
 scope_chip = find_par(data=vib_all_kat, par='scope_chip')
 # установка таймфрейма в 1 минуту для страницы с ценой
-tf_link_price = find_par(data=vib_all_kat, par=f'tf_link_1')
-# установка таймфрейма (только FIN/TV; OTC tf_link не использует)
-if timeframe == '3m':
-    # 3m-вариант: график настроен на 1 минуту (tf_link_1), время опциона рандомится в коде
-    tf_link = find_par(data=vib_all_kat, par=f'tf_link_1')
-elif timeframe in ['1m', '5m', '10m']:
-    tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')
+tf_link_price = find_par(data=vib_all_kat, par='tf_link_1')
+# установка таймфрейма графика (только FIN/TV; OTC tf_link не использует). Чарт показываем по
+# find_timeframe (гранулярности данных): 1m/3m → 1 минута (tf_link_1), 5m/10m → 5 минут (tf_link_2),
+# 15m → 15 минут (tf_link_3). Для 3m график 1 мин, а реальное время опциона рандомится в коде (2/3).
+if timeframe in ('1m', '3m'):
+    tf_link = find_par(data=vib_all_kat, par='tf_link_1')   # 1 минута
+elif timeframe in ('5m', '10m'):
+    tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # 5 минут
 elif timeframe == '15m':
-    tf_link = find_par(data=vib_all_kat, par=f'tf_link_3')
+    tf_link = find_par(data=vib_all_kat, par='tf_link_3')   # 15 минут
 else:
-    tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')  # дефолт — чтобы не словить NameError на импорте
+    tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # дефолт — чтобы не словить NameError на импорте
 
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
 # Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).

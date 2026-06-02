@@ -1,16 +1,19 @@
-import logging
 import os
 
 from dotenv import load_dotenv
 from database import Database
 from pyrogram import Client
 from classes.Option_class import Option
+from logs import init_logger
 from settings._bootstrap import bootstrap_fetch
-from settings.logger_config import parse_bool  # единый безопасный парсер (без падения на None)
+from settings.env import parse_bool, req_int, opt_int, req_str  # единые безопасные парсеры env
+from settings.logger_config import file_suffix          # единый суффикс {tf}_{bin|otc}
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
 
-logger = logging.getLogger(__name__)
+# init_logger (а не голый getLogger): иначе сообщения config (override'ы, ошибка создания Client)
+# уходили бы в неподключённый root и терялись (нет файловых/TG-хендлеров).
+logger = init_logger(__name__)
 # Единый async-интерфейс к БД (asyncpg, пулы program+binodex). Пулы поднимает
 # main.py::bot через `await database.connect()`; здесь только создаём объект.
 # Конфиг/креды/cookies на старте читаются синхронно через bootstrap_fetch (пулов
@@ -18,26 +21,14 @@ logger = logging.getLogger(__name__)
 database = Database()
 
 
-def _env_int(name: str, default: str | None = None) -> int:
-    """int из env с дефолтом; при отсутствии и без дефолта — понятная ошибка вместо TypeError."""
-    value = os.getenv(name, default)
-    if value is None:
-        raise ValueError(f"Не задана обязательная переменная окружения {name}")
-    return int(value)
-
-
 timeframe = os.getenv("TIMEFRAME")
 binary = parse_bool(os.getenv("BINARY", "0"))
 # Ключ программы — фильтр своих строк в общей settings.option_setting.
 prog_key = os.getenv("PROG_KEY")
 
-# Суффикс для файлов (для разделения между экземплярами)
-file_suffix = f"{timeframe}_{'bin' if binary else 'otc'}"
-
-# Пути к файлам с суффиксом
+# Пути к файлам с суффиксом экземпляра (file_suffix — из logger_config, единый источник)
 shot_path = f"pictures/shot_{file_suffix}.png"
 screenshot_path = f"pictures/screenshot_{file_suffix}.png"
-log_path = f"logs/option_{file_suffix}.log"
 # Базовые настройки экземпляра — из базы данных опционов (binodex).
 # settings.option_setting общая для нескольких программ → отбираем свои по program.
 option = bootstrap_fetch(
@@ -48,18 +39,19 @@ option = bootstrap_fetch(
 if option is None:
     raise ValueError(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
 test = parse_bool(os.getenv("TEST", "0"))
-overlap = _env_int("OVERLAP", "0")
+overlap = opt_int("OVERLAP", 0)
 program_id = option['program_id']
-overlap_random = _env_int("OVERLAP_RANDOM", "0")
+overlap_random = opt_int("OVERLAP_RANDOM", 0)
+overlap_random = max(0, min(overlap_random, overlap))  # инвариант 0 <= overlap_random <= overlap
 # Пауза между циклами main — в .env (§7), дефолты = историческому хардкоду (для OTC +30
 # добавляет time_sleep). Тайминги retry/backoff остаются константами в коде.
-main_cycle_pause_min = _env_int("MAIN_CYCLE_PAUSE_MIN", "100")
-main_cycle_pause_max = _env_int("MAIN_CYCLE_PAUSE_MAX", "120")
+main_cycle_pause_min = opt_int("MAIN_CYCLE_PAUSE_MIN", 100)
+main_cycle_pause_max = opt_int("MAIN_CYCLE_PAUSE_MAX", 120)
 if test:
     # Тест (§2): файловая session под files/ (TEST_SESSION_FILE), креды/канал — из .env.
-    channel_id = _env_int("TEST_CHANNEL")
-    api_id = os.getenv("TEST_API_ID")
-    api_hash = os.getenv("TEST_API_HASH")
+    channel_id = req_int("TEST_CHANNEL")
+    api_id = req_int("TEST_API_ID")        # явная ошибка вместо Client(api_id=None) позже
+    api_hash = req_str("TEST_API_HASH")
     session_file = os.getenv("TEST_SESSION_FILE")
     session_string = None
 else:
@@ -109,6 +101,18 @@ if cook_otc_override and not binary:
 cookies_tv_id = option['cookies_tv']
 cookies_pocket_id = int(cook_otc_override) if (cook_otc_override and not binary) else option['cookies_pocket']
 
+# Авто-восстановление OTC-кук: DB-free воркер логина binodex (apps/binodex_session.py) — бот
+# (apps/cookie_refresh.py) запускает его подпроцессом своим же venv-python (sys.executable),
+# данные передаёт на stdin, storage_state пишет в БД сам через asyncpg. Путь — внутри проекта
+# (едет обычным деплоем). Имя владельца кук — для текста алертов (§4.2).
+refresher_worker = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'apps', 'binodex_session.py')
+cook_name_otc = '?'
+if not binary:
+    cook_name_otc = bootstrap_fetch(
+        'program', 'SELECT name FROM telegram.telegram WHERE id_telegram = $1',
+        cookies_pocket_id, fetch_mode='val') or '?'
+
 # Test override: переадресация основных сигналов в другой канал через env SIGNAL_CHANNEL
 signal_channel_override = os.getenv("SIGNAL_CHANNEL")
 if signal_channel_override:
@@ -121,9 +125,11 @@ translocation = option['translocation']
 if not isinstance(translocation, (list, tuple)) or len(translocation) < 2:
     raise ValueError(f"Некорректный option_setting.translocation={translocation!r} — "
                      f"ожидается массив [start_random, end_random]")
-option_data.start_random = translocation[0]
+# Нормализуем порядок: перевёрнутая пара (start > end) дала бы неверные уровни ПС в Option.levels().
+_start_random, _end_random = sorted((translocation[0], translocation[1]))
+option_data.start_random = _start_random
 option_data.binary = binary
-option_data.end_random = translocation[1]
+option_data.end_random = _end_random
 option_data.timeframe = timeframe
 
 # Ленивая инициализация Pyrogram Client (создаётся при первом вызове get_app())

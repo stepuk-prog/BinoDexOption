@@ -3,17 +3,15 @@
 !/files/.gitkeep
 /logs/option_*.log
 /logs/option_*/
-/pictures/screenshot_1m_bin.png
-/pictures/screenshot_1m_otc.png
-/pictures/screenshot_3m_otc.png
-/pictures/shot_1m_bin.png
-/pictures/shot_1m_otc.png
-/pictures/shot_3m_otc.png
-/pictures/screenshot_preview.png
-/pictures/screenshot_otc_preview.png
+# Рабочие скрины всех инстансов (shot_*/screenshot_*) + превью — не версионируем
+/pictures/shot_*.png
+/pictures/screenshot_*.png
 
 /.venv/
 /.idea/
 __pycache__/
 *.pyc
 /pictures/new/
+
+# Локальные диагностические/одноразовые скрипты — не версионируем
+scripts/

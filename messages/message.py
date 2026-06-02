@@ -87,12 +87,11 @@ def third_message():
         kat2 = '<emoji id="5373280361067322980">⏺️</emoji>'
         raznica = '<emoji id="5397569414738485822">🟡</emoji>'
     s_message = f'<i>{asset_label}: </i><b><i>{option_data.name_emoji}</i></b> {option_data.trade_emoji}\n\n'
-    s_message += (f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> '
-                  f'{kat1}\n')
-    s_message += (f'<b><i>Котировка закрытия: {option_data.itg_price:.{option_data.round}f}</i></b> '
-                  f'{kat2}\n\n')
-    s_message += (f'<b><i>Разница пунктов: {price_data["dif_price"]}</i></b> {raznica}'
-                  f'\n\n')
+    s_message += (f'<blockquote>'
+                  f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> {kat1}\n'
+                  f'<b><i>Котировка закрытия: {option_data.itg_price:.{option_data.round}f}</i></b> {kat2}\n\n'
+                  f'<b><i>Разница пунктов: {price_data["dif_price"]}</i></b> {raznica}'
+                  f'</blockquote>\n\n')
     if option_data.plus:
         s_message += '<i>Итог прогноза:</i><b><i> плюс</i></b> <emoji id="5021905410089550576">✅</emoji>'
     elif option_data.vozvrat:
@@ -174,11 +173,17 @@ def minus_dogon_message():
     :return: текст поста
     """
     asset_label = _asset_label()
+    price_data = option_data.different_price(start_price=option_data.price, itog_price=option_data.itg_price,
+                                             rnd=option_data.round)
     s_message = f'<i>{asset_label}: <b>{option_data.name_emoji}</b></i> {option_data.trade_emoji}\n\n'
-    s_message += (f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> '
-                  f'<emoji id="5231200819986047254">📊</emoji>\n')
-    s_message += (f'<b><i>Котировка закрытия: {option_data.itg_price:.{option_data.round}f}</i></b> '
-                  f'<emoji id="5451882707875276247">🕯</emoji>\n\n')
+    s_message += (f'<blockquote>'
+                  f'<b><i>Котировка открытия: {option_data.price:.{option_data.round}f}</i></b> '
+                  f'<emoji id="5231200819986047254">📊</emoji>\n'
+                  f'<b><i>Котировка закрытия: {option_data.itg_price:.{option_data.round}f}</i></b> '
+                  f'<emoji id="5451882707875276247">🕯</emoji>\n\n'
+                  f'<b><i>Разница пунктов: {price_data["dif_price"]}</i></b> '
+                  f'<emoji id="5431577498364158238">📊</emoji>'
+                  f'</blockquote>\n\n')
     s_message += f'<i>Итог прогноза: <b><u>МИНУС</u></b></i> <emoji id="5390874368177873184">❌</emoji>\n\n'
     return s_message
 

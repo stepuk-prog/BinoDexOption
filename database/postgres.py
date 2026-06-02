@@ -99,7 +99,7 @@ class Database:
             pool = self._pools[name]
             if pool is not None:
                 try:
-                    async with pool.acquire() as conn:
+                    async with pool.acquire(timeout=_ACQUIRE_TIMEOUT) as conn:
                         await conn.fetchval("SELECT 1")
                     return
                 except (Exception,):
@@ -163,7 +163,9 @@ class Database:
                     except (Exception,) as pool_error:
                         logger.error(f"Не удалось пересоздать пул '{db}': {pool_error}")
                     return False
-                logger.error(f"Непредвиденная SQL-ошибка в {func} (пул '{db}'): {msg}")
+                # Непредвиденное (вероятно баг в SQL/параметрах, не сбой БД) — контракт обязывает
+                # вернуть False, но стек НЕ теряем (иначе реальные баги невидимы).
+                logger.error(f"Непредвиденная SQL-ошибка в {func} (пул '{db}'): {msg}", exc_info=True)
                 return False
         return False
 
@@ -235,6 +237,30 @@ class Database:
         sql = "SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1"
         return await self.execute_query(sql, user_id, fetch_mode='val',
                                         func='get_otc_cookies', db='binodex')
+
+    async def get_mail_creds(self, id_telegram: int):
+        """Почта + Gmail app-password владельца кук (Program.telegram.telegram) — для воркера
+        авто-рефреша binodex (apps/cookie_refresh.py). Record(mail, mail_app_pass) | None | False."""
+        sql = "SELECT mail, mail_app_pass FROM telegram.telegram WHERE id_telegram = $1"
+        return await self.execute_query(sql, id_telegram, fetch_mode='row',
+                                        func='get_mail_creds', db='program')
+
+    async def binodex_selectors(self):
+        """Все CSS-селекторы binodex (login_*/setup_*) из binodex.settings.binodex_settings —
+        для воркера авто-рефреша. list[Record(par_name, par_value)] | [] | False."""
+        sql = "SELECT par_name, par_value FROM settings.binodex_settings"
+        return await self.execute_query(sql, fetch_mode='all',
+                                        func='binodex_selectors', db='binodex')
+
+    async def save_otc_cookies(self, user_id: int, storage_state: dict):
+        """Сохранить свежий Privy storage_state в binodex.cookies.binodex_cookies (upsert).
+        storage_state — dict (jsonb-codec сам сериализует). True | False (сбой)."""
+        sql = ("INSERT INTO cookies.binodex_cookies (user_id, cookies, updated_at) "
+               "VALUES ($1, $2, now()) "
+               "ON CONFLICT (user_id) DO UPDATE "
+               "SET cookies = EXCLUDED.cookies, updated_at = EXCLUDED.updated_at")
+        return await self.execute_query(sql, user_id, storage_state, fetch_mode='execute',
+                                        func='save_otc_cookies', db='binodex')
 
     async def close_program(self, program_id: int):
         """status=false в program.programdata (Program) — сигнал диспетчеру, что

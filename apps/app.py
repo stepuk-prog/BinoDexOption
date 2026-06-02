@@ -12,6 +12,7 @@ from apps.exit_app import close_program
 from apps.my_exeptions import send_photo_safe
 from logs import init_logger
 from classes.Option_class import Option
+from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
@@ -43,8 +44,8 @@ async def _close_popup(page):
         popup = page.locator(f".{pop_up}")
         if await popup.count() > 0:
             await popup.first.click(timeout=3000)
-    except (Exception,):
-        pass
+    except (Exception,) as error:
+        logger.debug(f'Popup не закрылся (best-effort): {error}')
 
 
 def get_water():
@@ -52,7 +53,7 @@ def get_water():
     используется только qr[0]). Позиция (otc_qr_x/y) и прочее без изменений."""
     try:
         qr110 = Image.open(otc_qr110_path if not binary else qr110_path)
-        qr85 = Image.open(qr85_path)
+        qr85 = Image.open(qr85_path) if binary else None  # OTC использует только qr[0]
         return True, (qr110, qr85)
     except (Exception,) as error:
         logger.error(f'Не могу загрузить QR - {error}')
@@ -65,7 +66,9 @@ async def check_plus():
     if not kol_plus:  # False/None — ошибка пула или нет строки счётчика
         return True, ''
     plus_milestones = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
-    count = kol_plus['plus']
+    count = kol_plus.get('plus')  # asyncpg.Record.get — None, если колонки нет (вместо KeyError)
+    if count is None:
+        return True, ''
 
     if count in plus_milestones:
         await asyncio.sleep(CHECK_PLUS_DELAY)  # пауза перед постом-вехой (не в каждом плюсовом цикле)
@@ -93,7 +96,7 @@ async def check_minus():
 async def exit_main(channel_mess: bool,
                     result: bool, bug_text='',
                     fall=True,
-                    check_cookies: int = 0) -> tuple[bool, bool, bool, str, int]:
+                    check_cookies: int = 0) -> MainResult:
     """
     Выход из main
     :param channel_mess: если True - отправлять в канал сообщение
@@ -109,7 +112,7 @@ async def exit_main(channel_mess: bool,
     # в plus-ветку (check_plus/dop_plus в канал + инкремент серии).
     if _shutdown_requested:
         option_data.clear_data()
-        return result, plus, fall, bug_text, check_cookies
+        return MainResult(result, plus, fall, bug_text, check_cookies)
     if channel_mess:
         try:
             await asyncio.wait_for(
@@ -123,13 +126,13 @@ async def exit_main(channel_mess: bool,
         if option_data.plus:
             check = await check_plus()
             if not check[0]:
-                return result, plus, False, check[1], check_cookies
+                return MainResult(result, plus, False, check[1], check_cookies)
         if option_data.minus:
             check = await check_minus()
             if not check[0]:
-                return result, False, False, check[1], check_cookies
+                return MainResult(result, False, False, check[1], check_cookies)
     option_data.clear_data()
-    return result, plus, fall, bug_text, check_cookies
+    return MainResult(result, plus, fall, bug_text, check_cookies)
 
 
 def check_cookies_price(old_price: float, new_price: float, round_par: int, count: int) -> tuple[int, float]:
@@ -188,7 +191,11 @@ async def get_price(manager: "BrowserManager") -> tuple[bool, float | str]:
         page = manager.pages['price']
         if not await mouse_move(page, move_field, 1):
             return False, 'Ошибка имитации движения мыши'
-        price = float(clear_price(strprice))
+        cleaned = clear_price(strprice)
+        try:
+            price = float(cleaned)
+        except ValueError:
+            return False, f'Не удалось распарсить цену из {strprice!r}'
         return True, price
     else:
         return False, result[1]

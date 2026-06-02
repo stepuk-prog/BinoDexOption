@@ -1,6 +1,6 @@
 import random
 
-from settings.constant import spr_timeframe, find_timeframe, fin_option_time
+from settings.constant import spr_timeframe, find_timeframe, option_time_variants
 from settings.browser_constant import link1, link2
 
 
@@ -39,8 +39,8 @@ class Option:  # Класс структуры хранения данных в 
     trade_emoji: str = ''  # эмодзи для отражения направления опциона
     support: str = ''  # уровень поддержки
     resistance: str = ''  # уровень сопротивления
-    price: float = 0  # цена входа
-    itg_price: float = 0  # цена итога опциона пятизначная
+    price: float = 0.0  # цена входа
+    itg_price: float = 0.0  # цена итога опциона пятизначная
     plus: bool = False  # True, если опцион в плюс
     minus: bool = False  # True, если опцион в минус
     vozvrat: bool = False  # True, если опцион возврат
@@ -224,14 +224,12 @@ class Option:  # Класс структуры хранения данных в 
     # назначение времени экспирации опциона на текущий сигнал
     def set_option_time(self):
         """Время экспирации текущего сигнала (сек) + синхронизация name_tf для поста.
-        FIN-варианты 3m/5m: график настроен на фиксированный ТФ, а реальное время опциона
-        выбирается рандомно (3m → 2/3 мин, 5m → 4/5 мин); name_tf обновляется под выбранное
-        значение, чтобы пост не врал о времени экспирации. Прочие случаи (OTC, остальные ТФ)
-        — номинал из таймфрейма, name_tf остаётся из spr_timeframe (как в __init__)."""
-        variants = None
-        if self.binary:
-            variants = next((item['variants'] for item in fin_option_time
-                             if item['timeframe'] == self.timeframe), None)
+        Варианты 3m/5m (FIN и OTC одинаково): график настроен на фиксированный ТФ, а реальное
+        время опциона выбирается рандомно (3m → 2/3 мин, 5m → 4/5 мин); name_tf обновляется
+        под выбранное значение, чтобы пост не врал о времени экспирации. Прочие ТФ
+        (1m/10m/15m) — номинал из таймфрейма, name_tf остаётся из spr_timeframe (как в __init__)."""
+        variants = next((item['variants'] for item in option_time_variants
+                         if item['timeframe'] == self.timeframe), None)
         if variants:
             minutes = random.choice(variants)
             self.name_tf = f'{minutes} {self.minuts(kol=minutes)}'
@@ -269,10 +267,7 @@ class Option:  # Класс структуры хранения данных в 
     def different_price(start_price, itog_price, rnd) -> dict:  # расчет итоговой разницы
         result = {}
         dif_price = abs(start_price - itog_price)
-        point = 1
-        for i in range(0, rnd):
-            point *= 10
-        dif_point = round(dif_price * point, 0)
+        dif_point = round(dif_price * 10 ** rnd, 0)
         dif_price_str = f"{dif_price:.{rnd}f}"
         result.update(point=dif_point, dif_price=dif_price_str)
         return result

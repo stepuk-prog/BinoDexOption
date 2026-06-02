@@ -21,7 +21,7 @@ from logs import init_logger
 logger = init_logger(__name__)
 
 
-def _symbol_key(asset: str | None) -> str | None:
+def symbol_key(asset: str | None) -> str | None:
     """asset вида 'EUR/USD' или 'EUR/USD OTC' → ключ котировок 'EUR/USD-OTC'."""
     if not asset:
         return None
@@ -74,7 +74,7 @@ class WebSocketPriceTracker:
     def get_price(self, asset: str = None) -> float | None:
         """Последняя цена по активу. asset вида 'EUR/USD' или 'EUR/USD OTC' → ключ 'EUR/USD-OTC'.
         При заданном, но не найденном активе → None (не отдаём цену чужой пары)."""
-        key = _symbol_key(asset)
+        key = symbol_key(asset)
         if key:
             return self.prices.get(key)
         # asset не указан — последняя полученная цена (без копии всего списка значений)
@@ -90,7 +90,7 @@ class WebSocketPriceTracker:
         back_ms — необязательный сдвиг назад (мс) под лаг отрисовки ярлыка; по умолчанию 0
         (последний тик до кадра — он совпал с ценником в 8 из 10 проверочных кадров).
         Если нет истории — откат на последнюю известную цену (get_price)."""
-        key = _symbol_key(asset)
+        key = symbol_key(asset)
         if not key:
             return self.get_price(asset)
         dq = self.history.get(key)

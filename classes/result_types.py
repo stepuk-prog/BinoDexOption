@@ -22,15 +22,19 @@ class BrowserInitResult(NamedTuple):
             raise ValueError(f"Cannot get manager: {self.manager_or_error}")
         return self.manager_or_error
 
-    @property
-    def error(self) -> str:
-        """Получить сообщение об ошибке (только если success=False)"""
-        if self.success:
-            raise ValueError("No error: operation was successful")
-        return self.manager_or_error
-
 
 class OperationResult(NamedTuple):
     """Общий результат операции"""
     success: bool
     error: str = ''
+
+
+class MainResult(NamedTuple):
+    """Результат одного прохода main() для главного цикла (вместо «магического» 5-tuple).
+    result — опцион завершён; plus — закончился плюсом; fall — нужен перезапуск процесса;
+    bug_text — текст ошибки; check_cookies — счётчик одинаковых цен подряд (эвристика отвала)."""
+    result: bool
+    plus: bool
+    fall: bool
+    bug_text: str = ''
+    check_cookies: int = 0
