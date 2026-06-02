@@ -27,7 +27,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - `database/postgres.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер), `pictures/`, `scripts/`, `systemd/`, `docs/`.
 
 ## OTC / binodex (важное)
-- Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `COOKIES_BINODEX.md`.
+- Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `docs/COOKIES_BINODEX.md`.
 - Цена кадра OTC — из **`window.chartData.price`** (значение, которое движок рисует на ярлыке; медиана нескольких чтений вокруг скрина в `screenshot_otc`). **WS** `api-coins.binodex.io` (трекер `classes/price_tracker.py`) — для liveness/детекта и как фолбэк: WS опережает график на ~150 мс, поэтому как цену кадра не годится. Подробно: `docs/BINODEX_PRICE.md`.
 - Выбор пары — модалка binodex по селекторам из `settings.binodex_settings`; **auto-wait вместо sleep** (проверено на живом сайте, ~1.15с).
 - **Авто-рефреш кук** (Privy email-OTP): при отвале OTC-кук бот сам перелогинивается — воркер `binodex_session.py` (логин по коду с почты, селекторы `login_*`/`setup_*` из `binodex_settings`) ← оркестратор `cookie_refresh.py` (asyncpg). Политика **Recover-3→Exit** (§4.3). Креды почты — `telegram.telegram.mail`/`mail_app_pass` (Gmail app-password). Privy шлёт код с `no-reply@privy.io` И `no-reply@mail.privy.io` (фильтр по домену).
@@ -42,10 +42,11 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - Картинки постов — в `pictures/`; рабочие скрины (`shot_*`, `screenshot_*`) gitignored. Стартовое/выходное фото: `pictures/start_week.png` / `end_week.png`.
 
 ## Скрипты
+> Каталог `scripts/` — локальные диагностические/одноразовые скрипты, **в git не версионируются** (`.gitignore`); в свежем клоне их нет.
 - `scripts/check_messages.py` — отправка всех постов с картинками в форум-тему (вычитка вёрстки), юзербот OTC 1m. Запуск: `PYTHONPATH=. .venv/bin/python scripts/check_messages.py`.
 - `scripts/place_qr.py` — наложение QR на скрин; `scripts/probe_otc.py` — диагностика OTC-флоу на живом binodex; `scripts/binodex_settings.sql` — DDL селекторов.
 - Диагностика цены OTC: `scripts/probe_lag.py` — замер лага график↔WS (~150 мс); `scripts/probe_chartdata_median.py` — сверка медианы `chartData` с нарисованным ярлыком. Запуск: `TIMEFRAME=1m BINARY=0 PYTHONPATH=. .venv/bin/python scripts/<name>.py`.
-б- `scripts/reauth_userbot.py` — переавторизация юзербота при пустом/протухшем `telegram.telegram.session_string` (старт падает на `config.py:80`): интерактивный логин Pyrogram (телефон+код), экспорт свежей строки и заливка в Program-БД. Пишет в БД из текущего `.env` (`DATABASE`/`PG_*`). Запуск: `PYTHONPATH=. .venv/bin/python scripts/reauth_userbot.py <id_telegram>`.
+- `scripts/reauth_userbot.py` — переавторизация юзербота при пустом/протухшем `telegram.telegram.session_string` (старт падает на `config.py:80`): интерактивный логин Pyrogram (телефон+код), экспорт свежей строки и заливка в Program-БД. Пишет в БД из текущего `.env` (`DATABASE`/`PG_*`). Запуск: `PYTHONPATH=. .venv/bin/python scripts/reauth_userbot.py <id_telegram>`.
 
 ## Доки
 `docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: `window.chartData` + медиана; WS — фолбэк/liveness), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.

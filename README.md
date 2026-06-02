@@ -40,7 +40,7 @@ pip install -U pip
 pip install -r requirements.txt
 playwright install firefox
 
-# 4. .env — заполнить вручную (в git не коммитим)ять
+# 4. .env — заполнить вручную (в git не коммитим)
 nano .env
 
 # 5. Запуск экземпляра вручную (параметры передаются через env)
@@ -53,6 +53,8 @@ TIMEFRAME=1m BINARY=true TEST=false venv/bin/python main.py
 |----------------------------------------------------------|---------------------------------------|
 | [DATABASE.md](docs/DATABASE.md)                          | Структура БД (как используется кодом) |
 | [DEPLOY.md](docs/DEPLOY.md)                              | Инструкция по деплою на сервер        |
+| [BINODEX_PRICE.md](docs/BINODEX_PRICE.md)                | Снятие цены OTC (window.chartData + медиана) |
+| [COOKIES_BINODEX.md](docs/COOKIES_BINODEX.md)            | Куки/сессия binodex (Privy) + авто-рефреш |
 | [CHANGELOG.md](docs/CHANGELOG.md)                        | История изменений                     |
 
 ## Структура проекта
@@ -70,6 +72,9 @@ BinoOptions/
 │   ├── browser_app.py      # Инициализация/настройка браузера TradingView
 │   ├── main_app.py         # Главный цикл прогноза + отправка постов
 │   ├── exit_app.py         # Завершение/перезапуск, алерты
+│   ├── cookie_refresh.py   # Оркестратор авто-рефреша OTC-кук (async)
+│   ├── binodex_session.py  # DB-free воркер логина binodex (запуск подпроцессом)
+│   ├── setting_app.py      # find_par — выбор значения селектора из настроек БД
 │   ├── my_exeptions.py     # Обработка обрывов связи Pyrogram
 │   └── cookie_utils.py     # Подготовка cookies для Playwright
 ├── database/               # Слой БД (asyncpg)
@@ -77,7 +82,9 @@ BinoOptions/
 ├── messages/message.py     # Тексты постов (прогнозы, итоги, догоны, плюсы)
 ├── settings/               # Конфигурация и константы
 │   ├── config.py           # Сборка настроек экземпляра (БД + env)
+│   ├── env.py              # Единый разбор env (parse_bool/req_int/opt_int/req_str)
 │   ├── _bootstrap.py       # Синхронное чтение БД на старте (до создания пулов)
+│   ├── database_config.py  # PG-параметры, DB_NAMES, json/jsonb codec
 │   ├── constant.py         # Константы + таблицы таймфреймов
 │   ├── browser_config.py   # Селекторы браузера (из БД)
 │   ├── browser_set.py      # Параметры запуска Playwright
@@ -87,8 +94,8 @@ BinoOptions/
 ├── logs/                   # Логи (по уровням в logs/option_{tf}_{bin|otc}/)
 ├── pictures/               # Картинки постов (прогнозы, догоны, плюсы, QR)
 ├── systemd/                # Service-файлы systemd
-├── docs/                   # Документация (DATABASE.md — схема БД)
-├── scripts/                # Служебные скрипты (place_qr, check_messages, probe_otc, binodex_settings.sql)
+├── docs/                   # Документация (DATABASE, DEPLOY, BINODEX_PRICE, COOKIES_BINODEX, CHANGELOG)
+├── scripts/                # Локальные диагностические скрипты (в git НЕ версионируются)
 ├── main.py                 # Точка входа (главный цикл)
 └── requirements.txt        # Зависимости
 ```
