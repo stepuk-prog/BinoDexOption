@@ -267,6 +267,11 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
         return True, price_result[1]
     except (Exception,) as error:
         error_text = f'Ошибка записи скриншота - {str(error)}'
+        # при штатной остановке драйвер уже снесён — это не сбой (как в find_price)
+        if _shutdown_requested:
+            logger.warning(error_text)
+        else:
+            logger.error(error_text)
         return False, error_text
 
 

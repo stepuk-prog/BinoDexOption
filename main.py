@@ -96,8 +96,7 @@ async def _recover_otc_cookies() -> bool:
 
 async def _init_with_retry():
     """init_load с обработкой отвала cookies. OTC (§4.3): CookiesExpired → авто-восстановление
-    рефреше
-     ром (3 попытки → иначе выход). TV: Survive-backoff (сообщение + пауза, на повторе init
+    рефрешером (3 попытки → иначе выход). TV: Survive-backoff (сообщение + пауза, на повторе init
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""

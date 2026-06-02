@@ -66,7 +66,7 @@ class Option:  # Класс структуры хранения данных в 
         if result[0]['coefficient']:
             self.coefficient = self.find_coefficient()
         else:
-            self.coefficient = 1
+            self.coefficient = 1.0
 
     def clear_data(self):
         self.name = ''  # название валюты
