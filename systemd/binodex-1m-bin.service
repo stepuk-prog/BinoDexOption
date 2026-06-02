@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=vova
 WorkingDirectory=/home/vova/Binodex/BinoOptions
-Environment="TIMEFRAME=1m" "BINARY=true" "TEST=false"
+Environment="TIMEFRAME=3m" "BINARY=true" "TEST=false"
 ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
 Restart=no
 RestartSec=10

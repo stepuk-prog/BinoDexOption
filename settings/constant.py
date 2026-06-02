@@ -2,6 +2,8 @@ import os
 
 qr110_path = f'{os.getcwd()}/pictures/qr-code_110.png'
 qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
+# OTC использует собственный QR (один на скрине) — остальное (позиция otc_qr_x/y и т.д.) без изменений
+otc_qr110_path = f'{os.getcwd()}/pictures/otc_qr-code_110.png'
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах
@@ -13,6 +15,15 @@ spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минут
                  {'timeframe': '10m', 'search_tf': '900', 'name_tf': '10 минут', 'coefficient': True},
                  {'timeframe': '15m', 'search_tf': '900', 'name_tf': '15 минут', 'coefficient': False},
                  ]
+
+# Варианты времени экспирации (мин) для рандомизации в FIN: график настроен на один
+# таймфрейм, а реальное время опциона выбирается случайно из набора (анти-однообразие).
+# 3m — график 1 минута, экспирация рандомно 2/3 мин; 5m — график 5 мин, экспирация 4/5 мин.
+# Таймфреймы без записи рандома не имеют (берётся номинал из spr_timeframe).
+fin_option_time = [
+    {'timeframe': '3m', 'variants': [2, 3]},
+    {'timeframe': '5m', 'variants': [4, 5]},
+]
 
 # Маппинг рабочего tf → tf для поиска данных опциона
 find_timeframe = [

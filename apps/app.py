@@ -18,7 +18,7 @@ from settings.browser_config import move_field, price_field, pop_up, screen_zone
 from settings.config import (channel_id, option_data, get_app, binary, program_id,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
-from settings.constant import qr110_path, qr85_path, bear_color, bull_color, find_time
+from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
 from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
@@ -48,9 +48,10 @@ async def _close_popup(page):
 
 
 def get_water():
-    """Загрузка QR-оверлеев (qr110, qr85)"""
+    """Загрузка QR-оверлеев. FIN — qr110+qr85; OTC — собственный otc_qr110 (на скрине один QR,
+    используется только qr[0]). Позиция (otc_qr_x/y) и прочее без изменений."""
     try:
-        qr110 = Image.open(qr110_path)
+        qr110 = Image.open(otc_qr110_path if not binary else qr110_path)
         qr85 = Image.open(qr85_path)
         return True, (qr110, qr85)
     except (Exception,) as error:

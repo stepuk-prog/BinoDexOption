@@ -35,8 +35,11 @@ symbol = find_par(data=vib_all_kat, par='symbol')
 scope_chip = find_par(data=vib_all_kat, par='scope_chip')
 # установка таймфрейма в 1 минуту для страницы с ценой
 tf_link_price = find_par(data=vib_all_kat, par=f'tf_link_1')
-# установка таймфрейма
-if timeframe in ['1m', '3m', '5m', '10m']:
+# установка таймфрейма (только FIN/TV; OTC tf_link не использует)
+if timeframe == '3m':
+    # 3m-вариант: график настроен на 1 минуту (tf_link_1), время опциона рандомится в коде
+    tf_link = find_par(data=vib_all_kat, par=f'tf_link_1')
+elif timeframe in ['1m', '5m', '10m']:
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_2')
 elif timeframe == '15m':
     tf_link = find_par(data=vib_all_kat, par=f'tf_link_3')

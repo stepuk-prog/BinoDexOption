@@ -95,6 +95,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
     if not binary:  # Проверка на отвал cookies
         prev_price = option_data.price
 
+    option_data.set_option_time()  # FIN 3m/5m: рандомное время экспирации + синхронизация name_tf
     option_data.levels()
     message_text = second_message()
 

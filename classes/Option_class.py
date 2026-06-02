@@ -1,6 +1,6 @@
 import random
 
-from settings.constant import spr_timeframe, find_timeframe
+from settings.constant import spr_timeframe, find_timeframe, fin_option_time
 from settings.browser_constant import link1, link2
 
 
@@ -220,6 +220,24 @@ class Option:  # Класс структуры хранения данных в 
                 self.plus = True
                 return True
             return False  # itog_price >= 0
+
+    # назначение времени экспирации опциона на текущий сигнал
+    def set_option_time(self):
+        """Время экспирации текущего сигнала (сек) + синхронизация name_tf для поста.
+        FIN-варианты 3m/5m: график настроен на фиксированный ТФ, а реальное время опциона
+        выбирается рандомно (3m → 2/3 мин, 5m → 4/5 мин); name_tf обновляется под выбранное
+        значение, чтобы пост не врал о времени экспирации. Прочие случаи (OTC, остальные ТФ)
+        — номинал из таймфрейма, name_tf остаётся из spr_timeframe (как в __init__)."""
+        variants = None
+        if self.binary:
+            variants = next((item['variants'] for item in fin_option_time
+                             if item['timeframe'] == self.timeframe), None)
+        if variants:
+            minutes = random.choice(variants)
+            self.name_tf = f'{minutes} {self.minuts(kol=minutes)}'
+        else:
+            minutes = int(self.timeframe.replace('m', ''))
+        self.option_time = minutes * 60 + 2
 
     # настройки времени для догона
     def dogon_settings(self, dogon_par):
