@@ -1,5 +1,5 @@
 [Unit]
-Description=Binodex 1m Binary
+Description=Binodex 3m Binary
 After=network.target
 
 [Service]
