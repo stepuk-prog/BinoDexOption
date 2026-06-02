@@ -191,13 +191,13 @@ TIMEFRAME=1m BINARY=true TEST=false python main.py
 
 ```bash
 # Запуск конкретного сервиса
-sudo systemctl start binodex-1m-bin.service
+sudo systemctl start binodex-3m-bin.service
 
 # Проверка статуса
-sudo systemctl status binodex-1m-bin.service
+sudo systemctl status binodex-3m-bin.service
 
 # Включение автозапуска
-sudo systemctl enable binodex-1m-bin.service
+sudo systemctl enable binodex-3m-bin.service
 ```
 
 > **Важно:** Если программой управляет GlobalDispatcher — НЕ включайте автозапуск (`enable`).
@@ -206,13 +206,13 @@ sudo systemctl enable binodex-1m-bin.service
 
 ```bash
 # Остановка
-sudo systemctl stop binodex-1m-bin.service
+sudo systemctl stop binodex-3m-bin.service
 
 # Перезапуск
-sudo systemctl restart binodex-1m-bin.service
+sudo systemctl restart binodex-3m-bin.service
 
 # Просмотр логов systemd
-sudo journalctl -u binodex-1m-bin.service -f
+sudo journalctl -u binodex-3m-bin.service -f
 ```
 
 ---
@@ -249,7 +249,7 @@ grep "ERROR" /home/vova/Binodex/BinoOptions/logs/option_1m_bin.log
 
 ```bash
 # Остановка сервисов
-sudo systemctl stop binodex-1m-bin.service
+sudo systemctl stop binodex-3m-bin.service
 
 # Перезаливка кода с dev-машины (rsync, как при установке)
 rsync -av --exclude 'venv' --exclude '.venv' --exclude '.git' \
@@ -263,7 +263,7 @@ pip install -r requirements.txt
 playwright install firefox
 
 # Запуск сервисов
-sudo systemctl start binodex-1m-bin.service
+sudo systemctl start binodex-3m-bin.service
 ```
 
 ---

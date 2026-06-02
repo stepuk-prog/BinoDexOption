@@ -117,8 +117,8 @@ Unit-файлы в папке `systemd/` (`WorkingDirectory=/home/vova/Binodex/B
 ```bash
 sudo cp systemd/binodex-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now binodex-1m-bin.service
-sudo systemctl status binodex-1m-bin.service
+sudo systemctl enable --now binodex-3m-bin.service
+sudo systemctl status binodex-3m-bin.service
 sudo journalctl -u binodex-1m-bin -f
 ```
 
