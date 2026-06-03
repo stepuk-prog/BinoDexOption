@@ -31,7 +31,7 @@ from settings.config import shot_path, screenshot_path, database, prog_key
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (otc_select_pair, otc_category_valute, otc_input_pair,
-                                     otc_modal_pair_item, screen_zone_otc)
+                                     otc_modal_pair_item, screen_zone_otc, otc_settings_btn)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -47,6 +47,12 @@ CHART_DATA_JS = ("() => { const c = window.chartData;"
 # (проверено: 3+3 чтения → 9/10 совпадений с нарисованным ценником; см. docs/BINODEX_PRICE.md).
 CHART_READS_BEFORE = 3  # чтений chartData вплотную ДО screenshot
 CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
+# Кнопка настроек аккаунта (otc_settings_btn) есть в тулбаре ТОЛЬКО когда торговый UI полностью
+# прогрузился. На сплеше (зависший Privy-токен без редиректа) её нет — хотя кнопка выбора пары
+# присутствует, потому on_trade/UI-gate по ней и feed_dead (котировок-WS стримит все пары) сплеш
+# не ловят. Отсутствие этой кнопки — точный DOM-маркер «завис на сплеше».
+UI_READY_TIMEOUT = 15.0   # сек ждать кнопку настроек при загрузке (init_otc)
+UI_DEAD_CONFIRM = 3.0     # сек подтверждения «UI пропал → сплеш» в рантайм-детекте (otc_session_dead)
 
 logger = init_logger(__name__)
 
@@ -228,6 +234,18 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
     return out
 
 
+async def _ui_loaded(page: Page, timeout: float) -> bool:
+    """True, если торговый UI binodex полностью прогрузился — кнопка настроек аккаунта
+    (otc_settings_btn) видна в пределах timeout. На сплеше (зависший Privy-токен без редиректа)
+    этой кнопки нет, хотя кнопка выбора пары может присутствовать — поэтому это точный DOM-маркер
+    «не сплеш», который on_trade/feed_dead не дают. locator.wait_for сам поллит до появления."""
+    try:
+        await page.locator(otc_settings_btn).first.wait_for(state='visible', timeout=int(timeout * 1000))
+        return True
+    except (Exception,):
+        return False
+
+
 async def screenshot_otc(page: Page, asset: str = None, qr=None):
     """Скрин зоны графика binodex + цена графика (медиана чтений window.chartData.price
     вокруг кадра) + QR. chartData.price — то значение, что движок рисует на ярлыке; это
@@ -312,6 +330,17 @@ async def init_otc(manager: "BrowserManager") -> bool:
             raise CookiesExpired('binodex OTC: торговый UI не прогрузился (завис на /trade, '
                                  'кнопка выбора пары не появилась) — storage_state протух')
 
+        # Кнопка выбора пары видна — но UI ещё НЕ обязательно прогрузился: при «залипшем»
+        # Privy-токене сайт остаётся на /trade и рисует тулбар частично, а чарт виснет на сплеше.
+        # Кнопки настроек аккаунта при этом НЕТ — её отсутствие точный DOM-маркер сплеша (on_trade
+        # держит /trade, котировок-WS стримит все пары → feed_dead тоже молчит). Без этого бот
+        # постил бы скрин сплеша (цена с WS-фолбэка) ИЛИ рестартовал по кругу, НЕ запуская
+        # рефрешер. Нет кнопки настроек — тот же отвал cookies (§4.3): CookiesExpired →
+        # _recover_otc_cookies (cold relogin do_setup=True).
+        if not await _ui_loaded(page, UI_READY_TIMEOUT):
+            raise CookiesExpired('binodex OTC: торговый UI не прогрузился (нет кнопки настроек '
+                                 'аккаунта — завис на сплеше) — storage_state протух')
+
         # Ждём поток котировок (до 10 сек)
         tracker = get_price_tracker()
         for _ in range(20):
@@ -331,9 +360,12 @@ OTC_WS_SILENCE_LIMIT = 30  # сек без тика при закрытом WS =
 
 
 async def otc_session_dead(manager: "BrowserManager") -> tuple[bool, str]:
-    """Рантайм-детект отвала OTC-сессии (§4.4). Два сигнала:
+    """Рантайм-детект отвала OTC-сессии (§4.4). Три сигнала:
       (a) редирект с /trade — Privy storage_state протух (основной, URL-детект);
-      (b) WS-фид котировок мёртв — токен WS мог протухнуть без редиректа страницы
+      (b) торговый UI пропал — нет кнопки настроек аккаунта при живом URL/WS (Privy-токен
+          залип без редиректа: тулбар отрисован частично, /trade держится, котировок-WS стримит
+          все пары → (a) и (c) молчат, но страница свалилась на сплеш);
+      (c) WS-фид котировок мёртв — токен WS мог протухнуть без редиректа страницы
           (дополняет (a); точнее и раньше, чем ждать сбоя данных).
     Возвращает (dead, reason) — reason для лога вызывающим."""
     page = manager.pages.get('main')
@@ -343,6 +375,10 @@ async def otc_session_dead(manager: "BrowserManager") -> tuple[bool, str]:
                 return True, 'редирект с /trade (Privy storage_state протух)'
         except (Exception,):
             pass
+        # На живом графике кнопка настроек видна сразу (нет ложняка); нет её весь
+        # UI_DEAD_CONFIRM — страница реально свалилась на сплеш.
+        if not await _ui_loaded(page, UI_DEAD_CONFIRM):
+            return True, 'торговый UI пропал — завис на сплеше (нет кнопки настроек, storage_state протух)'
     if get_price_tracker().feed_dead(OTC_WS_SILENCE_LIMIT):
         return True, f'WS-фид котировок мёртв (закрыт, нет тика > {OTC_WS_SILENCE_LIMIT}с)'
     return False, ''

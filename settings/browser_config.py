@@ -63,3 +63,6 @@ otc_modal_pair_item = find_par(data=otc_setting, par='modal_pair_item')
 otc_tek_val = find_par(data=otc_setting, par='tek_val')
 # Зона графика для скриншота (canvas)
 screen_zone_otc = find_par(data=otc_setting, par='screen_zone')
+# Кнопка настроек аккаунта (тулбар) — есть ТОЛЬКО при полностью прогруженном UI; на сплеше
+# её нет (хотя кнопка выбора пары присутствует). Маркер «не сплеш» для readiness-gate init_otc.
+otc_settings_btn = find_par(data=otc_setting, par='setup_settings_open')
