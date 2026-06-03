@@ -62,7 +62,6 @@ REQUIRED_LOGIN_SELECTORS = ("login_open", "login_email", "login_submit", "login_
 # Шаги настройки (par_name «открыть» → «выбрать»). После всех — повторный клик по
 # setup_settings_open закрывает окно. Настройки персистят за аккаунтом.
 SETUP_STEPS = [
-    ("setup_indicators",   "setup_indicator_item"),
     ("setup_candle_scale", "setup_candle_scale_item"),
     ("setup_chart_scale",  "setup_chart_scale_item"),
 ]
