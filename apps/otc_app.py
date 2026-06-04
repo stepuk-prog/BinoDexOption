@@ -356,6 +356,50 @@ async def init_otc(manager: "BrowserManager") -> bool:
         return False
 
 
+async def reload_otc_page(manager: "BrowserManager") -> bool:
+    """Перезагрузка binodex перед каждым новым опционом (вызов из main_app). binodex
+    периодически выкатывает новую версию фронта и показывает баннер «Доступна новая версия.
+    Обновите страницу», зависая на сплеше при ЖИВЫХ URL (/trade держится), UI и WS — отвал-кук-
+    детект (on_trade/_ui_loaded/feed_dead) такое НЕ ловит. Регулярный reload подхватывает новую
+    версию заранее, до того как чарт зависнет. WS-перехват НЕ переустанавливаем: page.on('websocket')
+    переживает reload (повторная подписка задвоила бы хендлеры), старый WS закроется → новый
+    откроется → трекер сам перецепится.
+    :return: True — UI снова готов к скрину; False — не поднялся (вызывающий уйдёт в exit_main →
+    main-цикл по otc_session_dead пересоздаст браузер)."""
+    page = manager.pages.get('main')
+    if page is None:
+        return False
+    try:
+        await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
+    except (Exception,) as error:
+        logger.warning(f'OTC: reload страницы перед опционом не удался - {error}')
+        return False
+    try:
+        await page.wait_for_load_state('networkidle', timeout=TIMEOUT_LONG)
+    except (Exception,):
+        pass  # постоянный WS-поток может мешать networkidle — не критично (как в init_otc)
+    # Та же readiness-лестница, что и в init_otc, но мягкая (bool вместо CookiesExpired):
+    # завис после reload — это не отвал кук, а недогруз фронта, лечится пересозданием браузера.
+    if not on_trade(page.url):
+        logger.warning(f'OTC: после reload редирект с /trade на {page.url}')
+        return False
+    try:
+        await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
+    except (Exception,):
+        logger.warning('OTC: после reload не появилась кнопка выбора пары (завис на сплеше)')
+        return False
+    if not await _ui_loaded(page, UI_READY_TIMEOUT):
+        logger.warning('OTC: после reload нет кнопки настроек аккаунта (завис на сплеше)')
+        return False
+    tracker = get_price_tracker()
+    for _ in range(20):  # ждём переподключения WS-котировок (до 10 сек), как в init_otc
+        if tracker.ws_connected and tracker.prices:
+            break
+        await asyncio.sleep(0.5)
+    logger.info('🔄 OTC: страница перезагружена перед опционом — UI готов')
+    return True
+
+
 OTC_WS_SILENCE_LIMIT = 30  # сек без тика при закрытом WS = мёртвый фид (внутренний тайминг)
 
 

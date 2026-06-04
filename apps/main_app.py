@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
 from apps.my_exeptions import send_photo_safe
-from apps.otc_app import parce_otc, screenshot_otc
+from apps.otc_app import parce_otc, screenshot_otc, reload_otc_page
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -67,6 +67,14 @@ async def main(manager: "BrowserManager", qr, stop_event):
         screen_shot = await screenshot(manager=manager, take_shot=False, qr=qr)
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
+        # Перед каждым опционом перезагружаем страницу binodex: фронт периодически
+        # выкатывает новую версию и виснет на сплеше с баннером «Обновите страницу», что
+        # отвал-кук-детект не ловит (URL/UI/WS живы). Не поднялся после reload → выходим как
+        # при сбое загрузки: main-цикл по otc_session_dead пересоздаст браузер.
+        if not await reload_otc_page(manager=manager):
+            return await exit_main(channel_mess=False, result=False, fall=False,
+                                   bug_text='binodex не поднялся после reload (новая версия/сплеш)',
+                                   check_cookies=count_price)
         result = await parce_otc(manager=manager, log_data=option_data, valute=used_val)
         if not result:
             return await exit_main(channel_mess=False, result=False,
