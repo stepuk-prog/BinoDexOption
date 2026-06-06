@@ -48,6 +48,7 @@ CONTEXT_OPTIONS = {
 }
 
 URL_LANDING = "https://binodex.app/"
+URL_TRADE = "https://binodex.app/trade"
 
 # Privy шлёт код с РАЗНЫХ адресов (no-reply@privy.io И no-reply@mail.privy.io) — фильтруем по
 # домену (подстрока в FROM матчит оба), иначе на части аккаунтов код «не находится» и воркер виснет.
@@ -163,7 +164,15 @@ def _login(page, mail: str, sel: dict, imap, baseline) -> None:
         page.locator(sel["login_submit"]).first.click(timeout=8000)
         _wait_code_step(page, sel, timeout=15000)
     _enter_code(page, sel, _wait_for_code(imap, baseline))
-    page.wait_for_url("**/trade**", timeout=30000)
+    # Privy больше НЕ редиректит на /trade после входа — остаёмся на лендинге. Признак успешного
+    # входа = токен Privy в localStorage; дождавшись его, сами идём на /trade и проверяем, что не
+    # выбросило обратно (storage_state валиден). Раньше тут было wait_for_url('**/trade**'), которое
+    # после смены флоу binodex всегда падало по таймауту и валило весь авто-рефреш.
+    page.wait_for_function(
+        "() => !!window.localStorage.getItem('privy:token')", timeout=30000)
+    page.goto(URL_TRADE, wait_until="domcontentloaded", timeout=30000)
+    if not page.url.rstrip("/").endswith("/trade"):
+        raise RuntimeError(f"после логина редирект с /trade на {page.url}")
 
 
 def _setup(page, sel: dict) -> None:
