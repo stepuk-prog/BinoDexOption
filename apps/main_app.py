@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
 
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
 from apps.my_exeptions import send_photo_safe
-from apps.otc_app import parce_otc, screenshot_otc, reload_otc_page
+from apps.otc_app import (parce_otc, screenshot_otc, reload_otc_page, select_otc_pair,
+                          _ui_loaded, UI_DEAD_CONFIRM)
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -30,6 +31,13 @@ NO_PAIRS_RELOAD_PAUSE = 5      # сек между быстрыми reload
 NO_PAIRS_LONG_SLEEP = 600      # сек (10 мин) между циклами
 NO_PAIRS_MAX_CYCLES = 6        # циклов без пар до рестарта (~1 ч)
 
+# OTC: binodex сам может свалиться на сплеш В ТЕЧЕНИЕ опциона (новая версия/переинициализация
+# Privy — без нашего reload, см. memory binodex-stuck-splash). Чтобы опцион не прерывался, за
+# HEALTH_LEAD сек до КАЖДОЙ фиксации результата (итог И каждый шаг догона) проверяем живость UI
+# и при сплеше поднимаем reload+переселект ТОЙ ЖЕ пары — результат снимется с опозданием, а не
+# потеряется. Лид прячется в хвосте ожидания экспирации, поэтому в норме задержки нет.
+HEALTH_LEAD = 15              # сек до фиксации результата — упреждающая проверка/восстановление UI
+
 
 async def _try_send(photo, caption, mes_type: str, timeout: float = 30.0) -> tuple[bool, str]:
     """Отправка поста с обработкой обрыва связи и таймаутом — тонкая обёртка над единым
@@ -45,6 +53,41 @@ async def _sleep_or_stop(stop_event, seconds: float):
         await asyncio.wait_for(stop_event.wait(), timeout=seconds)
     except asyncio.TimeoutError:
         pass
+
+
+async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
+    """OTC: перед фиксацией результата СНАЧАЛА дёшево проверить, жив ли UI — видна ли кнопка
+    настроек аккаунта (точный маркер «не сплеш»). Видна → ничего не делаем, БЕЗ reload. И только
+    если пропала (binodex сам свалился на сплеш в течение опциона, не наш reload) — поднять reload
+    (он ретраит сплеш) и ВЕРНУТЬ ТУ ЖЕ пару (reload сбрасывает выбор пары). Best-effort: не вышло —
+    результат снимется как раньше с ошибкой → exit_main. FIN не трогаем. SIGTERM пропускаем."""
+    if binary or stop_event.is_set():
+        return
+    page = manager.pages['main']
+    if await _ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
+        return
+    logger.cookies('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
+                   'не прерывая опцион')
+    if not await reload_otc_page(manager=manager):
+        logger.warning('OTC: reload в течение опциона не поднял UI — результат может не сняться')
+        return
+    # reload сбрасывает выбранную пару → возвращаем ту же. option_data.name = '<pair> OTC',
+    # select_otc_pair ждёт голую пару (сам добавит ' OTC' для проверки WS-котировки).
+    bare = option_data.name[:-4] if option_data.name.endswith(' OTC') else option_data.name
+    if not await select_otc_pair(page, bare):
+        logger.warning(f'OTC: не вернул пару {bare} после reload в течение опциона — результат под вопросом')
+
+
+async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
+    """Дождаться экспирации перед фиксацией результата, но за HEALTH_LEAD сек до конца проверить
+    живость OTC-UI и при сплеше восстановить (reload+переселект). Лид прячется в хвосте ожидания —
+    в норме (UI жив, проверка ~мгновенна) задержки нет; при сплеше результат снимется с опозданием,
+    но опцион не прервётся. stop_event прерывает паузы (после вызова проверять stop_event.is_set())."""
+    lead = min(HEALTH_LEAD, seconds) if not binary else 0
+    await _sleep_or_stop(stop_event, seconds - lead)
+    if lead and not stop_event.is_set():
+        await _ensure_otc_alive(manager, stop_event)
+        await _sleep_or_stop(stop_event, lead)
 
 
 async def _capture(manager: "BrowserManager", qr, *, seek_point: bool):
@@ -157,7 +200,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
     if not ok:
         return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-    await _sleep_or_stop(stop_event, option_data.option_time)
+    await _wait_result(manager, stop_event, option_data.option_time)
     if stop_event.is_set():  # SIGTERM во время ожидания экспирации — выходим без постов
         return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
@@ -228,7 +271,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
         if not ok:
             return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-        await _sleep_or_stop(stop_event, option_data.dgn_time)
+        await _wait_result(manager, stop_event, option_data.dgn_time)
         if stop_event.is_set():  # SIGTERM во время ожидания итога догона — выходим без постов
             return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
