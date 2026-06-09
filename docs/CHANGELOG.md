@@ -14,8 +14,6 @@
   never retrieved») — всё тело best-effort.
 - **Лог фолбэка цены кадра chartData→WS (`apps/otc_app.py`).** `logger.debug`, когда `chartData`
   пуст и цена кадра берётся из WS — в пост-мортеме виден источник.
-- **`connect_timeout=10` у пула (`database/postgres.py`).** `timeout=10` — это acquire, не TCP/login;
-  на полумёртвом PgBouncer фаза login больше не виснет.
 
 ### 2026-06-08 — Транзиент-401 на постинге фото больше не хоронит юзербота
 - **Дискриминатор «мёртвая сессия» vs «транзиент медиа-DC» (`apps/my_exeptions.py`).** 401
