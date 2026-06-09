@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### 2026-06-09 — Аудит-харднинг (fail-fast env, popup-колбэк, connect_timeout)
+### 2026-06-09 — Аудит-харднинг (fail-fast env, popup-колбэк, лог фолбэка цены)
 - **`TOKEN` через `req_str` (`settings/logger_config.py`).** Раньше «сырой» `os.getenv("TOKEN")`
   при пустом env уходил в `Bot(token=None)` → глубокая `TokenValidationError` aiogram ДО подъёма
   логов. Теперь — понятная ошибка fail-fast.
