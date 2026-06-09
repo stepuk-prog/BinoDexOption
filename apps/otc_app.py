@@ -199,10 +199,19 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
 
 async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
     """Подобрать активную OTC-пару из БД и выбрать её на binodex.
-    :return: True при успешном выборе."""
+    Сначала берём активные пары, исключая последние использованные (valute) — чтобы актив не
+    повторялся в окне. Если после исключения кандидатов не осталось (узкий пул активных OTC на
+    этом ТФ сузился до недавно использованных), повторяем запрос БЕЗ исключения — разрешаем
+    повтор пары. Иначе бот ложно решил бы «пар нет» и уснул на NO_PAIRS_LONG_SLEEP, хотя пары
+    на сайте есть (просто все недавно крутились). :return: True при успешном выборе."""
     page = manager.pages['main']
     active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
-    if not active_otc_list:  # None/False (ошибка пула) или пусто
+    if active_otc_list is False:  # ошибка пула (контракт execute_query) — не «нет пар»
+        return False
+    if not active_otc_list:  # пусто после исключения → разрешаем повтор недавних пар
+        logger.info("OTC: активные пары исчерпаны исключением недавних — повторяю запрос с разрешением повтора")
+        active_otc_list = await database.option_data_pocket(exclude_ids=[], tf=log_data.find_timeframe)
+    if not active_otc_list:  # пусто и без исключения (нет активных пар на ТФ) либо ошибка пула
         return False
     for otc in active_otc_list:
         log_data.add_option_data(otc)  # log_data.name = 'EUR/USD' (из БД)
