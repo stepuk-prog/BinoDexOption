@@ -53,6 +53,12 @@ CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
 # не ловят. Отсутствие этой кнопки — точный DOM-маркер «завис на сплеше».
 UI_READY_TIMEOUT = 15.0   # сек ждать кнопку настроек при загрузке (init_otc)
 UI_DEAD_CONFIRM = 3.0     # сек подтверждения «UI пропал → сплеш» в рантайм-детекте (otc_session_dead)
+# Зависший загрузочный сплеш binodex транзиентен: ~3% reload Privy/SPA не достраивается (#root
+# пуст — только auth-iframe+лого, спиннер крутится вечно), следующий reload рендерится нормально.
+# Поэтому reload_otc_page повторяет САМ reload, прежде чем отдать False (иначе бот зря уходит в
+# пересоздание браузера / «нет пар»). Замер: 1/30 в scripts/probe_pair_modal.py (дамп splash_*).
+RELOAD_RETRIES = 3        # попыток reload при не-готовности UI (зависший сплеш)
+RELOAD_RETRY_PAUSE = 2.0  # сек между ретраями reload
 
 logger = init_logger(__name__)
 
@@ -371,19 +377,10 @@ async def init_otc(manager: "BrowserManager") -> bool:
         return False
 
 
-async def reload_otc_page(manager: "BrowserManager") -> bool:
-    """Перезагрузка binodex перед каждым новым опционом (вызов из main_app). binodex
-    периодически выкатывает новую версию фронта и показывает баннер «Доступна новая версия.
-    Обновите страницу», зависая на сплеше при ЖИВЫХ URL (/trade держится), UI и WS — отвал-кук-
-    детект (on_trade/_ui_loaded/feed_dead) такое НЕ ловит. Регулярный reload подхватывает новую
-    версию заранее, до того как чарт зависнет. WS-перехват НЕ переустанавливаем: page.on('websocket')
-    переживает reload (повторная подписка задвоила бы хендлеры), старый WS закроется → новый
-    откроется → трекер сам перецепится.
-    :return: True — UI снова готов к скрину; False — не поднялся (вызывающий уйдёт в exit_main →
-    main-цикл по otc_session_dead пересоздаст браузер)."""
-    page = manager.pages.get('main')
-    if page is None:
-        return False
+async def _reload_otc_once(page: Page) -> bool:
+    """Одна попытка reload + та же лестница готовности, что в init_otc, но мягкая (bool вместо
+    CookiesExpired). False — UI не поднялся; чаще всего это транзиентный зависший сплеш binodex
+    (Privy/SPA не достроился, #root пуст), который лечится повторным reload (см. reload_otc_page)."""
     try:
         await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
     except (Exception,) as error:
@@ -393,8 +390,6 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
         await page.wait_for_load_state('networkidle', timeout=TIMEOUT_LONG)
     except (Exception,):
         pass  # постоянный WS-поток может мешать networkidle — не критично (как в init_otc)
-    # Та же readiness-лестница, что и в init_otc, но мягкая (bool вместо CookiesExpired):
-    # завис после reload — это не отвал кук, а недогруз фронта, лечится пересозданием браузера.
     if not on_trade(page.url):
         logger.warning(f'OTC: после reload редирект с /trade на {page.url}')
         return False
@@ -406,6 +401,35 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
     if not await _ui_loaded(page, UI_READY_TIMEOUT):
         logger.warning('OTC: после reload нет кнопки настроек аккаунта (завис на сплеше)')
         return False
+    return True
+
+
+async def reload_otc_page(manager: "BrowserManager") -> bool:
+    """Перезагрузка binodex перед каждым новым опционом (вызов из main_app). binodex
+    периодически выкатывает новую версию фронта и показывает баннер «Доступна новая версия.
+    Обновите страницу», зависая на сплеше при ЖИВЫХ URL (/trade держится), UI и WS — отвал-кук-
+    детект (on_trade/_ui_loaded/feed_dead) такое НЕ ловит. Регулярный reload подхватывает новую
+    версию заранее, до того как чарт зависнет. WS-перехват НЕ переустанавливаем: page.on('websocket')
+    переживает reload (повторная подписка задвоила бы хендлеры), старый WS закроется → новый
+    откроется → трекер сам перецепится.
+
+    Зависший загрузочный сплеш транзиентен (~3% reload Privy/SPA не достраивается, следующий reload
+    рендерится нормально), поэтому повторяем САМ reload до RELOAD_RETRIES раз перед тем, как отдать
+    False — иначе бот зря уходит в пересоздание браузера (ложный «отвал cookies») / «нет пар».
+    :return: True — UI снова готов к скрину; False — не поднялся после всех ретраев (вызывающий
+    уйдёт в exit_main → main-цикл по otc_session_dead пересоздаст браузер)."""
+    page = manager.pages.get('main')
+    if page is None:
+        return False
+    for attempt in range(1, RELOAD_RETRIES + 1):
+        if await _reload_otc_once(page):
+            break
+        if attempt < RELOAD_RETRIES:
+            logger.warning(f'OTC: UI не поднялся после reload ({attempt}/{RELOAD_RETRIES}) — '
+                           f'повторяю reload (транзиентный зависший сплеш)')
+            await asyncio.sleep(RELOAD_RETRY_PAUSE)
+    else:
+        return False  # все попытки впустую — реальный отвал/сплеш, наверх (пересоздание браузера)
     tracker = get_price_tracker()
     for _ in range(20):  # ждём переподключения WS-котировок (до 10 сек), как в init_otc
         if tracker.ws_connected and tracker.prices:
