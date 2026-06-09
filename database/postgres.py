@@ -54,7 +54,8 @@ class Database:
                     database=db_name,
                     min_size=self.min_size, max_size=self.max_size,
                     statement_cache_size=0,   # обязательно для PgBouncer transaction mode
-                    timeout=10,
+                    timeout=10,               # acquire: ожидание свободного коннекта из пула
+                    connect_timeout=10,       # TCP/login: не виснуть на установке коннекта к полумёртвому PgBouncer
                     command_timeout=30,       # не зависать на мёртвом соединении
                     init=init_json_codec,
                 ))

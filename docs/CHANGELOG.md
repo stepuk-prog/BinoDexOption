@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### 2026-06-09 — Аудит-харднинг (fail-fast env, popup-колбэк, connect_timeout)
+- **`TOKEN` через `req_str` (`settings/logger_config.py`).** Раньше «сырой» `os.getenv("TOKEN")`
+  при пустом env уходил в `Bot(token=None)` → глубокая `TokenValidationError` aiogram ДО подъёма
+  логов. Теперь — понятная ошибка fail-fast.
+- **`req_int`/`opt_int` ловят пустую/нечисловую строку (`settings/env.py`).** Хелпер `_to_int`:
+  blank/мусор дают «Некорректное целое в переменной X=…», а не криптичный `int('')` ValueError;
+  пустой `opt_int` → default. Контракт «понятная ошибка» теперь честно выполняется.
+- **Popup event-колбэк целиком в `try/except` (`apps/browser_app.py`).** `page.url`/`is_closed()`
+  на гонке с самозакрытием popup больше не бросают в диспетчер Playwright («Task exception was
+  never retrieved») — всё тело best-effort.
+- **Лог фолбэка цены кадра chartData→WS (`apps/otc_app.py`).** `logger.debug`, когда `chartData`
+  пуст и цена кадра берётся из WS — в пост-мортеме виден источник.
+- **`connect_timeout=10` у пула (`database/postgres.py`).** `timeout=10` — это acquire, не TCP/login;
+  на полумёртвом PgBouncer фаза login больше не виснет.
+
 ### 2026-06-08 — Транзиент-401 на постинге фото больше не хоронит юзербота
 - **Дискриминатор «мёртвая сессия» vs «транзиент медиа-DC» (`apps/my_exeptions.py`).** 401
   (`Unauthorized`, «Auth key not found») на `send_photo` бывает двух видов: (а) мейн-сессия

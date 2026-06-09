@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-from settings.env import parse_bool, req_int  # parse_bool ре-экспортируется (импортируют отсюда)
+from settings.env import parse_bool, req_int, req_str  # parse_bool ре-экспортируется (импортируют отсюда)
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
 
@@ -13,7 +13,7 @@ cookies_channel = req_int("COOKIES_CHANNEL")
 # cookies-сообщений похоронит единственный критичный алерт). Опционален: фоллбэк на error.
 _session_channel_raw = os.getenv("SESSION_CHANNEL")
 session_channel = int(_session_channel_raw) if _session_channel_raw else error_channel
-token = os.getenv("TOKEN")
+token = req_str("TOKEN")  # обязателен: иначе Bot(token=None) падает глубокой ошибкой aiogram до подъёма логов
 timeframe = os.getenv("TIMEFRAME", "unknown")
 binary = parse_bool(os.getenv("BINARY"))
 # Единый суффикс экземпляра {tf}_{bin|otc} — ОДИН источник для config (пути файлов) и

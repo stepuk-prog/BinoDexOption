@@ -265,7 +265,13 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             t_shot = time.time()
             await element.screenshot(path=shot_path)
             reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
-            price = statistics.median(reads) if reads else get_price_tracker().get_price_at(asset, t_shot)
+            if reads:
+                price = statistics.median(reads)
+            else:
+                # chartData не отдал ни одного чтения — кадр снят, но цену берём из WS-фолбэка.
+                # Логируем: в пост-мортеме видно, что источник цены кадра — WS, а не ярлык графика.
+                price = get_price_tracker().get_price_at(asset, t_shot)
+                logger.debug(f"OTC {asset}: chartData пуст на кадре — цена из WS-фолбэка ({price})")
             if price is None:  # ни chartData, ни WS не дали цену
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены графика OTC для {asset}")
                 await asyncio.sleep(0.5)

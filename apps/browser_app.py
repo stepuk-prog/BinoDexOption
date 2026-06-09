@@ -40,15 +40,17 @@ def setup_dialog_handler(page: Page):
 def setup_popup_blocker(context: BrowserContext, manager: 'BrowserManager'):
     """Автоматическое закрытие неожиданных всплывающих окон (новых вкладок)"""
     async def handle_popup(page: Page):
-        # Если страница не зарегистрирована в manager.pages - это неожиданный popup
-        await asyncio.sleep(POPUP_SETTLE_DELAY)
-        if page not in manager.pages.values() and not page.is_closed():
-            url = page.url
-            logger.debug(f"🚫 Закрытие popup окна: {url}")
-            try:
+        # Если страница не зарегистрирована в manager.pages - это неожиданный popup.
+        # Весь колбэк best-effort: event-хендлер НЕ должен бросать в диспетчер Playwright
+        # (иначе «Task exception was never retrieved») — page.url/is_closed на гонке/
+        # disposed-странице тоже могут кинуть, поэтому try охватывает всё тело.
+        try:
+            await asyncio.sleep(POPUP_SETTLE_DELAY)
+            if page not in manager.pages.values() and not page.is_closed():
+                logger.debug(f"🚫 Закрытие popup окна: {page.url}")
                 await page.close()
-            except (Exception,) as error:  # гонка: popup мог закрыться сам — не роняем event-колбэк
-                logger.debug(f"Popup закрытие (best-effort): {error}")
+        except (Exception,) as error:  # гонка: popup мог закрыться сам — не роняем event-колбэк
+            logger.debug(f"Popup закрытие (best-effort): {error}")
     context.on('page', handle_popup)
 
 
