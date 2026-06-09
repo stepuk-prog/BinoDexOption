@@ -273,6 +273,10 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
         try:
             element = page.locator(screen_zone_otc).first
             await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
+            # Защита: модалка выбора пары иногда осталась открытой (select_otc_pair не дозакрыл) —
+            # она перекрывает график. Закрываем перед кадром, чтобы не попала в пост. В норме
+            # (модалка закрыта) _close_pair_modal выходит сразу на первой проверке — без кликов.
+            await _close_pair_modal(page)
             # Цена графика = медиана быстрых чтений chartData.price ВОКРУГ кадра (несколько
             # до screenshot + несколько после). Медиана гасит редкий анимационный выброс
             # ярлыка. t_shot фиксируем для фолбэка на WS, если chartData не отдал значений.
