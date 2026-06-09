@@ -249,7 +249,7 @@
 - Инструмент сверки вёрстки постов: `check_messages.py`.
 
 ### Надёжность
-- Таймауты на всех внешних вызовах: БД (`command_timeout`/`connect_timeout`/`acquire`), Playwright (`goto`/`reload`/`wait_for*`/клики), Pyrogram (через `_try_send`).
+- Таймауты на всех внешних вызовах: БД (`timeout`=установка коннекта/`command_timeout`=запрос/`acquire`; у asyncpg НЕТ `connect_timeout`), Playwright (`goto`/`reload`/`wait_for*`/клики), Pyrogram (через `_try_send`).
 - Отвал session юзербота (на старте или при отправке) → штатный стоп без перезапуска + алерт + запись в БД; прочие сбои запуска — до 5 попыток.
 - `init_browser`: очистка при сбое (нет осиротевшего Firefox).
 - Guard'ы от крашей: `check_plus` (False/None), цикл догонов (IndexError); единый контракт `execute_query` → `False`; `return` после `close_program`.
