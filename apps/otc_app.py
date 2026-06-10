@@ -154,6 +154,58 @@ async def _close_pair_modal(page: Page):
             await asyncio.sleep(0.1)
 
 
+_modal_diag_done = False  # подробный дамп модалки делаем один раз на процесс (см. _dump_pair_modal)
+
+
+async def _modal_item_counts(page: Page) -> str:
+    """Компактная диагностика для лога при промахе выбора пары: сколько пунктов матчит
+    текущий селектор modal_pair_item и сколько из них содержат 'OTC'. Различает причины
+    одинакового лога «не нашёл …»: items=0 → селектор отвалился (binodex сменил разметку);
+    items>0, otc=0 → пункты есть, но OTC-вариантов сейчас нет; items>0, otc>0 → есть OTC,
+    но фильтр has_text=pair не матчит (изменился формат текста, напр. слэш в паре)."""
+    try:
+        items = page.locator(otc_modal_pair_item)
+        n = await items.count()
+        otc = await items.filter(has_text=re.compile('OTC', re.IGNORECASE)).count()
+        return f'items={n}, otc={otc}'
+    except (Exception,) as err:
+        return f'диаг-сбой:{err}'
+
+
+async def _dump_pair_modal(page: Page) -> None:
+    """Разовый подробный дамп разметки модалки (раз на процесс) для подбора нового
+    селектора/формата текста — выводит первые тексты пунктов, а если текущий селектор пуст,
+    перечисляет кликабельные элементы со словом 'OTC' (tag/class/текст). Зеркалит логику
+    scripts/probe_pair_modal.py, но из прода. Любые ошибки глушим — это диагностика."""
+    try:
+        items = page.locator(otc_modal_pair_item)
+        n = await items.count()
+        texts = []
+        for i in range(min(n, 10)):
+            try:
+                t = (await items.nth(i).inner_text(timeout=1000)).strip().replace('\n', ' / ')
+            except (Exception,):
+                t = '<?>'
+            texts.append(t[:80])
+        logger.warning('OTC-DIAG modal_pair_item=%s, тексты пунктов: %s', n, texts)
+        if n == 0:  # селектор отвалился — ищем кандидатов на новый по слову OTC
+            otc_nodes = page.get_by_text(re.compile('OTC', re.IGNORECASE))
+            m = await otc_nodes.count()
+            samples = []
+            for i in range(min(m, 8)):
+                try:
+                    el = otc_nodes.nth(i)
+                    tag = await el.evaluate('e => e.tagName.toLowerCase()')
+                    cls = await el.evaluate('e => (typeof e.className === "string" ? e.className : "")')
+                    txt = (await el.inner_text(timeout=1000)).strip().replace('\n', ' ')[:60]
+                    samples.append(f'{tag}.{cls}|{txt}')
+                except (Exception,):
+                    pass
+            logger.warning('OTC-DIAG элементов с "OTC"=%s: %s', m, samples)
+    except (Exception,) as err:
+        logger.warning('OTC-DIAG дамп модалки не удался: %s', err)
+
+
 async def select_otc_pair(page: Page, pair: str) -> bool:
     """Выбрать '<pair> OTC' в модалке binodex (pair вида 'EUR/USD').
     Открыть выбор → категория Валюты → ввести пару → клик по элементу '<pair> ... OTC' →
@@ -179,7 +231,11 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         try:
             await target_item.wait_for(state='visible', timeout=TIMEOUT_SHORT)
         except (Exception,):
-            logger.warning(f"OTC: не нашёл '{pair} … OTC' в модалке")
+            global _modal_diag_done
+            logger.warning(f"OTC: не нашёл '{pair} … OTC' в модалке ({await _modal_item_counts(page)})")
+            if not _modal_diag_done:  # подробный дамп — один раз на процесс, чтобы не флудить
+                _modal_diag_done = True
+                await _dump_pair_modal(page)
             await _close_pair_modal(page)
             return False
         await target_item.click(timeout=TIMEOUT_SHORT)
