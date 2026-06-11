@@ -17,8 +17,13 @@
   в новый `modal_pair_item`). В пути промаха дамп идёт дважды: `[после поиска]` (схлопнутый список) и,
   после очистки поля ввода, `[без поиска]` (полный список) — различаем «селектор протух» vs
   «слэш схлопнул выдачу». Всё one-shot на процесс (флаг `_modal_diag_done`), на здоровом цикле молчит.
-- **Фикс самого селектора** — отдельным шагом: по выводу диага (или `scripts/probe_pair_modal.py` на
-  сервере со свежими куками) подобрать новый `modal_pair_item` и `UPDATE settings.binodex_settings`.
+- **Фикс применён.** По выводу диага строка пары теперь `div[class*="modal_pair_item"]` (была
+  `button.modal_pair_item` — binodex сменил тег `button`→`div` И завернул класс в CSS-module
+  `_modal_pair_item_<hash>`, так что точный `.modal_pair_item` не матчил). В `settings.binodex_settings`
+  `modal_pair_item` → `div[class*="modal_pair_item"]:not([class*="modal_pair_item_name"])`
+  (substring-матч хеш-устойчив; `:not` отсекает внутренний `_name`). Проверено на живой модалке
+  (`scripts/verify_pair_selector.py`): `parce_otc` выбирает пару 3/3. Экземпляры читают селектор из БД
+  на старте — нужен рестарт OTC-юнитов, чтобы подхватили.
 
 ### 2026-06-11 — OTC: масштаб графика выставляется на каждом старте браузера (`apps/otc_app.py`, `settings/browser_config.py`)
 - **`init_otc` теперь вызывает `apply_chart_scale` — свеча `30S` → график `H1` на каждом запуске.**
