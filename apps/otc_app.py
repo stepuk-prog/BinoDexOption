@@ -174,38 +174,61 @@ async def _modal_item_counts(page: Page) -> str:
         return f'диаг-сбой:{err}'
 
 
-async def _dump_pair_modal(page: Page) -> None:
-    """Разовый подробный дамп разметки модалки (раз на процесс) для подбора нового
-    селектора/формата текста — выводит первые тексты пунктов, а если текущий селектор пуст,
-    перечисляет кликабельные элементы со словом 'OTC' (tag/class/текст). Зеркалит логику
-    scripts/probe_pair_modal.py, но из прода. Любые ошибки глушим — это диагностика."""
+# JS: для каждого ЛИСТОВОГО узла со словом 'OTC' в модалке вернуть цепочку предков (tag +
+# «стабильное» ядро класса) до 6 уровней вверх — чтобы из лога подобрать новый селектор строки
+# пары после ротации разметки binodex на CSS-modules. Ядро = класс без хеш-сегмента: режем
+# хвост вида `_<хеш>` / `_<хеш>_<num>`, где хеш содержит цифру (`_futPerp_1wgz3_531` → `futPerp`,
+# `_otcInlineBtn_1wgz3_32` → `otcInlineBtn`); семантические классы без хеша (`modal_pair_item`)
+# не трогаем (в их хвосте нет цифры). Так в логе сразу виден кликабельный контейнер строки.
+_DUMP_CHAIN_JS = r"""
+() => {
+  const core = (cn) => {
+    const tok = ((typeof cn === 'string' ? cn : '').trim().split(/\s+/)[0]) || '';
+    return tok.replace(/^_/, '').replace(/_(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{4,8}(_\d+)?$/, '');
+  };
+  const sel = (el) => {
+    const c = core(el.className);
+    return el.tagName.toLowerCase() + (c ? `[class*="${c}"]` : '');
+  };
+  const nodes = [...document.querySelectorAll('span, div, button, a, li')].filter(el => {
+    const t = (el.innerText || '').trim();
+    return t && t.length <= 40 && /OTC/i.test(t) && !el.querySelector('*');  // листовой узел
+  });
+  const out = [], seen = new Set();
+  for (const n of nodes) {
+    const chain = [];
+    let el = n;
+    for (let i = 0; i < 6 && el && el !== document.body; i++) { chain.push(sel(el)); el = el.parentElement; }
+    const key = chain.join('<');
+    if (seen.has(key)) continue;            // схлопываем одинаковые по структуре строки
+    seen.add(key);
+    const row = n.closest('button, a, li, [role="button"]') || n;
+    out.push({ text: (row.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 50), chain });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+"""
+
+
+async def _dump_pair_modal(page: Page, phase: str) -> None:
+    """Разовый (на процесс) подробный дамп разметки модалки выбора пары — для подбора нового
+    селектора строки пары после ротации разметки binodex (CSS-modules с хешами в классах).
+    Для каждого листового узла со словом 'OTC' печатает цепочку предков (tag + «стабильное» ядро
+    класса без хеша) — из неё виден реальный кликабельный контейнер строки (кандидат в новый
+    modal_pair_item). `phase` различает дамп ПОСЛЕ ввода пары в поиск (мог схлопнуться слэшем) и
+    БЕЗ поиска (полный список — там и видна строка пары). Любые ошибки глушим — это диагностика."""
     try:
-        items = page.locator(otc_modal_pair_item)
-        n = await items.count()
-        texts = []
-        for i in range(min(n, 10)):
-            try:
-                t = (await items.nth(i).inner_text(timeout=1000)).strip().replace('\n', ' / ')
-            except (Exception,):
-                t = '<?>'
-            texts.append(t[:80])
-        logger.warning('OTC-DIAG modal_pair_item=%s, тексты пунктов: %s', n, texts)
-        if n == 0:  # селектор отвалился — ищем кандидатов на новый по слову OTC
-            otc_nodes = page.get_by_text(re.compile('OTC', re.IGNORECASE))
-            m = await otc_nodes.count()
-            samples = []
-            for i in range(min(m, 8)):
-                try:
-                    el = otc_nodes.nth(i)
-                    tag = await el.evaluate('e => e.tagName.toLowerCase()')
-                    cls = await el.evaluate('e => (typeof e.className === "string" ? e.className : "")')
-                    txt = (await el.inner_text(timeout=1000)).strip().replace('\n', ' ')[:60]
-                    samples.append(f'{tag}.{cls}|{txt}')
-                except (Exception,):
-                    pass
-            logger.warning('OTC-DIAG элементов с "OTC"=%s: %s', m, samples)
+        old_cnt = await page.locator(otc_modal_pair_item).count()
+        rows = await page.evaluate(_DUMP_CHAIN_JS)
+        logger.warning('OTC-DIAG [%s]: старый modal_pair_item=%s match, листовых узлов с OTC=%s',
+                       phase, old_cnt, len(rows))
+        for r in rows:
+            logger.warning('OTC-DIAG [%s] «%s»: %s', phase, r['text'], ' < '.join(r['chain']))
+        if not rows:
+            logger.warning('OTC-DIAG [%s]: ни одного листового узла с OTC (список пуст/закрыт?)', phase)
     except (Exception,) as err:
-        logger.warning('OTC-DIAG дамп модалки не удался: %s', err)
+        logger.warning('OTC-DIAG [%s] дамп модалки не удался: %s', phase, err)
 
 
 async def select_otc_pair(page: Page, pair: str) -> bool:
@@ -237,7 +260,16 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
             logger.warning(f"OTC: не нашёл '{pair} … OTC' в модалке ({await _modal_item_counts(page)})")
             if not _modal_diag_done:  # подробный дамп — один раз на процесс, чтобы не флудить
                 _modal_diag_done = True
-                await _dump_pair_modal(page)
+                await _dump_pair_modal(page, 'после поиска')   # список, схлопнутый вводом '<pair>'
+                # очищаем поиск → полный список (там видна строка пары) и дампим повторно:
+                # различаем «селектор протух» (пусто и без поиска) vs «слэш схлопнул выдачу».
+                try:
+                    inner = page.locator(otc_input_pair).locator('input, textarea').first
+                    await inner.fill('', timeout=TIMEOUT_SHORT)
+                    await asyncio.sleep(0.8)   # дать списку перерисоваться (one-shot диагностика)
+                except (Exception,):
+                    pass
+                await _dump_pair_modal(page, 'без поиска')
             await _close_pair_modal(page)
             return False
         await target_item.click(timeout=TIMEOUT_SHORT)
