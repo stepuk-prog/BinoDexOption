@@ -331,7 +331,13 @@ async def apply_chart_scale(page: Page) -> None:
                                (otc_chart_scale, otc_chart_scale_item, 'график H1')):
         try:
             await page.locator(opener).first.click(timeout=TIMEOUT_SHORT)
-            await page.locator(item).first.click(timeout=TIMEOUT_SHORT)
+            item_loc = page.locator(item).first
+            await item_loc.wait_for(state='visible', timeout=TIMEOUT_SHORT)
+            # Контейнер-дропдаун binodex (.profile_add_wrap_selected_wrap_options) перехватывает
+            # pointer events на своём же пункте (overlay/стэкинг) — обычный .click() ловит «intercepts
+            # pointer events». Кликаем напрямую DOM-событием: пункт уже зарезолвлен и видим, оверлей
+            # при dispatch_event не помеха (проверка перекрытия пропускается).
+            await item_loc.dispatch_event('click')
             await page.wait_for_timeout(500)  # дать дропдауну закрыться перед следующим шагом
         except (Exception,) as error:
             logger.warning(f"OTC: не удалось выставить масштаб ({name}): {error}")
