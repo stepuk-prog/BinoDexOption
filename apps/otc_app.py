@@ -31,7 +31,9 @@ from settings.config import shot_path, screenshot_path, database, prog_key
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (otc_select_pair, otc_category_valute, otc_input_pair,
-                                     otc_modal_pair_item, screen_zone_otc, otc_settings_btn)
+                                     otc_modal_pair_item, screen_zone_otc, otc_settings_btn,
+                                     otc_candle_scale, otc_candle_scale_item,
+                                     otc_chart_scale, otc_chart_scale_item)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -317,6 +319,24 @@ async def _ui_loaded(page: Page, timeout: float) -> bool:
         return False
 
 
+async def apply_chart_scale(page: Page) -> None:
+    """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
+    при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
+    значение держит — проверено), а штатный setup (binodex_session._setup) идёт только на холодном
+    релогине. Поэтому применяем здесь, в init_otc, на каждом старте браузера. Порядок важен: смена
+    масштаба свечи сбрасывает масштаб графика, поэтому график (H1) ставим ПОСЛЕДНИМ. Пункты —
+    по тексту (порядок списков binodex плавает). Ошибки не критичны для запуска (масштаб — оформление
+    кадра, не данные) — логируем и продолжаем."""
+    for opener, item, name in ((otc_candle_scale, otc_candle_scale_item, 'свеча 30S'),
+                               (otc_chart_scale, otc_chart_scale_item, 'график H1')):
+        try:
+            await page.locator(opener).first.click(timeout=TIMEOUT_SHORT)
+            await page.locator(item).first.click(timeout=TIMEOUT_SHORT)
+            await page.wait_for_timeout(500)  # дать дропдауну закрыться перед следующим шагом
+        except (Exception,) as error:
+            logger.warning(f"OTC: не удалось выставить масштаб ({name}): {error}")
+
+
 async def screenshot_otc(page: Page, asset: str = None, qr=None):
     """Скрин зоны графика binodex + цена графика (медиана чтений window.chartData.price
     вокруг кадра) + QR. chartData.price — то значение, что движок рисует на ярлыке; это
@@ -421,6 +441,10 @@ async def init_otc(manager: "BrowserManager") -> bool:
         if not await _ui_loaded(page, UI_READY_TIMEOUT):
             raise CookiesExpired('binodex OTC: торговый UI не прогрузился (нет кнопки настроек '
                                  'аккаунта — завис на сплеше) — storage_state протух')
+
+        # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на
+        # каждом старте (не только на релогине в binodex_session._setup; см. apply_chart_scale).
+        await apply_chart_scale(page)
 
         # Ждём поток котировок (до 10 сек)
         tracker = get_price_tracker()

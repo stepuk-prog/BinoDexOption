@@ -66,3 +66,11 @@ screen_zone_otc = find_par(data=otc_setting, par='screen_zone')
 # Кнопка настроек аккаунта (тулбар) — есть ТОЛЬКО при полностью прогруженном UI; на сплеше
 # её нет (хотя кнопка выбора пары присутствует). Маркер «не сплеш» для readiness-gate init_otc.
 otc_settings_btn = find_par(data=otc_setting, par='setup_settings_open')
+# Масштабы графика. binodex сбрасывает их на дефолт (свеча/график) при КАЖДОМ запуске браузера
+# (новый контекст из storage_state → дефолт; reload в рамках сессии значение держит). Поэтому
+# выставляются в init_otc на каждом старте, а не только в binodex_session._setup на релогине.
+# Пункты выбираются ПО ТЕКСТУ (порядок списков на binodex плавает): свеча '30S', график 'H1'.
+otc_candle_scale = find_par(data=otc_setting, par='setup_candle_scale')
+otc_candle_scale_item = find_par(data=otc_setting, par='setup_candle_scale_item')
+otc_chart_scale = find_par(data=otc_setting, par='setup_chart_scale')
+otc_chart_scale_item = find_par(data=otc_setting, par='setup_chart_scale_item')
