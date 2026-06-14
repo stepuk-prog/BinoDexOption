@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 used_val = [0]
 prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
 count_price = 0  # счетчик количества одинаковой цены подряд
+# Отправлено ли ПЕРВОЕ сообщение опциона = началась «середина опциона» (после первого, до итога).
+# По нему обёртка main() решает: непредвиденный сбой в этом окне → баг-картинка в канал (подписчики
+# не должны остаться без итога); до первого сообщения — тихо (пояснять нечего).
+_posted = False
 logger = init_logger(__name__)
 
 # OTC: binodex периодически (тест-режим) висит БЕЗ единой торговой пары — модалка пар пуста,
@@ -133,7 +137,21 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
 
 
 async def main(manager: "BrowserManager", qr, stop_event):
-    global used_val, prev_price, count_price
+    """Тонкая обёртка над _run_option: ловит НЕПРЕДВИДЕННОЕ исключение середины опциона (после
+    первого сообщения, до итогового) и шлёт баг-картинку в канал (channel_mess по флагу _posted),
+    а не молчаливый краш/рестарт без пояснения подписчикам. Явные сбои покрыты в _run_option."""
+    global _posted
+    _posted = False
+    try:
+        return await _run_option(manager, qr, stop_event)
+    except (Exception,) as error:
+        logger.error(f'Непредвиденная ошибка в опционе: {error}')
+        return await exit_main(channel_mess=_posted, result=False,
+                               bug_text=f'Непредвиденная ошибка - {error}', check_cookies=count_price)
+
+
+async def _run_option(manager: "BrowserManager", qr, stop_event):
+    global used_val, prev_price, count_price, _posted
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
 
@@ -174,6 +192,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
     ok, err = await _try_send(new_prognoz_img, message_text, 'первое сообщение', timeout=30.0)
     if not ok:
         return await exit_main(channel_mess=False, result=False, bug_text=err, check_cookies=count_price)
+    _posted = True   # первое сообщение ушло → «середина опциона»: непредвиденный сбой ниже = баг-картинка
 
     used_val.append(option_data.id_val)
     if len(used_val) >= 4:  # держим последние 3 id → актив не повторяется в окне из 4 рынков подряд

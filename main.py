@@ -10,6 +10,7 @@ from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            write_status_offline)
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
+from apps.binodex_feed import feed_alive, wait_for_feed
 from classes.exceptions import CookiesExpired
 from logs import init_logger
 from messages import weekend_message, start_message
@@ -135,6 +136,21 @@ async def _recreate_browser(manager):
     return await _init_with_retry()
 
 
+async def _await_binodex_feed(at_start: bool) -> bool:
+    """OTC-аутэйдж: binodex не отдаёт котировки (рынок закрыт/сбой на стороне binodex). Ждём фид
+    БРАУЗЕР-ФРИ (apps/binodex_feed) — без рестарт-петли и спама алертов: ОДНО уведомление вниз +
+    одно вверх. True — котировки вернулись (можно поднимать браузер); False — остановлены сигналом.
+    at_start=True — текст «браузер не поднимаю»; False (рантайм) — «выгрузил браузер»."""
+    if at_start:
+        logger.report('🕓 binodex не отдаёт котировки — браузер не поднимаю, жду восстановления фида')
+    else:
+        logger.report('🕓 binodex перестал отдавать котировки — выгрузил браузер, посты на паузе, жду восстановления')
+    if not await wait_for_feed(_stop_event):
+        return False  # SIGTERM во время ожидания
+    logger.report('✅ binodex снова отдаёт котировки — поднимаю браузер, продолжаю работу')
+    return True
+
+
 async def bot():
     """Запуск бота"""
     logger.report('🚀 Стартую')
@@ -221,6 +237,14 @@ async def bot():
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен
 
+    # OTC-аутэйдж ДО запуска браузера: binodex не отдаёт котировки → не поднимаем тяжёлый Firefox,
+    # ждём фид браузер-фри (apps/binodex_feed) и стартуем, только когда котировки вернутся.
+    if not binary and not await feed_alive():
+        if not await _await_binodex_feed(at_start=True):
+            await write_status_offline(program_id)
+            await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
+            return
+
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
     manager = await _init_with_retry()
     if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
@@ -238,6 +262,23 @@ async def bot():
         # это штатный стоп, не сбой; уходим в graceful-ветку ниже (status=false).
         if stop_event.is_set():
             break
+
+        # OTC-аутэйдж в рантайме: опцион не снялся И binodex не отдаёт котировки (браузер-фри
+        # проверка feed_alive). Это аутэйдж на стороне binodex (рынок закрыт/сбой), а НЕ наш отвал
+        # кук/краш → не рестартим и не спамим алертами: выгружаем тяжёлый браузер, ждём фид браузер-
+        # фри, поднимаемся при восстановлении. Отвал кук/краш — фид при этом ЖИВ (feed_alive=True),
+        # поэтому сюда не попадают и отрабатывают штатные ветки ниже.
+        if not binary and not res_option.result and not await feed_alive():
+            try:
+                await manager.close()
+            except (Exception,):
+                pass
+            if not await _await_binodex_feed(at_start=False):
+                break  # SIGTERM во время ожидания
+            manager = await _init_with_retry()
+            if manager is None:  # остановлены сигналом во время повторного init
+                break
+            continue
 
         # OTC: отвал cookies в рантайме (§4.1). ОСНОВНОЙ сигнал — otc_session_dead (редирект с
         # /trade ИЛИ мёртвый WS-фид). ВТОРИЧНЫЙ — эвристика «цена не меняется N циклов» (на плоском
