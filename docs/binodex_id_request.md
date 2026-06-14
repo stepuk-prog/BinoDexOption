@@ -1,3 +1,12 @@
+> **Статус 2026-06-14: id ВЫСТАВЛЕНЫ на сайте** (проверено `scripts/probe_ids.py`/`probe_ids2.py`
+> на живом binodex). Разработчики назвали id ровно нашими `par_name`. Селекторы в БД
+> `settings.binodex_settings` переведены на `#id` (`scripts/migrate_ids.sql`, 15 строк), код
+> `input_pair` упрощён (id теперь на самом `<input>`). НЕ мигрированы осознанно:
+> `modal_pair_item` (повторяющийся, id невозможен — остаётся `button.modal_pair_item`),
+> `setup_candle_scale_item`/`setup_chart_scale_item` (оставлены по тексту `'30S'`/`'H1'` —
+> value-specific; id у пункта похоже привязан к активному, а не к значению),
+> `setup_indicator_item` (индикаторы в проде отключены), `login_*` (Privy, вне зоны).
+
 ## Селекторы binodex
 
 | `par_name`                | Элемент UI                                           | Текущий селектор                                                                  |

@@ -14,7 +14,8 @@ from classes.exceptions import CookiesExpired
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
-from settings.timing import USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, TG_SEND_TIMEOUT
+from settings.timing import (USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, TG_SEND_TIMEOUT,
+                             USERBOT_CONNECT_TIMEOUT)
 
 logger = init_logger(__name__)
 
@@ -152,7 +153,9 @@ async def bot():
     last_error = None
     for attempt in range(1, USERBOT_CONNECT_ATTEMPTS + 1):
         try:
-            await app.start()
+            # Таймаут: SIGTERM-хендлер ставится ниже (после init), поэтому зависший хендшейк
+            # Pyrogram здесь нельзя прервать сигналом — оборачиваем wait_for (TimeoutError → ветка B).
+            await asyncio.wait_for(app.start(), timeout=USERBOT_CONNECT_TIMEOUT)
             break
         except (Exception,) as error:
             if session_failed(error):                # ветка A — без ретраев
@@ -162,7 +165,7 @@ async def bot():
             logger.warning(f"Попытка {attempt}/{USERBOT_CONNECT_ATTEMPTS} запуска юзербота: {error}")
             try:
                 if getattr(app, "is_connected", False):
-                    await app.stop()
+                    await asyncio.wait_for(app.stop(), timeout=USERBOT_CONNECT_TIMEOUT)
             except (Exception,):
                 pass
             if attempt < USERBOT_CONNECT_ATTEMPTS:

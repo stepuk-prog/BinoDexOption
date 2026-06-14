@@ -186,12 +186,21 @@ def _setup(page, sel: dict) -> None:
             page.wait_for_timeout(500)
         except (Exception,):
             pass
+    # «Тема» = тумблер глобуса (фон `.wrap_bg`): inactive → глобус ВЫКЛ (фон вообще не в DOM),
+    # active → ВКЛ. Глобус — главный потребитель CPU headless-рендера (полупрозрачный фон-оверлей
+    # композитится софтом каждый кадр, ~90%→~38%, docs/BINODEX_CPU.md). У свежего аккаунта глобус
+    # ВЫКЛ ПО УМОЛЧАНИЮ (проверено холодным логином) — то есть нужный нам режим уже стоит, трогать
+    # не надо. РАНЬШЕ здесь был слепой клик тумблера — он наоборот ВКЛЮЧАЛ глобус (корень 90% CPU).
+    # Теперь детерминированно: жмём тумблер ТОЛЬКО если фон реально присутствует (страховка на
+    # случай, если binodex когда-нибудь включит глобус по умолчанию). Проверка по факту `.wrap_bg`
+    # на странице (не по классу тумблера) — устойчиво к ротации классов.
     try:
-        page.locator(sel["setup_settings_open"]).first.click(timeout=8000)
-        page.locator(sel["setup_theme"]).first.click(timeout=8000)
-        page.locator(sel["setup_theme_toggle"]).first.click(timeout=8000)
-        page.wait_for_timeout(500)
-        page.locator(sel["setup_settings_open"]).first.click(timeout=8000)  # повторный клик = закрыть
+        if page.locator(".wrap_bg").count() > 0:      # глобус включён (не дефолт) → выключаем
+            page.locator(sel["setup_settings_open"]).first.click(timeout=8000)
+            page.locator(sel["setup_theme"]).first.click(timeout=8000)
+            page.locator(sel["setup_theme_toggle"]).first.click(timeout=8000)
+            page.wait_for_timeout(500)
+            page.locator(sel["setup_settings_open"]).first.click(timeout=8000)  # повторный клик = закрыть
     except (Exception,):
         pass
 

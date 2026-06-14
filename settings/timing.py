@@ -38,6 +38,7 @@ COOKIES_ERROR_DELAY = 120     # Задержка при ошибке cookies
 LOGGER_FLUSH_DELAY = 0.3      # Для сброса буфера логов
 USERBOT_RETRY_DELAY = 15      # Пауза между попытками запуска юзербота (не-session сбой)
 USERBOT_CONNECT_ATTEMPTS = 3  # Попыток переподключения юзербота при transient-сбое (§3.2)
+USERBOT_CONNECT_TIMEOUT = 60  # Потолок на app.start()/stop(): зависший Pyrogram-хендшейк не должен вешать старт (SIGTERM ещё не зарегистрирован)
 STATUS_WRITE_TIMEOUT = 10     # Таймаут записи programdata.status=false (§1.1 — не глотать)
 
 # ============================================================

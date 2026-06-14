@@ -49,25 +49,33 @@ async def refresh_otc_cookies(user_id: int | None = None, do_setup: bool = False
         return False
 
     try:
-        out, err = await asyncio.wait_for(proc.communicate(payload), timeout=WORKER_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()  # дожать процесс, не оставить зомби
-        logger.error('Воркер рефреша кук не уложился в таймаут')
-        return False
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(payload), timeout=WORKER_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error('Воркер рефреша кук не уложился в таймаут')
+            return False
 
-    if proc.returncode != 0:
-        logger.error(f'Воркер рефреша кук вернул код {proc.returncode}: '
-                     f'{err.decode(errors="ignore").strip()[:300]}')
-        return False
+        if proc.returncode != 0:
+            logger.error(f'Воркер рефреша кук вернул код {proc.returncode}: '
+                         f'{err.decode(errors="ignore").strip()[:300]}')
+            return False
 
-    try:
-        storage_state = json.loads(out)['storage_state']
-    except (Exception,) as error:
-        logger.error(f'Воркер рефреша кук вернул некорректный результат: {error}')
-        return False
+        try:
+            storage_state = json.loads(out)['storage_state']
+        except (Exception,) as error:
+            logger.error(f'Воркер рефреша кук вернул некорректный результат: {error}')
+            return False
 
-    if await database.save_otc_cookies(user_id, storage_state) is False:
-        logger.error('Не удалось записать свежий storage_state в БД')
-        return False
-    return True
+        if await database.save_otc_cookies(user_id, storage_state) is False:
+            logger.error('Не удалось записать свежий storage_state в БД')
+            return False
+        return True
+    finally:
+        # На ЛЮБОМ незавершённом исходе (таймаут / отмена по SIGTERM / исключение) — не оставить
+        # воркер сиротой/зомби. wait() с потолком: D-state лучше дожать в зомби, чем висеть вечно.
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (Exception,):
+                pass

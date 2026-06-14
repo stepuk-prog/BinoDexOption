@@ -23,7 +23,6 @@ class Option:  # Класс структуры хранения данных в 
     browser_name: str = ''  # название валюты для поиска в браузере
     name_emoji: str = ''  # название валюты с эмодзи
     round: int = 0  # параметры округления
-    coefficient: float = 0.0  # коэффициент для перерасчета параметров, если таймфреймы для поиска совпадают
     # параметры индикаторов (рендерятся в постах)
     volume_profile: str = ''  # параметр Объемный профиль
     interest: str = ''  # параметр Усредненный интерес
@@ -63,10 +62,6 @@ class Option:  # Класс структуры хранения данных в 
         self.name_tf = result[0]['name_tf']
         self.option_time = int(tf.replace('m', '')) * 60 + 2
         self.dogon_par = dogon
-        if result[0]['coefficient']:
-            self.coefficient = self.find_coefficient()
-        else:
-            self.coefficient = 1.0
 
     def clear_data(self):
         self.name = ''  # название валюты
@@ -241,14 +236,6 @@ class Option:  # Класс структуры хранения данных в 
     def dogon_settings(self, dogon_par):
         self.dgn_time = dogon_par * 60 + 2
         self.dgn_time_str = f'{dogon_par} {self.minuts(kol=dogon_par)}'
-
-    # определяет коэффициент для расчета параметров
-    @staticmethod
-    def find_coefficient():
-        while True:
-            number = round(random.uniform(-2.5, 2.5), 1)
-            if number != 0:
-                return number
 
     # добавляет эмодзи в зависимости от значения параметра
     def post_emoji(self, data):

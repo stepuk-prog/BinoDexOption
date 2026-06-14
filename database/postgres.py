@@ -111,7 +111,10 @@ class Database:
                 pass
             self._pools[name] = None
             logger.warning(f"Пересоздаю пул '{name}'")
-            await self._connect_pool(name)
+            # Одна попытка (не 5 дефолтных): recreate уже идёт ПОСЛЕ исчерпанных ретраев
+            # execute_query, и держит _pool_lock — длинный backoff здесь застопорил бы горячий
+            # путь до ~20с. Не вышло — запрос вернёт False, следующий запрос повторит recreate.
+            await self._connect_pool(name, retries=1)
 
     async def execute_query(self, sql: str, *args, retries: int = 3, delay: float = 2.0,
                             fetch_mode: str = "all", func: str = "",

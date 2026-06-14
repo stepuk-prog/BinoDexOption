@@ -4,16 +4,20 @@ qr110_path = f'{os.getcwd()}/pictures/qr-code_110.png'
 qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
 # OTC использует собственный QR (один на скрине) — остальное (позиция otc_qr_x/y и т.д.) без изменений
 otc_qr110_path = f'{os.getcwd()}/pictures/otc_qr-code_110.png'
+# Статичный глобус (фон графика OTC) для композита кадра: глобус на binodex ВЫКЛЕН за аккаунтом
+# (экономия CPU, docs/BINODEX_CPU.md), а в пост подкладывается из этого файла под прозрачный
+# канвас. Заготовлен разово офлайн (земля одна на все пары). Размер = бокс canvas (~1470x870).
+globe_otc_path = f'{os.getcwd()}/pictures/globe_otc.png'
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах
 
 # Таблицы таймфреймов (перенесены из Data_set.py)
-spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минута', 'coefficient': False},
-                 {'timeframe': '3m', 'search_tf': '300', 'name_tf': '3 минуты', 'coefficient': True},
-                 {'timeframe': '5m', 'search_tf': '300', 'name_tf': '5 минут', 'coefficient': False},
-                 {'timeframe': '10m', 'search_tf': '900', 'name_tf': '10 минут', 'coefficient': True},
-                 {'timeframe': '15m', 'search_tf': '900', 'name_tf': '15 минут', 'coefficient': False},
+spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минута'},
+                 {'timeframe': '3m', 'search_tf': '300', 'name_tf': '3 минуты'},
+                 {'timeframe': '5m', 'search_tf': '300', 'name_tf': '5 минут'},
+                 {'timeframe': '10m', 'search_tf': '900', 'name_tf': '10 минут'},
+                 {'timeframe': '15m', 'search_tf': '900', 'name_tf': '15 минут'},
                  ]
 
 # Варианты времени экспирации (мин) для рандомизации (FIN и OTC одинаково): график
