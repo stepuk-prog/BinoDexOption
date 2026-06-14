@@ -26,14 +26,14 @@ _posted = False
 logger = init_logger(__name__)
 
 # OTC: binodex периодически (тест-режим) висит БЕЗ единой торговой пары — модалка пар пуста,
-# хотя сессия/UI/WS живы. Это не краш: не рестартим процесс сразу, а ждём появления пар.
-# Цикл: NO_PAIRS_RELOADS быстрых reload+выбор пары (пауза NO_PAIRS_RELOAD_PAUSE), не помогло —
-# длинная пауза NO_PAIRS_LONG_SLEEP и повтор. После NO_PAIRS_MAX_CYCLES пустых циклов сдаёмся
-# (рестарт диспетчером — вдруг поможет свежий браузер). Все паузы прерываются stop_event.
+# хотя сессия/UI/WS живы. Это не краш и не повод рестартить (единый принцип: «сайт не даёт
+# работать» → ждём, а не сбрасываем процесс). Делаем NO_PAIRS_RELOADS быстрых reload+выбор пары
+# (пауза NO_PAIRS_RELOAD_PAUSE) — на случай, если пары вернёт простой reload. Не помогло —
+# отдаём управление главному циклу (result=False, fall=False): тот при мёртвом фиде уйдёт в
+# браузер-фри ожидание (выгрузка браузера + слушание WS, без релогина/спама), а при живом —
+# просто повторит цикл через time_sleep. Никаких длинных таймер-снов с удержанием браузера здесь.
 NO_PAIRS_RELOADS = 3
 NO_PAIRS_RELOAD_PAUSE = 5      # сек между быстрыми reload
-NO_PAIRS_LONG_SLEEP = 600      # сек (10 мин) между циклами
-NO_PAIRS_MAX_CYCLES = 6        # циклов без пар до рестарта (~1 ч)
 
 # OTC: binodex сам может свалиться на сплеш В ТЕЧЕНИЕ опциона (новая версия/переинициализация
 # Privy — без нашего reload, см. memory binodex-stuck-splash). Чтобы опцион не прерывался, за
@@ -114,25 +114,23 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
       'ok'            — пара выбрана, можно работать дальше;
       'reload_failed' — reload не поднял UI (новая версия/сплеш/редирект) → отдаём штатному
                         otc_session_dead (пересоздание браузера/авто-рефреш кук), НЕ ждём пары;
-      'no_pairs'      — пар нет дольше ~часа → рестарт (свежий браузер);
+      'no_pairs'      — после быстрых reload пар по-прежнему нет → отдаём главному циклу
+                        (result=False, fall=False): тот переждёт браузер-фри/повтором, БЕЗ рестарта;
       'stopped'       — пришёл сигнал остановки (SIGTERM/SIGINT) во время пауз.
-    """
-    for cycle in range(1, NO_PAIRS_MAX_CYCLES + 1):
-        for _ in range(NO_PAIRS_RELOADS):
-            if stop_event.is_set():
-                return 'stopped'
-            if not await reload_otc_page(manager=manager):
-                return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
-            if await parce_otc(manager=manager, log_data=option_data, valute=used_val):
-                return 'ok'
-            await _sleep_or_stop(stop_event, NO_PAIRS_RELOAD_PAUSE)
+    Длинных таймер-снов здесь нет: кадэнс ожидания держит главный цикл (browser-free / time_sleep),
+    чтобы не удерживать тяжёлый браузер впустую и не плодить рестарты на простое сайта."""
+    for _ in range(NO_PAIRS_RELOADS):
         if stop_event.is_set():
             return 'stopped'
-        logger.report(f'OTC: на binodex нет торговых пар — сплю {NO_PAIRS_LONG_SLEEP // 60} мин '
-                      f'(цикл {cycle}/{NO_PAIRS_MAX_CYCLES})')
-        await _sleep_or_stop(stop_event, NO_PAIRS_LONG_SLEEP)
-        if stop_event.is_set():
-            return 'stopped'
+        if not await reload_otc_page(manager=manager):
+            return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
+        if await parce_otc(manager=manager, log_data=option_data, valute=used_val):
+            return 'ok'
+        await _sleep_or_stop(stop_event, NO_PAIRS_RELOAD_PAUSE)
+    if stop_event.is_set():
+        return 'stopped'
+    logger.info('OTC: на binodex нет торговых пар после быстрых reload — отдаю главному циклу '
+                '(браузер-фри ожидание при мёртвом фиде / повтор при живом), без рестарта')
     return 'no_pairs'
 
 
@@ -167,8 +165,9 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
         # Перед каждым опционом перезагружаем страницу binodex и подбираем пару. binodex
-        # периодически (тест-режим) висит без единой пары — это НЕ краш: _acquire_otc_pair
-        # переждёт (см. константы NO_PAIRS_*), а не уронит процесс в рестарт-петлю.
+        # периодически (тест-режим) висит без единой пары — это НЕ краш: ждём, а не рестартим
+        # (единый принцип «сайт не даёт работать → ждём»). Все исходы-«сайт не готов» уходят с
+        # fall=False → главный цикл сам переждёт (браузер-фри при мёртвом фиде / повтор при живом).
         outcome = await _acquire_otc_pair(manager, stop_event)
         if outcome == 'stopped':  # SIGTERM во время ожидания пар — выходим без рестарта
             return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
@@ -176,9 +175,9 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
             return await exit_main(channel_mess=False, result=False, fall=False,
                                    bug_text='binodex не поднялся после reload (новая версия/сплеш)',
                                    check_cookies=count_price)
-        if outcome == 'no_pairs':  # пар нет ~час → рестарт диспетчером (свежий браузер)
-            return await exit_main(channel_mess=False, result=False,
-                                   bug_text='На binodex нет торговых пар дольше часа (тест-режим)',
+        if outcome == 'no_pairs':  # пар нет → НЕ рестартим: главный цикл переждёт (browser-free/повтор)
+            return await exit_main(channel_mess=False, result=False, fall=False,
+                                   bug_text='На binodex нет торговых пар (тест-режим) — жду, не рестартю',
                                    check_cookies=count_price)
         page = manager.pages['main']
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
