@@ -1,51 +1,61 @@
 from apps.setting_app import find_par
-from settings.config import timeframe
+from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
 
-vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
+# TV/FIN-селекторы нужны только в FIN-режиме (BINARY=1). Для OTC (BINARY=0) не дёргаем
+# settings.tv_settings (лишний синхронный запрос к БД на старте каждого OTC-инстанса) — имена
+# определяем как None, чтобы импорт FIN-модулей не падал (их код в OTC-режиме не исполняется).
+if binary:
+    vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
 
-vib_kat = find_par(data=vib_all_kat, par='vib_kat')
-# Закрытие окна выбора котировок
-close_tool_win = find_par(data=vib_all_kat, par='close_tool_win')
-fxcm = find_par(data=vib_all_kat, par='fxcm')
-# поиск поля ввода котировок
-search_kat = find_par(data=vib_all_kat, par='search_kat')
-# Включение котировки
-find_kat = find_par(data=vib_all_kat, par='find_kat')
-# поиск поля ввода валют
-search_val = find_par(data=vib_all_kat, par='search_val')
-# включение выбранной валюты
-find_val = find_par(data=vib_all_kat, par='find_val')
-# Меню выбора таймфрейма
-tf_menu = find_par(data=vib_all_kat, par='tf_menu')
-# Поле для получения цены
-price_field = find_par(data=vib_all_kat, par='price_field')
-# поле для перемещения при имитации движения мыши
-move_field = find_par(data=vib_all_kat, par='move_field')
-# всплывающие окна
-pop_up = find_par(data=vib_all_kat, par='pop-up')
-pop_up2 = find_par(data=vib_all_kat, par='pop_up2')
-pop_up3 = find_par(data=vib_all_kat, par='pop_up3')
-# Зона скриншота
-screen_zone = find_par(data=vib_all_kat, par='screen_zone')
-# включение выбора валюты
-symbol = find_par(data=vib_all_kat, par='symbol')
-# вторичный чип биржи (FXCM-scope) в диалоге поиска — снимаем перед вводом, иначе
-# TV отсеивает поиск по формату EXCHANGE:SYMBOL
-scope_chip = find_par(data=vib_all_kat, par='scope_chip')
-# установка таймфрейма в 1 минуту для страницы с ценой
-tf_link_price = find_par(data=vib_all_kat, par='tf_link_1')
-# установка таймфрейма графика (только FIN/TV; OTC tf_link не использует). Чарт показываем по
-# find_timeframe (гранулярности данных): 1m/3m → 1 минута (tf_link_1), 5m/10m → 5 минут (tf_link_2),
-# 15m → 15 минут (tf_link_3). Для 3m график 1 мин, а реальное время опциона рандомится в коде (2/3).
-if timeframe in ('1m', '3m'):
-    tf_link = find_par(data=vib_all_kat, par='tf_link_1')   # 1 минута
-elif timeframe in ('5m', '10m'):
-    tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # 5 минут
-elif timeframe == '15m':
-    tf_link = find_par(data=vib_all_kat, par='tf_link_3')   # 15 минут
+    vib_kat = find_par(data=vib_all_kat, par='vib_kat')
+    # Закрытие окна выбора котировок
+    close_tool_win = find_par(data=vib_all_kat, par='close_tool_win')
+    fxcm = find_par(data=vib_all_kat, par='fxcm')
+    # поиск поля ввода котировок
+    search_kat = find_par(data=vib_all_kat, par='search_kat')
+    # Включение котировки
+    find_kat = find_par(data=vib_all_kat, par='find_kat')
+    # поиск поля ввода валют
+    search_val = find_par(data=vib_all_kat, par='search_val')
+    # включение выбранной валюты
+    find_val = find_par(data=vib_all_kat, par='find_val')
+    # Меню выбора таймфрейма
+    tf_menu = find_par(data=vib_all_kat, par='tf_menu')
+    # Поле для получения цены
+    price_field = find_par(data=vib_all_kat, par='price_field')
+    # поле для перемещения при имитации движения мыши
+    move_field = find_par(data=vib_all_kat, par='move_field')
+    # всплывающие окна
+    pop_up = find_par(data=vib_all_kat, par='pop-up')
+    pop_up2 = find_par(data=vib_all_kat, par='pop_up2')
+    pop_up3 = find_par(data=vib_all_kat, par='pop_up3')
+    # Зона скриншота
+    screen_zone = find_par(data=vib_all_kat, par='screen_zone')
+    # включение выбора валюты
+    symbol = find_par(data=vib_all_kat, par='symbol')
+    # вторичный чип биржи (FXCM-scope) в диалоге поиска — снимаем перед вводом, иначе
+    # TV отсеивает поиск по формату EXCHANGE:SYMBOL
+    scope_chip = find_par(data=vib_all_kat, par='scope_chip')
+    # установка таймфрейма в 1 минуту для страницы с ценой
+    tf_link_price = find_par(data=vib_all_kat, par='tf_link_1')
+    # установка таймфрейма графика (только FIN/TV; OTC tf_link не использует). Чарт показываем по
+    # find_timeframe (гранулярности данных): 1m/3m → 1 минута (tf_link_1), 5m/10m → 5 минут (tf_link_2),
+    # 15m → 15 минут (tf_link_3). Для 3m график 1 мин, а реальное время опциона рандомится в коде (2/3).
+    if timeframe in ('1m', '3m'):
+        tf_link = find_par(data=vib_all_kat, par='tf_link_1')   # 1 минута
+    elif timeframe in ('5m', '10m'):
+        tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # 5 минут
+    elif timeframe == '15m':
+        tf_link = find_par(data=vib_all_kat, par='tf_link_3')   # 15 минут
+    else:
+        tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # дефолт — чтобы не словить NameError на импорте
 else:
-    tf_link = find_par(data=vib_all_kat, par='tf_link_2')   # дефолт — чтобы не словить NameError на импорте
+    # OTC: FIN/TV-селекторы не используются — заглушки, чтобы импорт не падал.
+    vib_all_kat = None
+    vib_kat = close_tool_win = fxcm = search_kat = find_kat = search_val = find_val = tf_menu = \
+        price_field = move_field = pop_up = pop_up2 = pop_up3 = screen_zone = symbol = scope_chip = \
+        tf_link_price = tf_link = None
 
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
 # Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).

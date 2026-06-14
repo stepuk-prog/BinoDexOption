@@ -83,7 +83,7 @@ async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
     живость OTC-UI и при сплеше восстановить (reload+переселект). Лид прячется в хвосте ожидания —
     в норме (UI жив, проверка ~мгновенна) задержки нет; при сплеше результат снимется с опозданием,
     но опцион не прервётся. stop_event прерывает паузы (после вызова проверять stop_event.is_set())."""
-    lead = min(HEALTH_LEAD, seconds) if not binary else 0
+    lead = min(float(HEALTH_LEAD), seconds) if not binary else 0.0
     await _sleep_or_stop(stop_event, seconds - lead)
     if lead and not stop_event.is_set():
         await _ensure_otc_alive(manager, stop_event)

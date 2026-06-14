@@ -52,6 +52,11 @@ CHART_DATA_JS = ("() => { const c = window.chartData;"
 # (проверено: 3+3 чтения → 9/10 совпадений с нарисованным ценником; см. docs/BINODEX_PRICE.md).
 CHART_READS_BEFORE = 3  # чтений chartData вплотную ДО screenshot
 CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
+# Канвас на ~97% прозрачный даже с графиком (свечи/оси/часы ≈ 3% непрозрачных пикселей). Сразу
+# после переключения пары канвас бывает пустым (свечи не дорисованы) — такой кадр не постим.
+# Порог доли непрозрачных пикселей: ниже = «пусто» → ждём отрисовку (норм. график проходит с запасом).
+CANVAS_MIN_OPAQUE = 0.005
+CANVAS_READY_SECONDS = 6.0   # сколько ждать отрисовки свечей внутри попытки (отдельно от MAX_SCREENSHOT_ATTEMPTS)
 # Кнопка настроек аккаунта (otc_settings_btn) есть в тулбаре ТОЛЬКО когда торговый UI полностью
 # прогрузился. На сплеше (зависший Privy-токен без редиректа) её нет — хотя кнопка выбора пары
 # присутствует, потому on_trade/UI-gate по ней и feed_dead (котировок-WS стримит все пары) сплеш
@@ -456,14 +461,15 @@ def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int 
     return out
 
 
-async def _label_cutout(page: Page, asset, clip):
+async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
     """Вырезка ярлыка пары (с прозрачным фоном) и её позиция относительно бокса канваса.
-    Кэш на пару (ярлык/payout стабильны в рамках пары). Глобус НЕ включаем — снимаем регион
-    дважды при выкл глобусе: ярлык виден (A) и скрыт (B), вычитаем фон. None — если не собрать.
-    Строить нужно при СНЯТОМ off-zone (полный UI) — иначе ярлык не захватится; поэтому вызывается
-    из select_otc_pair до применения off-zone (ключ кэша = symbol_key, как у screenshot_otc)."""
+    Глобус НЕ включаем — снимаем регион дважды при выкл глобусе: ярлык виден (A) и скрыт (B),
+    вычитаем фон. None — если не собрать. Строить нужно при СНЯТОМ off-zone (полный UI) — иначе
+    ярлык не захватится; поэтому пересборка (rebuild=True) идёт из select_otc_pair до off-zone.
+    rebuild=True — пересобрать с нуля (актуальный payout на каждый выбор пары); rebuild=False
+    (из screenshot_otc) — взять готовое из кэша, собранного на этом же выборе пары."""
     key = symbol_key(asset)
-    if key in _label_cutout_cache:
+    if not rebuild and key in _label_cutout_cache:
         return _label_cutout_cache[key]
     try:
         lb = await page.evaluate(_LABEL_BOX_JS, screen_zone_otc)
@@ -551,7 +557,7 @@ async def _build_label_cutout(page: Page, asset: str) -> None:
         if box:
             clip = {'x': round(box['x']), 'y': round(box['y']),
                     'width': round(box['width']), 'height': round(box['height'])}
-            await _label_cutout(page, asset, clip)   # строит и кэширует, пока off-zone снят
+            await _label_cutout(page, asset, clip, rebuild=True)   # пересобрать (актуальный payout), пока off-zone снят
     except (Exception,) as err:
         logger.debug(f"OTC {asset}: подготовка вырезки ярлыка не удалась — {err}")
 
@@ -576,8 +582,25 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             box = await element.bounding_box()
             clip = {'x': round(box['x']), 'y': round(box['y']),
                     'width': round(box['width']), 'height': round(box['height'])}
-            # Цена графика = медиана быстрых чтений chartData.price ВОКРУГ кадра. Кадр = toDataURL
-            # канваса (прозрачные свечи). t_shot фиксируем для фолбэка на WS.
+            # Защита от пустого канваса: после переключения пары канвас ~1-3с пустой (свечи не
+            # дорисованы) — не постим голый кадр. Ждём отрисовку до CANVAS_READY_SECONDS (отдельный
+            # бюджет, не сжигаем MAX_SCREENSHOT_ATTEMPTS); пробные захваты канваса отбрасываем.
+            waited = 0.0
+            while True:
+                probe = await _canvas_alpha(element)
+                if sum(probe.getchannel('A').histogram()[16:]) >= probe.width * probe.height * CANVAS_MIN_OPAQUE:
+                    break
+                if waited >= CANVAS_READY_SECONDS:
+                    probe = None
+                    break
+                await asyncio.sleep(0.4)
+                waited += 0.4
+            if probe is None:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
+                logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: канвас пуст "
+                               f"{CANVAS_READY_SECONDS:.0f}с (свечи не отрисованы) для {asset}")
+                continue
+            # Канвас готов. Цена графика = медиана чтений chartData.price ВОКРУГ кадра; кадр =
+            # toDataURL канваса (прозрачные свечи). t_shot фиксируем для фолбэка на WS.
             reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
             t_shot = time.time()
             canvas_img = await _canvas_alpha(element)
@@ -618,6 +641,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
     """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → проверка
     логина (остались на /trade) → ожидание WS-котировок."""
     page = manager.pages['main']
+    _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
     url = await _otc_page_url()
@@ -685,6 +709,9 @@ async def init_otc(manager: "BrowserManager") -> bool:
                 logger.report("✅ binodex: WS котировок подключён")
                 break
             await asyncio.sleep(0.5)
+        else:  # цикл не нашёл фид — не валим старт (цена идёт из chartData), но фиксируем деградацию
+            logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
+                           "feed_dead-детект деградирован")
         return True
     except CookiesExpired:
         raise  # наружу → init_load → _init_with_retry (cookies-backoff), не глотать
@@ -751,6 +778,8 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
         if tracker.ws_connected and tracker.prices:
             break
         await asyncio.sleep(0.5)
+    else:
+        logger.warning("binodex: WS котировок не переподключился за 10с после reload")
     logger.info('🔄 OTC: страница перезагружена перед опционом — UI готов')
     return True
 
