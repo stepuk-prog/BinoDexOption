@@ -21,7 +21,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from PIL import Image
-from playwright.async_api import Page, WebSocket
+from playwright.async_api import Page, WebSocket, FloatRect
 
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
@@ -435,7 +435,7 @@ def _load_globe(size) -> Image.Image:
     global _globe_asset
     if _globe_asset is None:
         _globe_asset = Image.open(globe_otc_path).convert('RGBA')
-    return _globe_asset if _globe_asset.size == tuple(size) else _globe_asset.resize(size, Image.LANCZOS)
+    return _globe_asset if _globe_asset.size == tuple(size) else _globe_asset.resize(size, Image.Resampling.LANCZOS)
 
 
 async def _canvas_alpha(element) -> Image.Image:
@@ -443,7 +443,7 @@ async def _canvas_alpha(element) -> Image.Image:
     d = await element.evaluate(_CANVAS_ALPHA_JS)
     img = Image.open(BytesIO(base64.b64decode(d['url'].split(',', 1)[1]))).convert('RGBA')
     if (d['w'], d['h']) != (d['cssw'], d['cssh']):
-        img = img.resize((d['cssw'], d['cssh']), Image.LANCZOS)
+        img = img.resize((d['cssw'], d['cssh']), Image.Resampling.LANCZOS)
     return img
 
 
@@ -476,7 +476,7 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
         if not lb:
             return None
         lx, ly, lw, lh = round(lb['x']), round(lb['y']), round(lb['w']), round(lb['h'])
-        region = {'x': lx, 'y': ly, 'width': lw, 'height': lh}
+        region: FloatRect = {'x': lx, 'y': ly, 'width': lw, 'height': lh}
         a_buf = await page.screenshot(clip=region)                       # A: ярлык виден
         await page.evaluate("() => { const e=document.querySelector('[data-otc-lbl]');"
                             " if (e) e.style.setProperty('visibility','hidden','important'); }")

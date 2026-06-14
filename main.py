@@ -212,12 +212,12 @@ async def bot():
         stop_event.set()
         request_shutdown()  # подавить main_bug_message — это штатная остановка, не сбой
 
-    # Через переменную — гасит ложную инспекцию сигнатуры add_signal_handler
-    # (*args в стабе ошибочно считается обязательным; рантайму он не нужен).
-    register_signal = loop.add_signal_handler
+    # add_signal_handler(sig, callback, *args): *args опционален, но инспекция PyCharm ложно
+    # считает его обязательным («Parameter 'args' unfilled») — подавляем точечно noinspection.
     for _sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            register_signal(_sig, _on_stop_signal)
+            # noinspection PyArgumentList
+            loop.add_signal_handler(_sig, _on_stop_signal)
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен
 
