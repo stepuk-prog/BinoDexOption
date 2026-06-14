@@ -184,7 +184,12 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
     if not screen_shot[0]:
-        return await exit_main(channel_mess=False, result=False,
+        # OTC: первый кадр не снялся (нет цены графика / пустой канвас, частый транзиент тест-режима
+        # binodex) — НЕ рестартим процесс. fall=False → возврат в главный цикл, где штатная браузер-
+        # фри ветка (main.py: feed_alive → _await_binodex_feed) переждёт аутэйдж без релогина и спама;
+        # при живом фиде — просто повтор следующего цикла с новой парой. FIN: браузер-фри ожидания
+        # нет, поэтому там кадр-сбой по-прежнему уводит в рестарт (fall=True).
+        return await exit_main(channel_mess=False, result=False, fall=bool(binary),
                                bug_text=f'Ошибка проверки скриншота - {screen_shot[1]}', check_cookies=count_price)
 
     message_text = first_message()
