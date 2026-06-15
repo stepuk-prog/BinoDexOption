@@ -10,7 +10,7 @@ from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
-    tf_link_price, pop_up2, pop_up3, scope_chip
+    tf_link_price, pop_up2, pop_up3, scope_chip, panel_toggle, panel_wrap
 from settings.config import (cookies, database, binary, prog_key, cookies_tv_id,
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
@@ -374,13 +374,40 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
                                 text=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
             return OperationResult(success=False)
 
-    # Закрытие попапов на всех страницах (попапы уже гарантированно появились)
+    # Закрытие попапов + сворачивание правой widget-панели на ВСЕХ страницах.
+    # Панель в дефолте лэйаута раскрыта и съедает ~350px ширины чарт-зоны → скрин
+    # (screen_zone) сужается; в лэйаут состояние НЕ персистится и сбрасывается на каждом
+    # старте чистого контекста, поэтому сворачиваем в коде. Делаем на обеих вкладках
+    # (не только на main, откуда скрин): TV может синхронизировать состояние панели между
+    # вкладками сессии — «разбалансировка» (свёрнута на main, открыта на price) рискует тем,
+    # что price переоткроет панель и она вернётся на main. _collapse_right_panel тоггл-safe.
     for page_name, page in manager.pages.items():
         await page.bring_to_front()
         await close_dom_popups(page)
+        await _collapse_right_panel(page)
 
     logger.report("✅ open_tv_browser завершён, страницы: %s", list(manager.pages.keys()))
     return OperationResult(success=True)
+
+
+async def _collapse_right_panel(page) -> None:
+    """Свернуть правую widget-панель TradingView (вотчлист/«Детали») на странице графика.
+    Кнопка тулбара (panel_toggle) — ТОГГЛ, поэтому сворачиваем ТОЛЬКО если панель реально
+    раскрыта (иначе клик её, наоборот, откроет). Признак раскрытой: ширина panel_wrap
+    ~346px (свёрнутая — полоска иконок ~45px) И наличие нажатой кнопки. Селекторы — из БД
+    (tv_settings: panel_toggle/panel_wrap). Best-effort: влияет лишь на ширину кадра."""
+    if not panel_toggle or not panel_wrap:
+        return
+    try:
+        box = await page.locator(panel_wrap).first.bounding_box()
+        if not box or box['width'] <= 100:  # свёрнута/отсутствует — не трогаем (не откроем!)
+            return
+        btn = page.locator(panel_toggle).first
+        if await btn.count():
+            await btn.click(timeout=TIMEOUT_MEDIUM)
+            logger.info("Правая widget-панель TV свёрнута (была %dpx)", round(box['width']))
+    except (Exception,) as e:
+        logger.warning(f"Не удалось свернуть правую панель TV: {e}")
 
 
 async def _reset_search_category(page) -> None:

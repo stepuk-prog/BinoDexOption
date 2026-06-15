@@ -32,6 +32,11 @@ if binary:
     pop_up3 = find_par(data=vib_all_kat, par='pop_up3')
     # Зона скриншота
     screen_zone = find_par(data=vib_all_kat, par='screen_zone')
+    # сворачивание правой widget-панели TV (в дефолте лэйаута раскрыта, сужает скрин;
+    # состояние в лэйаут не персистится → сворачиваем в коде). panel_toggle — кнопка-тоггл,
+    # panel_wrap — контейнер для проверки «реально ли открыта» (иначе тоггл её откроет).
+    panel_toggle = find_par(data=vib_all_kat, par='panel_toggle')
+    panel_wrap = find_par(data=vib_all_kat, par='panel_wrap')
     # включение выбора валюты
     symbol = find_par(data=vib_all_kat, par='symbol')
     # вторичный чип биржи (FXCM-scope) в диалоге поиска — снимаем перед вводом, иначе
@@ -55,7 +60,7 @@ else:
     vib_all_kat = None
     vib_kat = close_tool_win = fxcm = search_kat = find_kat = search_val = find_val = tf_menu = \
         price_field = move_field = pop_up = pop_up2 = pop_up3 = screen_zone = symbol = scope_chip = \
-        tf_link_price = tf_link = None
+        tf_link_price = tf_link = panel_toggle = panel_wrap = None
 
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
 # Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).
