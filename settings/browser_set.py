@@ -1,11 +1,17 @@
 # Настройки браузера Playwright
 
+import os
+
 # Актуальный User-Agent Firefox (обновлять периодически)
 useragent = 'Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/134.0'
 
+# Headless — env-driven, ДЕФОЛТ True (на сервере нет DISPLAY → headed падает с 'no DISPLAY').
+# Для локальной отладки с X-сервером: BROWSER_HEADLESS=0. Так литеральный False не уедет в прод.
+_headless = os.getenv('BROWSER_HEADLESS', '1') not in ('0', 'false', 'False', '')
+
 # Параметры запуска браузера
 browser_launch_options = {
-    'headless': True,
+    'headless': _headless,
     # Firefox-специфичные настройки для скрытия автоматизации
     'firefox_user_prefs': {
         # Отключить детекцию webdriver
