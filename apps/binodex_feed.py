@@ -15,11 +15,12 @@ import asyncio
 import aiohttp
 
 from logs import init_logger
+from settings.browser_config import otc_ws_origin
 
 logger = init_logger(__name__)
 
 _WS_URL = 'wss://api-coins.binodex.io/market/?EIO=4&transport=websocket'
-_HEADERS = {'Origin': 'https://binodex.app', 'User-Agent': 'Mozilla/5.0'}
+_HEADERS = {'Origin': otc_ws_origin, 'User-Agent': 'Mozilla/5.0'}  # origin из binodex_settings
 
 FEED_PROBE_PAIR = 'EUR/USD'   # дефолтная пара — присутствует всегда
 FEED_ALIVE_TIMEOUT = 10.0     # сколько ждать первого ценового кадра в одной попытке

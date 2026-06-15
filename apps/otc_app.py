@@ -33,7 +33,7 @@ from settings.config import screenshot_path, database, prog_key
 from settings.constant import globe_otc_path
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
-from settings.browser_config import (otc_select_pair, otc_category_valute, otc_input_pair,
+from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn,
                                      otc_candle_scale, otc_candle_scale_item,
                                      otc_chart_scale, otc_chart_scale_item)
@@ -121,12 +121,9 @@ def setup_websocket_tracker(page: Page):
 
 
 async def _otc_page_url() -> str | None:
-    """URL OTC-страницы из binodex.cookies.pages (bino_option/otc)."""
-    rows = await database.pages(program=prog_key, mode='otc')
-    if not rows:
-        return None
-    return rows[0]['url']
-
+    """URL OTC-страницы — единый источник binodex_settings.trade_url
+    (через browser_config.otc_trade_url), меняется в одном месте."""
+    return otc_trade_url
 
 async def _pair_modal_open(page: Page) -> bool:
     """Модалка выбора открыта, если видна кнопка категории."""

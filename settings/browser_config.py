@@ -67,6 +67,13 @@ else:
 # Страница OTC берётся из binodex.cookies.pages (bino_option/otc), не хардкодим.
 otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_settings")
 # Открытие/закрытие окна выбора актива (одна кнопка-переключатель)
+# URL/Origin binodex — единый источник (binodex_settings.trade_url/landing_url/ws_origin),
+# меняется в одном месте. next()+дефолт, а НЕ find_par (тот sys.exit при отсутствии) — чтобы
+# старая БД без этих строк не валила старт.
+otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://app.binodex.app/trade')
+otc_landing_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'landing_url'), 'https://app.binodex.app/')
+otc_ws_origin = next((i['par_value'] for i in otc_setting if i['par_name'] == 'ws_origin'), 'https://app.binodex.app')
+
 otc_select_pair = find_par(data=otc_setting, par='select_pair_add')
 # Кнопка категории «Валюты» в модалке выбора
 otc_category_valute = find_par(data=otc_setting, par='category_valute')

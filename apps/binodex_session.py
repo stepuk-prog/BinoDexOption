@@ -47,8 +47,8 @@ CONTEXT_OPTIONS = {
     "color_scheme": "dark",
 }
 
-URL_LANDING = "https://binodex.app/"
-URL_TRADE = "https://binodex.app/trade"
+URL_LANDING = "https://app.binodex.app/"      # дефолт; рантайм берёт landing_url из selectors (binodex_settings)
+URL_TRADE = "https://app.binodex.app/trade"   # дефолт; рантайм берёт trade_url из selectors
 
 # Privy шлёт код с РАЗНЫХ адресов (no-reply@privy.io И no-reply@mail.privy.io) — фильтруем по
 # домену (подстрока в FROM матчит оба), иначе на части аккаунтов код «не находится» и воркер виснет.
@@ -154,7 +154,7 @@ def _enter_code(page, sel: dict, code: str) -> None:
 
 
 def _login(page, mail: str, sel: dict, imap, baseline) -> None:
-    page.goto(URL_LANDING, wait_until="domcontentloaded", timeout=30000)
+    page.goto(sel.get('landing_url') or URL_LANDING, wait_until="domcontentloaded", timeout=30000)
     page.click(sel["login_open"], timeout=15000)
     page.fill(sel["login_email"], mail, timeout=15000)
     page.locator(sel["login_email"]).press("Enter")    # отправка надёжнее через Enter
@@ -170,7 +170,7 @@ def _login(page, mail: str, sel: dict, imap, baseline) -> None:
     # после смены флоу binodex всегда падало по таймауту и валило весь авто-рефреш.
     page.wait_for_function(
         "() => !!window.localStorage.getItem('privy:token')", timeout=30000)
-    page.goto(URL_TRADE, wait_until="domcontentloaded", timeout=30000)
+    page.goto(sel.get('trade_url') or URL_TRADE, wait_until="domcontentloaded", timeout=30000)
     if not page.url.rstrip("/").endswith("/trade"):
         raise RuntimeError(f"после логина редирект с /trade на {page.url}")
 
