@@ -665,6 +665,12 @@ async def init_otc(manager: "BrowserManager") -> bool:
         if not on_trade(page.url):
             raise CookiesExpired(f'binodex OTC: вход слетел (редирект с /trade на {page.url})')
 
+        # Новый апп рендерит /trade и РАЗЛОГИНЕННЫМ (Demo) → URL-проверки мало. Реальная
+        # авторизация = privy:token в localStorage (снимает логин-воркер). Нет токена → тот же
+        # отвал cookies → CookiesExpired → авто-рефрешер (иначе бот вечно крутит выбор пары в Demo).
+        if not await page.evaluate("() => !!localStorage.getItem('privy:token')"):
+            raise CookiesExpired('binodex OTC: нет privy:token (Demo / не авторизован) — куки протухли')
+
         # Остались на /trade — но это ещё не гарантия, что SPA доехала. При протухшем Privy-токене
         # без редиректа страница виснет на сплеше: торговый UI не рендерится, кнопка выбора пары
         # отсутствует. URL-детект (on_trade) такой случай НЕ ловит → дальше main-цикл таймаутит по
