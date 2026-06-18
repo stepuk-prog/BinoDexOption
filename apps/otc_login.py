@@ -140,6 +140,25 @@ async def _enter_code(page: Page, sel: str, code: str) -> None:
             await cells.nth(i).fill(ch)
 
 
+async def _goto_retry(page: Page, url: str, attempts: int = 3, pause: float = 1.5) -> None:
+    """page.goto с ретраями ТОЛЬКО на NS_BINDING_ABORTED: binodex/Privy во время загрузки сам
+    инициирует редирект → Firefox обрывает навигацию (гонка, не реальный сбой). Прочие ошибки —
+    сразу наверх; исчерпали попытки — пробрасываем последнюю."""
+    last = None
+    for i in range(1, attempts + 1):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            return
+        except (Exception,) as err:
+            if 'NS_BINDING_ABORTED' not in str(err):
+                raise
+            last = err
+            logger.warning(f'OTC inline-логин: goto {url} → NS_BINDING_ABORTED ({i}/{attempts}), повтор')
+            if i < attempts:
+                await asyncio.sleep(pause)
+    raise last
+
+
 async def otc_inline_login(page: Page, context: BrowserContext,
                            mail: str, app_pass: str, sel: dict) -> bool:
     """Залогиниться в binodex.app по email-OTP прямо в текущем (живом) браузере.
@@ -159,9 +178,9 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         return False
     try:
         baseline = set(await asyncio.to_thread(_privy_uids, imap))   # старые коды — игнор
-        await page.goto(landing, wait_until="domcontentloaded", timeout=30000)
+        await _goto_retry(page, landing)
         await _clear_session(page, context)
-        await page.goto(landing, wait_until="domcontentloaded", timeout=30000)  # перезагрузка начисто
+        await _goto_retry(page, landing)  # перезагрузка начисто
         await page.click(sel["login_open"], timeout=15000)
         await page.fill(sel["login_email"], mail, timeout=15000)
         await page.locator(sel["login_email"]).first.press("Enter")  # отправка надёжнее через Enter
@@ -174,7 +193,7 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         await _enter_code(page, sel["login_code_inputs"], code)
         await page.wait_for_function(
             "() => !!window.localStorage.getItem('privy:token')", timeout=30000)
-        await page.goto(trade, wait_until="domcontentloaded", timeout=30000)
+        await _goto_retry(page, trade)
         if not page.url.rstrip("/").endswith("/trade"):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
             return False

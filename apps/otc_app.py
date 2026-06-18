@@ -795,6 +795,29 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     return True
 
 
+GOTO_RETRIES = 3          # попыток goto при транзиентном NS_BINDING_ABORTED
+GOTO_RETRY_PAUSE = 1.5    # сек между ретраями goto
+
+
+async def _goto_otc(page: Page, url: str, timeout: int = TIMEOUT_LONG) -> None:
+    """page.goto с ретраями ТОЛЬКО на транзиентном NS_BINDING_ABORTED — binodex/Privy во время
+    загрузки сам инициирует редирект → Firefox обрывает навигацию (гонка, не реальный сбой).
+    Прочие ошибки goto пробрасываем сразу; исчерпали попытки — пробрасываем последнюю."""
+    last_error = None
+    for attempt in range(1, GOTO_RETRIES + 1):
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            return
+        except (Exception,) as error:
+            if 'NS_BINDING_ABORTED' not in str(error):
+                raise
+            last_error = error
+            logger.warning(f'OTC: goto {url} → NS_BINDING_ABORTED (попытка {attempt}/{GOTO_RETRIES}), повтор')
+            if attempt < GOTO_RETRIES:
+                await asyncio.sleep(GOTO_RETRY_PAUSE)
+    raise last_error
+
+
 async def init_otc(manager: "BrowserManager") -> bool:
     """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → goto →
     _verify_otc_ready (авторизация + UI; WS мягко). При «нужен релогин» (CookiesExpired) — INLINE-
@@ -810,7 +833,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
         return False
 
     try:
-        await page.goto(url, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
+        await _goto_otc(page, url)
         await page.set_viewport_size({'width': win_x_otc, 'height': win_y_otc})
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f"Не загрузился binodex - {error}")
@@ -832,7 +855,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
                 if not await _relogin_inline(manager, page):
                     raise  # inline не удался → наверх (счётчик RECOVER_ATTEMPTS → выход)
                 relogged = True
-                await page.goto(url, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
+                await _goto_otc(page, url)
     except (CookiesExpired, FeedOutage, SetupError):
         raise  # наружу → init_load → _init_with_retry (счётчик релогина / ожидание фида / setup-ретраи)
     except (Exception,) as error:
