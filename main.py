@@ -5,13 +5,12 @@ from datetime import datetime, timedelta
 
 from apps.app import get_water, time_sleep, request_shutdown
 from apps.browser_app import init_load
-from apps.cookie_refresh import refresh_otc_cookies
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            write_status_offline)
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import feed_alive, wait_for_feed
-from classes.exceptions import CookiesExpired, SiteNotReady
+from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
@@ -23,24 +22,29 @@ logger = init_logger(__name__)
 # Отвал cookies — реакция зависит от режима (§4.3):
 #   • TV  — Survive: НЕ выход, пауза + пересоздание браузера (куки перечитываются из БД), анти-спам
 #           бэкофф (первые COOKIES_FAST_ATTEMPTS попыток 120с, далее 300с), крутимся пока не починят.
-#   • OTC — есть авто-рефрешер (binodex_session.py): восстанавливаем куки сами (3 попытки), при
-#           неуспехе — выход со status=false (предохранитель §4.3). См. _recover_otc_cookies.
+#   • OTC — релогин INLINE в основном браузере (apps/otc_login, из otc_app.init_otc);
+#           _recover_otc_cookies считает циклы — до RECOVER_ATTEMPTS, потом плановый выход (§4.3).
 # Прочий провал init (не cookies) — пауза INIT_RETRY_DELAY и повтор.
 INIT_RETRY_DELAY = 10
+SETUP_ATTEMPTS = 3  # попыток поднять/настроить OTC-сайт (SetupError mounted=True, селекторы) перед плановым выходом
+SETUP_OUTAGE_BACKOFF = 300  # сек паузы при front-end аутэйдже binodex (SetupError mounted=False) — выживаем, не выходим
 COOKIES_RETRY_DELAY_FAST = 120     # TV
 COOKIES_RETRY_DELAY_SLOW = 300     # TV
 COOKIES_FAST_ATTEMPTS = 5          # TV
 
 # Счётчик подряд идущих отвалов cookies (для бэкоффа). Сбрасывается при успешном init.
 _cookie_fails = 0
+# OTC: счётчик циклов «init не поднялся даже после inline-релогина». Сбрасывается при успешном init.
+_otc_recover_cycles = 0
 # Событие остановки (SIGTERM/SIGINT). Глобально — чтобы cookies-backoff (до 300с) в
 # _init_with_retry прерывался сигналом, а не ждал SIGKILL. Ставится в bot() ДО первого init.
 _stop_event: asyncio.Event | None = None
 
 
 def _reset_cookie_fails():
-    global _cookie_fails
+    global _cookie_fails, _otc_recover_cycles
     _cookie_fails = 0
+    _otc_recover_cycles = 0
 
 
 async def _interruptible_sleep(seconds: float) -> bool:
@@ -72,32 +76,32 @@ async def _handle_cookie_failure(detail: str = '') -> bool:
     return await _interruptible_sleep(delay)
 
 
-# OTC: авто-восстановление кук — оркестратор apps/cookie_refresh.py (asyncpg + воркер-подпроцесс).
-RECOVER_ATTEMPTS = 3       # попыток восстановления перед выходом
+# OTC: релогин — INLINE в основном браузере (apps/otc_login, из otc_app.init_otc). Здесь только
+# счётчик-предохранитель: сколько раз подряд init не поднялся даже после inline-логина.
+RECOVER_ATTEMPTS = 3       # циклов init без успеха перед плановым выходом
 
 
 async def _recover_otc_cookies() -> bool:
-    """OTC: восстановить куки авто-рефрешем (до RECOVER_ATTEMPTS попыток). Авто-рефрешер есть, поэтому
-    политика — НЕ вечный Survive, а предохранитель (§4.3): получилось → продолжаем; нет после всех
-    попыток → пишем status=false и выходим (status=0, диспетчер не рестартит мёртвые куки по кругу).
-    :return: True — куки восстановлены (caller переинициализируется); False — остановлены сигналом."""
-    # В cookies-канал шлём ТОЛЬКО финальный провал (ниже). Старт/попытки/успех — в лог, не в канал:
-    # отвал кук авто-чинится молча, оператора дёргаем лишь когда восстановить НЕ удалось.
-    logger.warning(f'Куки отвалились для {cook_name_otc}. Пытаюсь восстановить')
-    for attempt in range(1, RECOVER_ATTEMPTS + 1):
-        if _stop_event is not None and _stop_event.is_set():
-            return False
-        # do_setup=True: холодный перелогин даёт свежий storage_state с ДЕФОЛТНЫМИ настройками
-        # графика — поэтому при восстановлении заодно прокликиваем настройку сайта (иначе чарт
-        # без индикатора/масштабов/темы). Сбой настройки воркер глушит (куки всё равно сохранит).
-        if await refresh_otc_cookies(do_setup=True):
-            logger.info(f'Куки для {cook_name_otc} успешно восстановлены. Продолжаю работу')
-            return True
-        logger.warning(f'Восстановление куки для {cook_name_otc}: попытка {attempt}/{RECOVER_ATTEMPTS} не удалась')
-    logger.cookies(f'Не могу восстановить куки для {cook_name_otc}. Останавливаю работу')
-    await write_status_offline(program_id)
-    await close_program(manager=None, status=0,
-                        text=f'Не восстановить куки для {cook_name_otc} 🍪🛑')  # делает sys.exit
+    """OTC-предохранитель. Сам релогин теперь INLINE в основном браузере (apps/otc_login,
+    вызывается из otc_app.init_otc). Сюда CookiesExpired доходит = init не поднялся ДАЖЕ после
+    inline-логина. Считаем подряд такие циклы: до RECOVER_ATTEMPTS → продолжаем (новый init снова
+    попробует inline-релогин); исчерпали без единого успешного init → проблема не в куках (сайт
+    лежит) → плановый выход (status=false, диспетчер не рестартит по кругу — §4.3).
+    :return: True — продолжаем (re-init); False — остановлены сигналом."""
+    global _otc_recover_cycles
+    if _stop_event is not None and _stop_event.is_set():
+        return False
+    _otc_recover_cycles += 1
+    if _otc_recover_cycles > RECOVER_ATTEMPTS:
+        logger.cookies(f'OTC: {RECOVER_ATTEMPTS} циклов восстановления подряд без успешного init '
+                       f'({cook_name_otc}) — релогин не помог. Останавливаю работу')
+        await write_status_offline(program_id)
+        await close_program(manager=None, status=0,
+                            text=f'Не восстановить сессию binodex для {cook_name_otc} 🍪🛑')  # sys.exit
+        return False  # страховка (close_program делает sys.exit)
+    logger.warning(f'OTC: init не поднялся после inline-релогина ({cook_name_otc}), '
+                   f'цикл {_otc_recover_cycles}/{RECOVER_ATTEMPTS} — повтор init')
+    return True
     return False
 
 
@@ -107,21 +111,43 @@ async def _init_with_retry():
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
+    setup_streak = 0  # подряд идущих SetupError (UI/селекторы) — до SETUP_ATTEMPTS, потом выход
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
         try:
             manager = await init_load()
-        except SiteNotReady as error:
-            # OTC: авторизация жива (на /trade + токен), но UI не поднялся — НЕ отвал кук, рефреш
-            # бесполезен. feed_alive разводит причину: фид лёг → аутэйдж binodex (ждём браузер-фри,
-            # как при рантайм-аутэйдже); фид жив → транзиентный сплеш/новая версия фронта → пауза и
-            # пересоздание браузера, БЕЗ рефреша кук и БЕЗ спама в cookies-канал.
-            logger.warning(f'OTC: торговый UI не поднялся ({error}) — не отвал кук, проверяю фид')
-            if not await feed_alive():
-                if not await _await_binodex_feed(at_start=True):
-                    return None  # остановлены сигналом во время ожидания фида
+        except FeedOutage as error:
+            # OTC: авторизация жива, но market-WS молчит браузер-фри — аутэйдж binodex (детектор уже
+            # подтвердил feed_alive=False), НЕ отвал кук. Ждём возврат фида БРАУЗЕР-ФРИ (без рефреша,
+            # без выхода, без спама в cookies-канал). Фид вернулся → новый виток init.
+            logger.warning(f'OTC: аутэйдж binodex ({error}) — жду восстановления фида браузер-фри')
+            if not await _await_binodex_feed(at_start=True):
+                return None  # остановлены сигналом во время ожидания фида
+            continue
+        except SetupError as error:
+            if not error.mounted:
+                # OTC: апп-шелл binodex не смонтировался (висящий загрузочный сплеш — JS-бандл/фронт
+                # не поднялся, хотя /trade и WS-фид живы). Это front-end АУТЭЙДЖ binodex, НЕ селекторы
+                # и НЕ куки → выживаем: пауза + новый init, без выхода и без счётчика setup_streak
+                # (иначе транзиентный аут сайта валил бы бота). §4.5.
+                logger.warning(f'OTC: binodex висит на сплеше (апп не смонтировался) — front-end '
+                               f'аутэйдж, пауза {SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
+                if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
+                    return None
                 continue
+            # OTC: апп смонтирован, но наш селектор не найден — сменились селекторы binodex.
+            # Рефреш бесполезен. SETUP_ATTEMPTS повторов (временный сбой) → не помогло → плановый
+            # выход (нужно вручную обновить селекторы; §4.5).
+            setup_streak += 1
+            logger.warning(f'OTC: сайт не настроился ({setup_streak}/{SETUP_ATTEMPTS}): {error}')
+            if setup_streak >= SETUP_ATTEMPTS:
+                logger.cookies(f'OTC: сайт не настраивается за {SETUP_ATTEMPTS} попытки '
+                               f'({cook_name_otc}) — нужно ручное вмешательство (селекторы binodex). Останавливаю')
+                await write_status_offline(program_id)
+                await close_program(manager=None, status=0,
+                                    text=f'OTC: сайт не настраивается — проверить селекторы binodex ⚙️🛑')
+                return None  # close_program делает sys.exit; страховка
             if await _interruptible_sleep(INIT_RETRY_DELAY):
                 return None
             continue
@@ -306,7 +332,7 @@ async def bot():
                 dead, reason = True, 'цена не меняется N циклов подряд (вторичный сигнал)'
             if dead:
                 # В лог, не в канал: «dead» часто транзиентный сплеш/WS-икота, а не отвал кук —
-                # пересоздание это переживёт без рефреша (init решит: CookiesExpired vs SiteNotReady).
+                # пересоздание это переживёт без рефреша (init разведёт: CookiesExpired / FeedOutage / SetupError).
                 # Реальный отвал/невосстановление дойдёт до cookies-канала из _recover_otc_cookies.
                 logger.warning(f'OTC: сессия не отвечает в рантайме ({reason}) — пересоздаю браузер')
                 manager = await _recreate_browser(manager)

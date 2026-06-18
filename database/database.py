@@ -280,7 +280,7 @@ class Database:
 
     async def get_mail_creds(self, id_telegram: int):
         """Почта + Gmail app-password владельца кук (Program.telegram.telegram) — для воркера
-        авто-рефреша binodex (apps/cookie_refresh.py). Record(mail, mail_app_pass) | None | False."""
+        авто-рефреша binodex (apps/otc_login.py, inline). Record(mail, mail_app_pass) | None | False."""
         sql = "SELECT mail, mail_app_pass FROM telegram.telegram WHERE id_telegram = $1"
         return await self.execute_query(sql, id_telegram, fetch_mode='row',
                                         func='get_mail_creds', db='program')

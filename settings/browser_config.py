@@ -70,9 +70,9 @@ otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_setting
 # URL/Origin binodex — единый источник (binodex_settings.trade_url/landing_url/ws_origin),
 # меняется в одном месте. next()+дефолт, а НЕ find_par (тот sys.exit при отсутствии) — чтобы
 # старая БД без этих строк не валила старт.
-otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://app.binodex.app/trade')
-otc_landing_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'landing_url'), 'https://app.binodex.app/')
-otc_ws_origin = next((i['par_value'] for i in otc_setting if i['par_name'] == 'ws_origin'), 'https://app.binodex.app')
+otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://binodex.app/trade')
+otc_landing_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'landing_url'), 'https://binodex.app/')
+otc_ws_origin = next((i['par_value'] for i in otc_setting if i['par_name'] == 'ws_origin'), 'https://binodex.app')
 
 otc_select_pair = find_par(data=otc_setting, par='select_pair_add')
 # Кнопка категории «Валюты» в модалке выбора
@@ -95,7 +95,7 @@ otc_settings_btn = find_par(data=otc_setting, par='setup_settings_open')
 otc_login_email = next((i['par_value'] for i in otc_setting if i['par_name'] == 'login_email'), None)
 # Масштабы графика. binodex сбрасывает их на дефолт (свеча/график) при КАЖДОМ запуске браузера
 # (новый контекст из storage_state → дефолт; reload в рамках сессии значение держит). Поэтому
-# выставляются в init_otc на каждом старте, а не только в binodex_session._setup на релогине.
+# выставляются в init_otc на каждом старте, а не только на релогине.
 # Пункты выбираются ПО ТЕКСТУ (порядок списков на binodex плавает): свеча '30S', график 'H1'.
 otc_candle_scale = find_par(data=otc_setting, par='setup_candle_scale')
 otc_candle_scale_item = find_par(data=otc_setting, par='setup_candle_scale_item')

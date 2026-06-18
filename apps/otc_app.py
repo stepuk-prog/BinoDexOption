@@ -26,10 +26,11 @@ from playwright.async_api import Page, WebSocket, FloatRect
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
-from classes.exceptions import CookiesExpired, SiteNotReady
+from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.exit_app import close_program
+from apps.otc_login import otc_inline_login
 from logs import init_logger
-from settings.config import screenshot_path, database, prog_key
+from settings.config import screenshot_path, database, prog_key, cookies_pocket_id
 from settings.constant import globe_otc_path
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
@@ -377,19 +378,74 @@ async def _login_modal_open(page: Page) -> bool:
         return False
 
 
+async def _app_shell_mounted(page: Page) -> bool:
+    """Смонтирован ли торговый апп-шелл binodex (а не висящий загрузочный сплеш «лого+спиннер»).
+    Маркер — кнопка выбора пары (otc_select_pair): в смонтированном /trade она есть, на сплеше
+    (JS-бандл не поднялся) — нет. Отличает смену селектора настроек (апп смонтирован) от front-end
+    аутэйджа binodex (апп не смонтировался). Короткий чек — длинные ожидания UI уже прошли выше."""
+    try:
+        await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=2000)
+        return True
+    except (Exception,):
+        return False
+
+
+async def _privy_authenticated(page: Page) -> bool:
+    """privy:token присутствует в localStorage = сессия Privy жива. Privy на буте САМ удаляет
+    privy:token, если access-JWT протух, а обновить по privy:refresh_token не вышло → апп тихо
+    уходит в Demo (без формы логина). Проверять ПОСЛЕ оседания UI: ранний гейт видит токен, только
+    что восстановленный из storage_state, ещё до того как Privy его провалидирует и очистит."""
+    try:
+        return bool(await asyncio.wait_for(
+            page.evaluate("() => !!localStorage.getItem('privy:token')"), timeout=5))
+    except (Exception,):
+        return False
+
+
+async def _error_boundary_shown(page: Page) -> bool:
+    """binodex показал React error-boundary («Something went wrong») — апп упал на буте. На
+    битой/протухшей сессии Privy/инициализация бросает исключение → boundary, причём privy:token
+    может ОСТАТЬСЯ (апп упал до его очистки), поэтому token-чек такой случай не ловит. Чистый
+    контекст грузится без этого → трактуем как мёртвую сессию → релогин."""
+    try:
+        return bool(await asyncio.wait_for(page.evaluate(
+            "() => (document.body.innerText || '').includes('Something went wrong')"), timeout=5))
+    except (Exception,):
+        return False
+
+
 async def _raise_ui_dead(page: Page, detail: str) -> None:
-    """UI не поднялся — развести отвал кук от транзиентного сплеша по форме логина (см.
-    _login_modal_open). Видна форма → CookiesExpired (рефреш кук); не видна → SiteNotReady
-    (ретрай/ожидание фида БЕЗ рефреша). Всегда бросает."""
+    """UI не поднялся — развести причину на классы (канон, docs/lifecycle-standard §4.5).
+    Всегда бросает:
+      • видна форма логина → CookiesExpired (отвал кук → релогин);
+      • формы нет, market-WS молчит браузер-фри (feed_alive=False) → FeedOutage (аутэйдж фида);
+      • формы нет, фид ЖИВ, error-boundary «Something went wrong» (апп упал на буте) → CookiesExpired;
+      • формы нет, фид ЖИВ, нет privy:token (Privy очистил → Demo) → CookiesExpired (сессия мертва);
+      • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл СМОНТИРОВАН → SetupError(mounted=True): сменились
+        селекторы → N ретраев → плановый выход;
+      • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл НЕ смонтировался (сплеш) → SetupError(mounted=False):
+        front-end аутэйдж binodex → выживаем с бэкоффом, без выхода."""
     if await _login_modal_open(page):
         raise CookiesExpired(f'binodex OTC: {detail} + всплыла форма логина — куки протухли')
-    raise SiteNotReady(f'binodex OTC: {detail} — сплеш/недогруз сайта (форма логина не видна)')
+    from apps.binodex_feed import feed_alive  # лениво: модуль тянет browser_config (bootstrap)
+    if not await feed_alive():
+        raise FeedOutage(f'binodex OTC: {detail} + market-WS молчит браузер-фри — аутэйдж binodex')
+    if await _error_boundary_shown(page):
+        raise CookiesExpired(f'binodex OTC: {detail} + «Something went wrong» (апп упал на буте) — '
+                             f'битая сессия, релогин')
+    if not await _privy_authenticated(page):
+        raise CookiesExpired(f'binodex OTC: {detail} + нет privy:token (Demo) — сессия протухла')
+    if await _app_shell_mounted(page):
+        raise SetupError(f'binodex OTC: {detail}, фид жив, токен есть, апп смонтирован — '
+                         f'сменились селекторы binodex')
+    raise SetupError(f'binodex OTC: {detail}, фид жив, токен есть, но апп-шелл не смонтировался '
+                     f'(висящий сплеш — front-end аутэйдж binodex)', mounted=False)
 
 
 async def apply_chart_scale(page: Page) -> None:
     """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
     при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
-    значение держит — проверено), а штатный setup (binodex_session._setup) идёт только на холодном
+    значение держит — проверено), а раньше штатный setup шёл только на холодном
     релогине. Поэтому применяем здесь, в init_otc, на каждом старте браузера. Порядок важен: смена
     масштаба свечи сбрасывает масштаб графика, поэтому график (H1) ставим ПОСЛЕДНИМ. Пункты —
     по тексту (порядок списков binodex плавает). Ошибки не критичны для запуска (масштаб — оформление
@@ -657,9 +713,75 @@ async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
     return OperationResult(success=bool(await init_otc(manager=manager)))
 
 
+async def _verify_otc_ready(page: Page) -> None:
+    """Авторизация + готовность торгового UI на /trade. Возвращается при успехе; иначе raises:
+    CookiesExpired (нужен релогин: редирект / нет токена / Demo / форма логина / error-boundary),
+    FeedOutage (аутэйдж фида), SetupError (UI/селекторы). WS-фид для BinoOptions НЕ критичен (цена
+    из chartData, WS — фолбэк/liveness): не поднялся → лог деградации, БЕЗ raise."""
+    if not on_trade(page.url):
+        raise CookiesExpired(f'binodex OTC: вход слетел (редирект с /trade на {page.url})')
+    # Ранний гейт «сессии нет вовсе» (чистый контекст). На ПРОТУХШЕЙ (но присутствующей) сессии
+    # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
+    # буте → ловит авторитетная перепроверка ниже.
+    if not await _privy_authenticated(page):
+        raise CookiesExpired('binodex OTC: нет privy:token (нет сессии) — нужен логин')
+    # SPA не обязательно доехала: при сплеше чарт виснет, кнопка выбора пары не появляется.
+    # _raise_ui_dead разводит: форма/Demo/error → CookiesExpired; фид мёртв → FeedOutage; токен жив,
+    # UI не поднялся → SetupError.
+    try:
+        await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
+    except (Exception,):
+        await _raise_ui_dead(page, 'кнопка выбора пары не появилась')
+    if not await _ui_loaded(page, UI_READY_TIMEOUT):
+        await _raise_ui_dead(page, 'нет кнопки настроек аккаунта (завис на сплеше)')
+    # Авторитетная перепроверка ПОСЛЕ оседания UI: Privy за время загрузки мог очистить протухший
+    # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
+    if not await _privy_authenticated(page):
+        raise CookiesExpired('binodex OTC: UI поднялся, но privy:token очищен (Demo) — сессия протухла')
+    # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на каждом старте.
+    await apply_chart_scale(page)
+    # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
+    await _apply_offzone(page)
+    # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.
+    tracker = get_price_tracker()
+    for _ in range(20):
+        if tracker.ws_connected and tracker.prices:
+            logger.report("✅ binodex: WS котировок подключён")
+            return
+        await asyncio.sleep(0.5)
+    logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
+                   "feed_dead-детект деградирован")
+
+
+async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
+    """Inline-релогин binodex В ТЕКУЩЕМ браузере (без подпроцесса/холодного браузера): почта+app-pass
+    и селекторы из БД → otc_login.otc_inline_login над живым page. Успех → свежий storage_state в БД
+    (переживёт рестарт, чтобы не логиниться OTP каждый старт). True/False (любой сбой — лог + False)."""
+    creds = await database.get_mail_creds(cookies_pocket_id)
+    if not creds or creds is False or not creds['mail'] or not creds['mail_app_pass']:
+        logger.error('OTC inline-релогин: нет mail/app-password (telegram.telegram) — логин невозможен')
+        return False
+    rows = await database.binodex_selectors()
+    if not rows or rows is False:
+        logger.error('OTC inline-релогин: нет селекторов binodex_settings')
+        return False
+    sel = {r['par_name']: r['par_value'] for r in rows}
+    if not await otc_inline_login(page, manager.context, creds['mail'], creds['mail_app_pass'], sel):
+        return False
+    # Свежую сессию — в БД (переживёт рестарт). Сбой сохранения не критичен: работаем на live-сессии.
+    try:
+        if await database.save_otc_cookies(cookies_pocket_id, await manager.context.storage_state()) is False:
+            logger.warning('OTC inline-релогин: storage_state не сохранён в БД (сбой) — продолжаю на live-сессии')
+    except (Exception,) as err:
+        logger.warning(f'OTC inline-релогин: сохранение storage_state не удалось ({err}) — продолжаю')
+    return True
+
+
 async def init_otc(manager: "BrowserManager") -> bool:
-    """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → проверка
-    логина (остались на /trade) → ожидание WS-котировок."""
+    """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → goto →
+    _verify_otc_ready (авторизация + UI; WS мягко). При «нужен релогин» (CookiesExpired) — INLINE-
+    логин в ЭТОМ ЖЕ браузере (apps/otc_login), без подпроцесса/двойной загрузки, и перепроверка. Не
+    вышло → CookiesExpired наверх (main: счётчик RECOVER_ATTEMPTS → плановый выход)."""
     page = manager.pages['main']
     _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
@@ -677,69 +799,24 @@ async def init_otc(manager: "BrowserManager") -> bool:
         return False
 
     try:
-        try:
-            await page.wait_for_load_state('networkidle', timeout=TIMEOUT_LONG)
-        except (Exception,):
-            pass  # постоянный WS-поток может мешать networkidle — не критично
-
-        # Логин активен, только если остались на /trade (Privy-сессия из storage_state).
-        # Отвал cookies (§4.3 Survive): поднимаем CookiesExpired → init_load пробросит в
-        # main.py::_init_with_retry (backoff + пересоздание, БЕЗ выхода; куки перечитаются из БД).
-        if not on_trade(page.url):
-            raise CookiesExpired(f'binodex OTC: вход слетел (редирект с /trade на {page.url})')
-
-        # Новый апп рендерит /trade и РАЗЛОГИНЕННЫМ (Demo) → URL-проверки мало. Реальная
-        # авторизация = privy:token в localStorage (снимает логин-воркер). Нет токена → тот же
-        # отвал cookies → CookiesExpired → авто-рефрешер (иначе бот вечно крутит выбор пары в Demo).
-        if not await page.evaluate("() => !!localStorage.getItem('privy:token')"):
-            raise CookiesExpired('binodex OTC: нет privy:token (Demo / не авторизован) — куки протухли')
-
-        # Отвал кук БЕЗ редиректа: binodex оставляет /trade, но всплывает форма логина прямо на
-        # графике (privy:token при этом может ещё висеть невалидным → проверки выше молчат). Быстрый
-        # позитивный детект до долгого ожидания UI: видна форма → CookiesExpired → рефрешер.
-        if await _login_modal_open(page):
-            raise CookiesExpired('binodex OTC: всплыла форма логина на /trade — куки протухли')
-
-        # Сюда — на /trade, токен на месте, формы логина нет. Но SPA ещё не обязательно доехала:
-        # при транзиентном сплеше / новой версии фронта чарт виснет, кнопка выбора пары не
-        # появляется. on_trade такой случай НЕ ловит → main-цикл таймаутил бы по всем парам. Не
-        # дождались UI — _raise_ui_dead перепроверит форму логина (вдруг всплыла позже) и разведёт:
-        # форма → CookiesExpired (рефреш); нет → SiteNotReady (ретрай/ожидание фида БЕЗ рефреша).
-        try:
-            await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
-        except (Exception,):
-            await _raise_ui_dead(page, 'кнопка выбора пары не появилась')
-
-        # Кнопка выбора пары видна — но UI ещё НЕ обязательно прогрузился: сайт остаётся на /trade
-        # и рисует тулбар частично, а чарт виснет на сплеше. Кнопки настроек аккаунта при этом НЕТ —
-        # её отсутствие точный DOM-маркер сплеша (on_trade держит /trade, котировок-WS стримит все
-        # пары → feed_dead тоже молчит). _raise_ui_dead снова разведёт форму логина (отвал кук) от
-        # недогруза сайта.
-        if not await _ui_loaded(page, UI_READY_TIMEOUT):
-            await _raise_ui_dead(page, 'нет кнопки настроек аккаунта (завис на сплеше)')
-
-        # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на
-        # каждом старте (не только на релогине в binodex_session._setup; см. apply_chart_scale).
-        await apply_chart_scale(page)
-
-        # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом
-        # списке). select_otc_pair снимет на время выбора пары и вернёт. После reload стили сбросятся —
-        # следующий select_otc_pair применит заново.
-        await _apply_offzone(page)
-
-        # Ждём поток котировок (до 10 сек)
-        tracker = get_price_tracker()
-        for _ in range(20):
-            if tracker.ws_connected and tracker.prices:
-                logger.report("✅ binodex: WS котировок подключён")
-                break
-            await asyncio.sleep(0.5)
-        else:  # цикл не нашёл фид — не валим старт (цена идёт из chartData), но фиксируем деградацию
-            logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
-                           "feed_dead-детект деградирован")
-        return True
-    except (CookiesExpired, SiteNotReady):
-        raise  # наружу → init_load → _init_with_retry (рефреш кук / ретрай сплеша), не глотать
+        relogged = False
+        while True:
+            try:
+                await _verify_otc_ready(page)
+                return True
+            except CookiesExpired as err:
+                # «Нужен релогин». Логинимся INLINE в ЭТОМ ЖЕ браузере — один раз за init_otc.
+                # Уже логинились и снова CookiesExpired → релогин не помог → наверх: main считает
+                # попытки (RECOVER_ATTEMPTS) → плановый выход. Так нет вечного inline-цикла.
+                if relogged:
+                    raise
+                logger.warning(f'OTC: {err} → inline-релогин в текущем браузере')
+                if not await _relogin_inline(manager, page):
+                    raise  # inline не удался → наверх (счётчик RECOVER_ATTEMPTS → выход)
+                relogged = True
+                await page.goto(url, wait_until='domcontentloaded', timeout=TIMEOUT_LONG)
+    except (CookiesExpired, FeedOutage, SetupError):
+        raise  # наружу → init_load → _init_with_retry (счётчик релогина / ожидание фида / setup-ретраи)
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f'Ошибка загрузки OTC binodex - {error}')
         return False

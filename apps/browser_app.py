@@ -3,7 +3,7 @@ import asyncio
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 from classes.browser_manager import BrowserManager
-from classes.exceptions import CookiesExpired, SiteNotReady
+from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
 from logs import init_logger
@@ -561,7 +561,7 @@ async def init_load() -> BrowserManager | bool:
             browser_result = await open_tv_browser(manager, cookies_override=tv_override)
         else:
             browser_result = await open_otc_browser(manager)
-    except (CookiesExpired, SiteNotReady):
+    except (CookiesExpired, FeedOutage, SetupError):
         await manager.close()  # cleanup перед пробросом — не оставить осиротевший Firefox
         raise
 

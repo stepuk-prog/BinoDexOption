@@ -10,11 +10,26 @@ class CookiesExpired(Exception):
     pass
 
 
-class SiteNotReady(Exception):
-    """OTC: торговый UI не прогрузился, но это НЕ отвал кук — формы логина на /trade нет
-    (отвал кук binodex показывает её прямо на графике, см. otc_app._login_modal_open). Значит
-    сплеш/SPA не дорендерился, новая версия фронта или сменились селекторы — рефреш кук тут
-    бесполезен и спамит. Ловится отдельно в main.py::_init_with_retry: feed_alive=False →
-    аутэйдж binodex (ждём фид браузер-фри); иначе транзиентный сплеш → пауза + пересоздание
-    браузера, БЕЗ рефреша кук."""
+class FeedOutage(Exception):
+    """OTC: сайт на /trade и сессия жива (privy:token есть, формы логина нет), но market-WS
+    не отдаёт котировки — подтверждено браузер-фри пробой (apps/binodex_feed.feed_alive=False).
+    Это аутэйдж binodex (рынок закрыт / сбой на стороне сайта), НЕ отвал кук. Ловится в
+    main.py::_init_with_retry → выгрузка браузера + браузер-фри ожидание возврата фида, БЕЗ
+    рефреша кук и БЕЗ выхода. См. docs/lifecycle-standard.md §4.5."""
     pass
+
+
+class SetupError(Exception):
+    """OTC: авторизованы (privy:token есть, формы логина нет) И фид ЖИВ (feed_alive=True), но
+    торговый UI не прогрузился/не настроился. Причина НЕ в куках и НЕ в аутэйдже фида. Ловится в
+    main.py::_init_with_retry; политика зависит от `mounted` (§4.5):
+
+    :param mounted: True — торговый апп-шелл binodex смонтирован (кнопка выбора пары есть), но наш
+        селектор не найден → сменились CSS-селекторы binodex: до SETUP_ATTEMPTS повторов → не
+        помогло → ПЛАНОВЫЙ ВЫХОД (нужна ручная правка селекторов). False — апп-шелл НЕ смонтировался
+        (висящий загрузочный сплеш «лого+спиннер»: JS-бандл/фронт binodex не поднялся, хотя URL
+        /trade и WS-фид живы) → front-end АУТЭЙДЖ binodex: ВЫЖИВАЕМ с бэкоффом, без выхода и без
+        счётчика (как FeedOutage, но фид тут жив — поэтому не browser-free ожидание, а retry)."""
+    def __init__(self, message: str = '', *, mounted: bool = True):
+        super().__init__(message)
+        self.mounted = mounted

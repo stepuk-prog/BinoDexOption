@@ -16,21 +16,21 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 ## Две БД (через PgBouncer, asyncpg)
 - **Program** (`DATABASE`) — настройки браузера/cookies, юзербот-креды (`telegram.telegram`), статус (`program.programdata`), `cookies.pages`, `settings.tv_settings`/`pocket_settings`.
 - **binodex** (`DATABASE_FIN`) — сигналы (`option_data.binary_data_view`/`otc_data_view`), счётчики (`option_data.counter`), настройки экземпляра (`settings.option_setting`), `settings.binodex_settings` (OTC-селекторы), cookies binodex.
-- Старт читается синхронно (`settings/_bootstrap.py`) до подъёма пулов; рантайм — `database/postgres.py` (`Database`, пулы program+binodex). Подробно: **`docs/DATABASE.md`**.
+- Старт читается синхронно (`settings/_bootstrap.py`) до подъёма пулов; рантайм — `database/database.py` (`Database`, пулы program+binodex). Подробно: **`docs/DATABASE.md`**.
 
 ## env (.env — gitignored; пример в `.env.example`)
 `DATABASE`, `DATABASE_FIN`, `PG_*` (порт 6442), `ERROR_CHANNEL`/`MESSAGE_CHANNEL`/`COOKIES_CHANNEL`, `TOKEN`, `PROG_KEY`, `OVERLAP`, `OVERLAP_RANDOM`. `TIMEFRAME`/`BINARY` — задаёт диспетчер per-instance (для локального можно в .env). Тест-оверрайды: `TEST`, `CHANNEL`, `TEST_API_ID/HASH/SESSION_FILE`, `COOK_OTC`, `SIGNAL_CHANNEL`.
 
 ## Структура
-- `apps/` — процедурная логика: `app.py` (FIN: цена/скрин/точка входа), `otc_app.py` (OTC: выбор пары/скрин/WS-цена), `browser_app.py` (init Playwright/TV), `main_app.py` (главный цикл + посты), `exit_app.py` (завершение/алерты), `cookie_refresh.py` (оркестратор авто-рефреша OTC-кук, async), `binodex_session.py` (DB-free воркер логина binodex — запускается подпроцессом), `my_exeptions.py`, `cookie_utils.py`.
+- `apps/` — процедурная логика: `app.py` (FIN: цена/скрин/точка входа), `otc_app.py` (OTC: выбор пары/скрин/WS-цена + inline-релогин), `browser_app.py` (init Playwright/TV), `main_app.py` (главный цикл + посты), `exit_app.py` (завершение/алерты), `otc_login.py` (inline Privy email-OTP логин в основном браузере, async), `binodex_feed.py` (браузер-фри health-чек market-WS), `my_exeptions.py`, `cookie_utils.py`.
 - `classes/` — `Option_class.py` (`Option` — данные опциона; обычный класс, НЕ dataclass), `browser_manager.py`, `price_tracker.py` (WS-цены OTC), `result_types.py`.
-- `database/postgres.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер), `pictures/`, `scripts/`, `systemd/`, `docs/`.
+- `database/database.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер), `pictures/`, `scripts/`, `systemd/`, `docs/`.
 
 ## OTC / binodex (важное)
 - Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `docs/COOKIES_BINODEX.md`.
 - Цена кадра OTC — из **`window.chartData.price`** (значение, которое движок рисует на ярлыке; медиана нескольких чтений вокруг скрина в `screenshot_otc`). **WS** `api-coins.binodex.io` (трекер `classes/price_tracker.py`) — для liveness/детекта и как фолбэк: WS опережает график на ~150 мс, поэтому как цену кадра не годится. Подробно: `docs/BINODEX_PRICE.md`.
 - Выбор пары — модалка binodex по селекторам из `settings.binodex_settings`; **auto-wait вместо sleep** (проверено на живом сайте, ~1.15с).
-- **Авто-рефреш кук** (Privy email-OTP): при отвале OTC-кук бот сам перелогинивается — воркер `binodex_session.py` (логин по коду с почты, селекторы `login_*`/`setup_*` из `binodex_settings`) ← оркестратор `cookie_refresh.py` (asyncpg). Политика **Recover-3→Exit** (§4.3). Креды почты — `telegram.telegram.mail`/`mail_app_pass` (Gmail app-password). Privy шлёт код с `no-reply@privy.io` И `no-reply@mail.privy.io` (фильтр по домену).
+- **Авто-рефреш кук** (Privy email-OTP): при отвале OTC-кук бот перелогинивается **INLINE в основном браузере** — `apps/otc_login.py::otc_inline_login` (логин по коду с почты, селекторы `login_*` из `binodex_settings`), вызывается из `otc_app.init_otc` при `CookiesExpired`. Подпроцесс-воркер убран. `main._recover_otc_cookies` — счётчик-предохранитель: **Recover-3→Exit** (§4.3). Креды почты — `telegram.telegram.mail`/`mail_app_pass` (Gmail app-password). Privy шлёт код с `no-reply@privy.io` И `no-reply@mail.privy.io` (фильтр по домену).
 
 ## Конвенции / гочи
 - Классы — в `classes/` отдельными файлами; **предпочитать Playwright auto-wait вместо `asyncio.sleep`**; таймауты на всех внешних вызовах (БД/Playwright/Pyrogram); по-уровневые логи.

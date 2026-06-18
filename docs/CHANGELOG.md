@@ -257,7 +257,7 @@
 - Доки: README (структура), DEPLOY (`PROG_KEY`, путь `Binodex`), service-файлы (путь).
 
 ### БД: единый async-интерфейс (миграция с psycopg2)
-- Синхронный `database/postgres.py` (psycopg2) заменён единым async-классом `Database`
+- Синхронный `database/database.py` (psycopg2) заменён единым async-классом `Database`
   на asyncpg: два пула (`program` + `binodex`), json/jsonb-codec, retry и
   PgBouncer-recovery. `database/async_postgres.py` удалён (слит в `postgres.py`).
 - `settings/_bootstrap.py` — синхронное чтение конфига/кред/cookies на import-time

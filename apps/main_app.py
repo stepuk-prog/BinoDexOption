@@ -70,8 +70,8 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     page = manager.pages['main']
     if await _ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
         return
-    logger.cookies('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
-                   'не прерывая опцион')
+    logger.warning('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
+                   'не прерывая опцион')  # рутина → файл, не канал
     if not await reload_otc_page(manager=manager):
         logger.warning('OTC: reload в течение опциона не поднял UI — результат может не сняться')
         return

@@ -101,12 +101,8 @@ if cook_otc_override and not binary:
 cookies_tv_id = option['cookies_tv']
 cookies_pocket_id = int(cook_otc_override) if (cook_otc_override and not binary) else option['cookies_pocket']
 
-# Авто-восстановление OTC-кук: DB-free воркер логина binodex (apps/binodex_session.py) — бот
-# (apps/cookie_refresh.py) запускает его подпроцессом своим же venv-python (sys.executable),
-# данные передаёт на stdin, storage_state пишет в БД сам через asyncpg. Путь — внутри проекта
-# (едет обычным деплоем). Имя владельца кук — для текста алертов (§4.2).
-refresher_worker = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                'apps', 'binodex_session.py')
+# Авто-восстановление OTC-кук: релогин INLINE в основном браузере (apps/otc_login.py, из
+# otc_app.init_otc) — без подпроцесса. Имя владельца кук — для текста алертов (§4.2).
 cook_name_otc = '?'
 if not binary:
     cook_name_otc = bootstrap_fetch(

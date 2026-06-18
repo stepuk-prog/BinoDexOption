@@ -19,7 +19,7 @@ pg_port = opt_int("PG_PORT", 5432)  # дефолт стандартного по
 pg_name_fin = os.getenv("DATABASE_FIN", "binodex")
 
 # Ключи пулов → имена БД. 'program' — Program, 'binodex' — база данных опционов.
-# Общий словарь и codec для postgres.py (рантайм-пулы) и _bootstrap.py (старт) —
+# Общий словарь и codec для database.py (рантайм-пулы) и _bootstrap.py (старт) —
 # чтобы не расходились две копии.
 DB_NAMES = {'program': pg_name, 'binodex': pg_name_fin}
 

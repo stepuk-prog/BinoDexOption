@@ -1,6 +1,6 @@
 # Структура БД
 
-Документ описывает таблицы/представления PostgreSQL **в том виде, как их использует код** (по SQL-запросам в `database/postgres.py` + чтениям на старте в `settings/_bootstrap.py`). Это не авторитетный DDL — точные типы колонок смотрите в самой БД.
+Документ описывает таблицы/представления PostgreSQL **в том виде, как их использует код** (по SQL-запросам в `database/database.py` + чтениям на старте в `settings/_bootstrap.py`). Это не авторитетный DDL — точные типы колонок смотрите в самой БД.
 
 ## Две базы
 
@@ -9,7 +9,7 @@
 | **Program** | `DATABASE`                           | Селекторы TV, TV-cookies, юзербот-креды + почта, статус программы                               |
 | **binodex** | `DATABASE_FIN` (по умолч. `binodex`) | Сигналы опционов, счётчики, настройки экземпляра, селекторы и cookies binodex, `cookies.pages`  |
 
-Доступ — **единый async-класс `Database`** (asyncpg, `database/postgres.py`) с двумя пулами; база выбирается параметром `db='program'|'binodex'` в `execute_query`. Соединение — через **PgBouncer**. Конфиг/креды/cookies на старте читаются синхронно через `settings/_bootstrap.py` (одноразовые `asyncpg.connect` до подъёма пулов). Сигнальные данные (`option_data.*`) наполняет внешний сервис **BinoOptionData** (OTC-данные синтетические).
+Доступ — **единый async-класс `Database`** (asyncpg, `database/database.py`) с двумя пулами; база выбирается параметром `db='program'|'binodex'` в `execute_query`. Соединение — через **PgBouncer**. Конфиг/креды/cookies на старте читаются синхронно через `settings/_bootstrap.py` (одноразовые `asyncpg.connect` до подъёма пулов). Сигнальные данные (`option_data.*`) наполняет внешний сервис **BinoOptionData** (OTC-данные синтетические).
 
 ---
 
