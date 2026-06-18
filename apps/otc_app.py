@@ -73,6 +73,18 @@ RELOAD_RETRY_PAUSE = 2.0  # сек между ретраями reload
 
 logger = init_logger(__name__)
 
+EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate/screenshot (у Playwright нет встроенного таймаута)
+
+
+async def _eval(target, js, *args):
+    """page/element.evaluate с верхней границей по времени (зависший рендер иначе вешает await навсегда)."""
+    return await asyncio.wait_for(target.evaluate(js, *args), timeout=EVAL_TIMEOUT)
+
+
+async def _shot(page, **kwargs):
+    """page.screenshot с верхней границей по времени (как _eval — встроенного таймаута нет)."""
+    return await asyncio.wait_for(page.screenshot(**kwargs), timeout=EVAL_TIMEOUT)
+
 
 def on_trade(url: str) -> bool:
     """binodex: авторизация активна, если остались на …/trade (Privy редиректит
@@ -226,7 +238,7 @@ async def _dump_pair_modal(page: Page, phase: str) -> None:
     БЕЗ поиска (полный список — там и видна строка пары). Любые ошибки глушим — это диагностика."""
     try:
         old_cnt = await page.locator(otc_modal_pair_item).count()
-        rows = await page.evaluate(_DUMP_CHAIN_JS)
+        rows = await _eval(page, _DUMP_CHAIN_JS)
         logger.warning('OTC-DIAG [%s]: старый modal_pair_item=%s match, листовых узлов с OTC=%s',
                        phase, old_cnt, len(rows))
         for r in rows:
@@ -339,7 +351,7 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
     out: list[float] = []
     for _ in range(count):
         try:
-            data = await page.evaluate(CHART_DATA_JS)
+            data = await _eval(page, CHART_DATA_JS)
         except (Exception,):
             data = None
         if not isinstance(data, dict):
@@ -516,7 +528,7 @@ def _load_globe(size) -> Image.Image:
 
 async def _canvas_alpha(element) -> Image.Image:
     """Пиксели канваса с альфой (toDataURL), приведённые к CSS-боксу (ресайз при DPR)."""
-    d = await element.evaluate(_CANVAS_ALPHA_JS)
+    d = await _eval(element, _CANVAS_ALPHA_JS)
     img = Image.open(BytesIO(base64.b64decode(d['url'].split(',', 1)[1]))).convert('RGBA')
     if (d['w'], d['h']) != (d['cssw'], d['cssh']):
         img = img.resize((d['cssw'], d['cssh']), Image.Resampling.LANCZOS)
@@ -548,20 +560,20 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
     if not rebuild and key in _label_cutout_cache:
         return _label_cutout_cache[key]
     try:
-        lb = await page.evaluate(_LABEL_BOX_JS, screen_zone_otc)
+        lb = await _eval(page, _LABEL_BOX_JS, screen_zone_otc)
         if not lb:
             return None
         lx, ly, lw, lh = round(lb['x']), round(lb['y']), round(lb['w']), round(lb['h'])
         region: FloatRect = {'x': lx, 'y': ly, 'width': lw, 'height': lh}
-        a_buf = await page.screenshot(clip=region)                       # A: ярлык виден
-        await page.evaluate("() => { const e=document.querySelector('[data-otc-lbl]');"
-                            " if (e) e.style.setProperty('visibility','hidden','important'); }")
+        a_buf = await _shot(page, clip=region)                           # A: ярлык виден
+        await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
+                          " if (e) e.style.setProperty('visibility','hidden','important'); }")
         try:
             await page.wait_for_timeout(150)
-            b_buf = await page.screenshot(clip=region)                   # B: фон без ярлыка
+            b_buf = await _shot(page, clip=region)                       # B: фон без ярлыка
         finally:                                                          # вернуть ярлык в любом случае
-            await page.evaluate("() => { const e=document.querySelector('[data-otc-lbl]');"
-                                " if (e) e.style.removeProperty('visibility'); }")
+            await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
+                              " if (e) e.style.removeProperty('visibility'); }")
         # Пиксельное матирование — синхронный CPU-цикл; уводим в поток, чтобы не блокировать event loop.
         cutout = await asyncio.to_thread(_matte_label, Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
         result = (cutout, (lx - clip['x'], ly - clip['y']))
@@ -611,7 +623,7 @@ _CLEAR_OFFZONE_JS = ("() => { for (const el of document.querySelectorAll('body *
 async def _apply_offzone(page: Page) -> None:
     """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары."""
     try:
-        await page.evaluate(_HIDE_OFFZONE_JS, screen_zone_otc)
+        await _eval(page, _HIDE_OFFZONE_JS, screen_zone_otc)
     except (Exception,) as err:
         logger.debug(f"OTC off-zone apply: {err}")
 
@@ -619,7 +631,7 @@ async def _apply_offzone(page: Page) -> None:
 async def _clear_offzone(page: Page) -> None:
     """Вернуть весь UI (на время выбора пары — модалка выбора под off-zone не кликается)."""
     try:
-        await page.evaluate(_CLEAR_OFFZONE_JS)
+        await _eval(page, _CLEAR_OFFZONE_JS)
     except (Exception,) as err:
         logger.debug(f"OTC off-zone clear: {err}")
 
@@ -656,21 +668,27 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             # (модалка закрыта) _close_pair_modal выходит сразу на первой проверке — без кликов.
             await _close_pair_modal(page)
             box = await element.bounding_box()
+            if not box:  # элемент невидим/отсоединён → bounding_box=None (иначе TypeError на box['x'])
+                last_error = 'нет bounding_box зоны графика OTC'
+                logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: {last_error} для {asset}")
+                continue
             clip = {'x': round(box['x']), 'y': round(box['y']),
                     'width': round(box['width']), 'height': round(box['height'])}
             # Защита от пустого канваса: после переключения пары канвас ~1-3с пустой (свечи не
             # дорисованы) — не постим голый кадр. Ждём отрисовку до CANVAS_READY_SECONDS (отдельный
             # бюджет, не сжигаем MAX_SCREENSHOT_ATTEMPTS); пробные захваты канваса отбрасываем.
-            waited = 0.0
+            # Бюджет — wall-clock (time.monotonic), НЕ сумма sleep'ов: каждый _canvas_alpha — это
+            # _eval (до EVAL_TIMEOUT), поэтому «waited += 0.4» сильно недосчитывал реальное время
+            # и бюджет CANVAS_READY_SECONDS растягивался в разы.
+            deadline = time.monotonic() + CANVAS_READY_SECONDS
             while True:
                 probe = await _canvas_alpha(element)
                 if sum(probe.getchannel('A').histogram()[16:]) >= probe.width * probe.height * CANVAS_MIN_OPAQUE:
                     break
-                if waited >= CANVAS_READY_SECONDS:
+                if time.monotonic() >= deadline:
                     probe = None
                     break
                 await asyncio.sleep(0.4)
-                waited += 0.4
             if probe is None:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: канвас пуст "
                                f"{CANVAS_READY_SECONDS:.0f}с (свечи не отрисованы) для {asset}")

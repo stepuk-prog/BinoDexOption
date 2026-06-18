@@ -1,3 +1,4 @@
+
 import asyncio
 
 from playwright.async_api import async_playwright, BrowserContext, Page
@@ -21,6 +22,8 @@ from settings.timing import (
 from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
+
+EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate (у Playwright нет встроенного таймаута)
 
 
 def _is_signin_url(url: str) -> bool:
@@ -343,8 +346,10 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
 
                 # Ожидаем новую страницу и открываем её одновременно
                 async with manager.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
-                    # URL передаём аргументом, а не в строку JS — кавычка в URL не сломает evaluate
-                    await current_page.evaluate("u => window.open(u)", page_data['url'])
+                    # URL передаём аргументом, а не в строку JS — кавычка в URL не сломает evaluate.
+                    # Верхняя граница по времени: у evaluate нет встроенного таймаута.
+                    await asyncio.wait_for(
+                        current_page.evaluate("u => window.open(u)", page_data['url']), timeout=EVAL_TIMEOUT)
 
                 page = await new_page_info.value
                 manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл
@@ -469,7 +474,8 @@ async def _click_fxcm_pair(page, pair: str) -> bool:
                 elif strategy == 'force':
                     await loc.click(timeout=2000, force=True)
                 else:
-                    await loc.evaluate('el => el.click()')
+                    # evaluate без встроенного таймаута — оборачиваем верхней границей
+                    await asyncio.wait_for(loc.evaluate('el => el.click()'), timeout=EVAL_TIMEOUT)
                 return True
             except (Exception,):
                 continue

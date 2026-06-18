@@ -102,7 +102,6 @@ async def _recover_otc_cookies() -> bool:
     logger.warning(f'OTC: init не поднялся после inline-релогина ({cook_name_otc}), '
                    f'цикл {_otc_recover_cycles}/{RECOVER_ATTEMPTS} — повтор init')
     return True
-    return False
 
 
 async def _init_with_retry():
@@ -171,7 +170,8 @@ async def _recreate_browser(manager):
     """Закрыть текущий браузер и поднять заново через _init_with_retry (Survive §4.3).
     :return: новый BrowserManager либо None (остановлены сигналом)."""
     try:
-        await manager.close()
+        # Верхняя граница: зависший Firefox-close не должен подвесить пересоздание браузера.
+        await asyncio.wait_for(manager.close(), timeout=50)
     except (Exception,) as error:
         logger.warning(f'Ошибка закрытия браузера при пересоздании: {error}')  # утечка Firefox не должна быть незаметной
     return await _init_with_retry()
@@ -311,9 +311,10 @@ async def bot():
         # поэтому сюда не попадают и отрабатывают штатные ветки ниже.
         if not binary and not res_option.result and not await feed_alive():
             try:
-                await manager.close()
-            except (Exception,):
-                pass
+                # Верхняя граница: зависший Firefox-close не должен подвесить аварийную выгрузку.
+                await asyncio.wait_for(manager.close(), timeout=50)
+            except (Exception,) as error:
+                logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):
                 break  # SIGTERM во время ожидания
             manager = await _init_with_retry()

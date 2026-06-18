@@ -33,19 +33,27 @@ def _subscribe_frame(pair: str) -> str:
 
 
 async def _probe(pair: str) -> bool:
-    """Одно подключение: хэндшейк → SUBSCRIBE → True на первом ценовом кадре."""
+    """Одно подключение: хэндшейк → SUBSCRIBE → True на первом ценовом кадре.
+
+    Следуем протоколу Engine.IO v4: connect namespace (`40/graphic,`) шлём ТОЛЬКО после
+    open-кадра `0{...}` (раньше слали сразу — хрупко и вопреки docstring). `44` (namespace
+    connect error) → фид недоступен, быстрый выход (а не ожидание внешнего таймаута)."""
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(_WS_URL, headers=_HEADERS, heartbeat=None) as ws:
-            await ws.send_str('40/graphic,')                       # connect namespace /graphic
             async for msg in ws:
                 if msg.type is not aiohttp.WSMsgType.TEXT:
                     continue
                 data = msg.data
-                if data.startswith('40'):                          # namespace ack → подписываемся
+                if data.startswith('0'):
+                    await ws.send_str('40/graphic,')
+                elif data.startswith('44'):
+                    logger.debug(f'binodex _probe: namespace connect error: {data[:120]}')
+                    return False
+                elif data.startswith('40'):
                     await ws.send_str(_subscribe_frame(pair))
-                elif data == '2':                                  # Engine.IO ping → pong
+                elif data == '2':
                     await ws.send_str('3')
-                elif data.startswith('42') and '"price"' in data:  # ценовой кадр — фид жив
+                elif data.startswith('42') and '"price"' in data:
                     return True
     return False
 

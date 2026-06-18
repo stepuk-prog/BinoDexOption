@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate/screenshot (у Playwright нет встроенного таймаута)
+
 # Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
 _shutdown_requested = False
 
@@ -255,7 +257,8 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
             return False, 'Ошибка имитации движения мыши'
 
         element = page.locator(f"xpath={screen_zone}").first
-        await element.screenshot(path=shot_path)
+        # У Playwright screenshot нет встроенного таймаута — ставим верхнюю границу (зависший рендер не вешает цикл).
+        await asyncio.wait_for(element.screenshot(path=shot_path), timeout=EVAL_TIMEOUT)
 
         with Image.open(shot_path) as img:
             if qr:
@@ -302,8 +305,9 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
 
             await mouse_move(page, price_field, 1)
 
-            # Получаем цвет элемента через evaluate
-            tp = await price_element.evaluate("el => getComputedStyle(el).color")
+            # Получаем цвет элемента через evaluate (с верхней границей — у evaluate нет встроенного таймаута)
+            tp = await asyncio.wait_for(
+                price_element.evaluate("el => getComputedStyle(el).color"), timeout=EVAL_TIMEOUT)
             tp = str(tp)
 
             if color in tp:

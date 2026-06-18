@@ -1,6 +1,6 @@
 import asyncio
 
-from pyrogram.errors import Unauthorized
+from pyrogram.errors import Unauthorized, FloodWait
 
 from apps.exit_app import session_dead_shutdown, session_failed
 from logs import init_logger
@@ -14,6 +14,10 @@ logger = init_logger(__name__)
 # TRANSIENT_401_MAX_STRIKES — эскалация в session_dead_shutdown: трактуем как мёртвую
 # session, которую get_me-проба не уличила (таймаут/сеть на самой пробе).
 _transient_401_strikes = 0
+
+# Потолок ожидания FloodWait: Telegram при флуд-лимите просит подождать .value сек. Ждём окно и
+# повторяем ОДИН раз; окно выше потолка / повторный FloodWait → теряем пост (бот продолжает).
+_FLOODWAIT_MAX = 120
 
 
 def _reset_transient_strikes() -> None:
@@ -69,6 +73,27 @@ async def lost_connection_photo(error, photo, text, mes_type):
     """
     global _transient_401_strikes
     bot = get_app()
+    # FloodWait: Telegram просит подождать .value сек (флуд-лимит) — НЕ обрыв связи и НЕ отвал
+    # сессии. Единственное лечение: выждать окно и повторить ОДИН раз (restart/ретраи бесполезны
+    # и усугубят флуд). Окно выше потолка / повторный FloodWait → теряем пост, бот продолжает.
+    # Без этой ветки FloodWait уходил бы в обрыв-эвристику ниже → пост терялся минуя ожидание.
+    if isinstance(error, FloodWait):
+        wait = int(getattr(error, 'value', 0) or 0) + 1
+        if wait > _FLOODWAIT_MAX:
+            logger.session(f'⚠️ Пост ({mes_type}) не доставлен: FloodWait {wait}s превышает '
+                           f'потолок {_FLOODWAIT_MAX}s — пропуск')
+            return False, 'FloodWait превышает потолок'
+        logger.warning(f'{mes_type}: FloodWait — ждём {wait}s и повторяю')
+        await asyncio.sleep(wait)
+        try:
+            await asyncio.wait_for(
+                bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
+                timeout=TG_RECONNECT_TIMEOUT)
+            _reset_transient_strikes()
+            return True, ''
+        except (Exception,) as err:
+            logger.session(f'⚠️ Пост ({mes_type}) не доставлен: повтор после FloodWait не удался — {err}')
+            return False, 'повтор после FloodWait не удался'
     # session_failed = тип Unauthorized ИЛИ строковый маркер (AUTH_KEY_* и пр.). Но голый
     # Unauthorized («Auth key not found») бывает транзиентом на медиа-DC при ЖИВОМ ключе —
     # хоронить бота тогда нельзя. Маркеры однозначно мёртвые; голый 401 различаем get_me().
