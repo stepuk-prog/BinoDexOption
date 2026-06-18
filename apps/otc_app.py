@@ -26,7 +26,7 @@ from playwright.async_api import Page, WebSocket, FloatRect
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
-from classes.exceptions import CookiesExpired
+from classes.exceptions import CookiesExpired, SiteNotReady
 from apps.exit_app import close_program
 from logs import init_logger
 from settings.config import screenshot_path, database, prog_key
@@ -34,7 +34,7 @@ from settings.constant import globe_otc_path
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
-                                     otc_modal_pair_item, screen_zone_otc, otc_settings_btn,
+                                     otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
                                      otc_chart_scale, otc_chart_scale_item)
 
@@ -363,6 +363,29 @@ async def _ui_loaded(page: Page, timeout: float) -> bool:
         return False
 
 
+async def _login_modal_open(page: Page) -> bool:
+    """True — на странице видна форма логина Privy (поле ввода почты login_email). При отвале кук
+    binodex НЕ редиректит со /trade, а всплывает форма логина прямо на графике — это позитивный
+    признак ОТВАЛА КУК, отличающий его от транзиентного сплеша (где формы нет, UI просто не достроен).
+    Проверка мгновенная (is_visible, без ожидания) — вызывать ПОСЛЕ того, как UI не поднялся.
+    Нет селектора в БД → False (детект деградирует к token/UI, без ложного рефреша)."""
+    if not otc_login_email:
+        return False
+    try:
+        return await page.locator(otc_login_email).first.is_visible()
+    except (Exception,):
+        return False
+
+
+async def _raise_ui_dead(page: Page, detail: str) -> None:
+    """UI не поднялся — развести отвал кук от транзиентного сплеша по форме логина (см.
+    _login_modal_open). Видна форма → CookiesExpired (рефреш кук); не видна → SiteNotReady
+    (ретрай/ожидание фида БЕЗ рефреша). Всегда бросает."""
+    if await _login_modal_open(page):
+        raise CookiesExpired(f'binodex OTC: {detail} + всплыла форма логина — куки протухли')
+    raise SiteNotReady(f'binodex OTC: {detail} — сплеш/недогруз сайта (форма логина не видна)')
+
+
 async def apply_chart_scale(page: Page) -> None:
     """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
     при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
@@ -671,30 +694,29 @@ async def init_otc(manager: "BrowserManager") -> bool:
         if not await page.evaluate("() => !!localStorage.getItem('privy:token')"):
             raise CookiesExpired('binodex OTC: нет privy:token (Demo / не авторизован) — куки протухли')
 
-        # Остались на /trade — но это ещё не гарантия, что SPA доехала. При протухшем Privy-токене
-        # без редиректа страница виснет на сплеше: торговый UI не рендерится, кнопка выбора пары
-        # отсутствует. URL-детект (on_trade) такой случай НЕ ловит → дальше main-цикл таймаутит по
-        # всем парам на otc_select_pair (.row_w). Поэтому жёстко ждём готовность UI; не дождались —
-        # это тот же отвал cookies (§4.3): CookiesExpired → _init_with_retry (алерт в cookies-канал +
-        # backoff + пересоздание браузера, куки перечитаются из БД).
+        # Отвал кук БЕЗ редиректа: binodex оставляет /trade, но всплывает форма логина прямо на
+        # графике (privy:token при этом может ещё висеть невалидным → проверки выше молчат). Быстрый
+        # позитивный детект до долгого ожидания UI: видна форма → CookiesExpired → рефрешер.
+        if await _login_modal_open(page):
+            raise CookiesExpired('binodex OTC: всплыла форма логина на /trade — куки протухли')
+
+        # Сюда — на /trade, токен на месте, формы логина нет. Но SPA ещё не обязательно доехала:
+        # при транзиентном сплеше / новой версии фронта чарт виснет, кнопка выбора пары не
+        # появляется. on_trade такой случай НЕ ловит → main-цикл таймаутил бы по всем парам. Не
+        # дождались UI — _raise_ui_dead перепроверит форму логина (вдруг всплыла позже) и разведёт:
+        # форма → CookiesExpired (рефреш); нет → SiteNotReady (ретрай/ожидание фида БЕЗ рефреша).
         try:
             await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
-        except CookiesExpired:
-            raise
         except (Exception,):
-            raise CookiesExpired('binodex OTC: торговый UI не прогрузился (завис на /trade, '
-                                 'кнопка выбора пары не появилась) — storage_state протух')
+            await _raise_ui_dead(page, 'кнопка выбора пары не появилась')
 
-        # Кнопка выбора пары видна — но UI ещё НЕ обязательно прогрузился: при «залипшем»
-        # Privy-токене сайт остаётся на /trade и рисует тулбар частично, а чарт виснет на сплеше.
-        # Кнопки настроек аккаунта при этом НЕТ — её отсутствие точный DOM-маркер сплеша (on_trade
-        # держит /trade, котировок-WS стримит все пары → feed_dead тоже молчит). Без этого бот
-        # постил бы скрин сплеша (цена с WS-фолбэка) ИЛИ рестартовал по кругу, НЕ запуская
-        # рефрешер. Нет кнопки настроек — тот же отвал cookies (§4.3): CookiesExpired →
-        # _recover_otc_cookies (cold relogin do_setup=True).
+        # Кнопка выбора пары видна — но UI ещё НЕ обязательно прогрузился: сайт остаётся на /trade
+        # и рисует тулбар частично, а чарт виснет на сплеше. Кнопки настроек аккаунта при этом НЕТ —
+        # её отсутствие точный DOM-маркер сплеша (on_trade держит /trade, котировок-WS стримит все
+        # пары → feed_dead тоже молчит). _raise_ui_dead снова разведёт форму логина (отвал кук) от
+        # недогруза сайта.
         if not await _ui_loaded(page, UI_READY_TIMEOUT):
-            raise CookiesExpired('binodex OTC: торговый UI не прогрузился (нет кнопки настроек '
-                                 'аккаунта — завис на сплеше) — storage_state протух')
+            await _raise_ui_dead(page, 'нет кнопки настроек аккаунта (завис на сплеше)')
 
         # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на
         # каждом старте (не только на релогине в binodex_session._setup; см. apply_chart_scale).
@@ -716,8 +738,8 @@ async def init_otc(manager: "BrowserManager") -> bool:
             logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
                            "feed_dead-детект деградирован")
         return True
-    except CookiesExpired:
-        raise  # наружу → init_load → _init_with_retry (cookies-backoff), не глотать
+    except (CookiesExpired, SiteNotReady):
+        raise  # наружу → init_load → _init_with_retry (рефреш кук / ретрай сплеша), не глотать
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f'Ошибка загрузки OTC binodex - {error}')
         return False

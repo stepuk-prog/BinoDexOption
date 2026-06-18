@@ -11,7 +11,7 @@ from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import feed_alive, wait_for_feed
-from classes.exceptions import CookiesExpired
+from classes.exceptions import CookiesExpired, SiteNotReady
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
@@ -81,7 +81,9 @@ async def _recover_otc_cookies() -> bool:
     политика — НЕ вечный Survive, а предохранитель (§4.3): получилось → продолжаем; нет после всех
     попыток → пишем status=false и выходим (status=0, диспетчер не рестартит мёртвые куки по кругу).
     :return: True — куки восстановлены (caller переинициализируется); False — остановлены сигналом."""
-    logger.cookies(f'Куки отвалились для {cook_name_otc}. Пытаюсь восстановить')
+    # В cookies-канал шлём ТОЛЬКО финальный провал (ниже). Старт/попытки/успех — в лог, не в канал:
+    # отвал кук авто-чинится молча, оператора дёргаем лишь когда восстановить НЕ удалось.
+    logger.warning(f'Куки отвалились для {cook_name_otc}. Пытаюсь восстановить')
     for attempt in range(1, RECOVER_ATTEMPTS + 1):
         if _stop_event is not None and _stop_event.is_set():
             return False
@@ -89,7 +91,7 @@ async def _recover_otc_cookies() -> bool:
         # графика — поэтому при восстановлении заодно прокликиваем настройку сайта (иначе чарт
         # без индикатора/масштабов/темы). Сбой настройки воркер глушит (куки всё равно сохранит).
         if await refresh_otc_cookies(do_setup=True):
-            logger.cookies(f'Куки для {cook_name_otc} успешно восстановлены. Продолжаю работу')
+            logger.info(f'Куки для {cook_name_otc} успешно восстановлены. Продолжаю работу')
             return True
         logger.warning(f'Восстановление куки для {cook_name_otc}: попытка {attempt}/{RECOVER_ATTEMPTS} не удалась')
     logger.cookies(f'Не могу восстановить куки для {cook_name_otc}. Останавливаю работу')
@@ -110,6 +112,19 @@ async def _init_with_retry():
             return None
         try:
             manager = await init_load()
+        except SiteNotReady as error:
+            # OTC: авторизация жива (на /trade + токен), но UI не поднялся — НЕ отвал кук, рефреш
+            # бесполезен. feed_alive разводит причину: фид лёг → аутэйдж binodex (ждём браузер-фри,
+            # как при рантайм-аутэйдже); фид жив → транзиентный сплеш/новая версия фронта → пауза и
+            # пересоздание браузера, БЕЗ рефреша кук и БЕЗ спама в cookies-канал.
+            logger.warning(f'OTC: торговый UI не поднялся ({error}) — не отвал кук, проверяю фид')
+            if not await feed_alive():
+                if not await _await_binodex_feed(at_start=True):
+                    return None  # остановлены сигналом во время ожидания фида
+                continue
+            if await _interruptible_sleep(INIT_RETRY_DELAY):
+                return None
+            continue
         except CookiesExpired as error:
             if not binary:  # OTC: рефрешер (3 попытки); при провале _recover_otc_cookies сам выйдет
                 if await _recover_otc_cookies():
@@ -290,7 +305,10 @@ async def bot():
             if not dead and res_option.check_cookies > 2:
                 dead, reason = True, 'цена не меняется N циклов подряд (вторичный сигнал)'
             if dead:
-                logger.cookies(f'OTC: отвал cookies в рантайме ({reason}) — пересоздаю браузер')
+                # В лог, не в канал: «dead» часто транзиентный сплеш/WS-икота, а не отвал кук —
+                # пересоздание это переживёт без рефреша (init решит: CookiesExpired vs SiteNotReady).
+                # Реальный отвал/невосстановление дойдёт до cookies-канала из _recover_otc_cookies.
+                logger.warning(f'OTC: сессия не отвечает в рантайме ({reason}) — пересоздаю браузер')
                 manager = await _recreate_browser(manager)
                 if manager is None:  # остановлены сигналом во время пересоздания
                     break
