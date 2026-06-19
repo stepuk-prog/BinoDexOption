@@ -308,3 +308,60 @@ class Database:
         sql = "UPDATE program.programdata SET status = false WHERE program_id = $1"
         return await self.execute_query(sql, program_id, fetch_mode='execute',
                                         func='close_program', db='program')
+
+    # -------------------- Прокси (OTC-фолбэк, Program.settings.proxy_data) --------------------
+    # Общий пул прокси со статистикой/банами; используется когда прямой режим не поднял front-end
+    # binodex (напр. отравленный CDN-эдж). Контракт совпадает с проектом Screens (общая таблица).
+
+    async def get_active_proxies(self):
+        """Активные прокси из Program.settings.proxy_data. Истёкшие баны авто-возвращаются,
+        long_ban исключены всегда. Сортировка priority↓, last_used↑ — равномерная нагрузка между
+        процессами/нодами. list[Record(ip, port, login, password)] | [] | False."""
+        sql = '''
+            SELECT ip, port, login, password
+            FROM settings.proxy_data
+            WHERE is_active = true
+              AND long_ban = false
+              AND (is_banned = false OR banned_until < now())
+            ORDER BY priority DESC, last_used_at ASC NULLS FIRST
+        '''
+        return await self.execute_query(sql, fetch_mode='all',
+                                        func='get_active_proxies', db='program')
+
+    async def ban_proxy(self, ip: str, ttl_seconds: int = 600):
+        """Временный бан прокси (failover-координация между процессами/нодами): сдохший/севший
+        на битый колокейшен прокси выпадает из выборки на ttl_seconds для всех."""
+        sql = '''
+            UPDATE settings.proxy_data
+            SET is_banned = true,
+                banned_until = now() + make_interval(secs => $2),
+                failed_requests = failed_requests + 1,
+                last_failure_at = now(),
+                last_used_at = now(),
+                updated_at = now()
+            WHERE ip = $1
+        '''
+        return await self.execute_query(sql, ip, ttl_seconds, fetch_mode='execute',
+                                        func='ban_proxy', db='program')
+
+    async def update_proxy_stats(self, ip: str, success: bool = True):
+        """Статистика прокси. При успехе снимаем бан (кроме long_ban)."""
+        if success:
+            sql = '''
+                UPDATE settings.proxy_data
+                SET total_requests = total_requests + 1,
+                    successful_requests = successful_requests + 1,
+                    last_success_at = now(), last_used_at = now(),
+                    is_banned = false, banned_until = null, updated_at = now()
+                WHERE ip = $1 AND long_ban = false
+            '''
+        else:
+            sql = '''
+                UPDATE settings.proxy_data
+                SET total_requests = total_requests + 1,
+                    failed_requests = failed_requests + 1,
+                    last_failure_at = now(), last_used_at = now(), updated_at = now()
+                WHERE ip = $1
+            '''
+        return await self.execute_query(sql, ip, fetch_mode='execute',
+                                        func='update_proxy_stats', db='program')

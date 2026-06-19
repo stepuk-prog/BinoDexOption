@@ -431,8 +431,10 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     Всегда бросает:
       • видна форма логина → CookiesExpired (отвал кук → релогин);
       • формы нет, market-WS молчит браузер-фри (feed_alive=False) → FeedOutage (аутэйдж фида);
-      • формы нет, фид ЖИВ, error-boundary «Something went wrong» (апп упал на буте) → CookiesExpired;
-      • формы нет, фид ЖИВ, нет privy:token (Privy очистил → Demo) → CookiesExpired (сессия мертва);
+      • формы нет, фид ЖИВ, нет privy:token (Privy очистил → Demo) → CookiesExpired (сессия мертва, релогин);
+      • формы нет, фид ЖИВ, токен ЕСТЬ, error-boundary «Something went wrong» → SetupError(mounted=False):
+        front-end аутэйдж (JS-бандл/чанк не загрузился, напр. отравленный CDN-кэш) — релогин бесполезен,
+        выживаем с бэкоффом, без выхода;
       • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл СМОНТИРОВАН → SetupError(mounted=True): сменились
         селекторы → N ретраев → плановый выход;
       • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл НЕ смонтировался (сплеш) → SetupError(mounted=False):
@@ -442,11 +444,19 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     from apps.binodex_feed import feed_alive  # лениво: модуль тянет browser_config (bootstrap)
     if not await feed_alive():
         raise FeedOutage(f'binodex OTC: {detail} + market-WS молчит браузер-фри — аутэйдж binodex')
-    if await _error_boundary_shown(page):
-        raise CookiesExpired(f'binodex OTC: {detail} + «Something went wrong» (апп упал на буте) — '
-                             f'битая сессия, релогин')
+    # Токен очищен (Privy сбросил протухшую сессию на буте) → реальная смерть сессии → релогин.
+    # Проверяем ДО error-boundary: иначе «Something went wrong» поверх мёртвой сессии увёл бы в
+    # выживание-без-релогина вместо восстановления кук.
     if not await _privy_authenticated(page):
         raise CookiesExpired(f'binodex OTC: {detail} + нет privy:token (Demo) — сессия протухла')
+    # Токен ЖИВ, но апп упал с error-boundary «Something went wrong» — это НЕ битая сессия (релогин
+    # её не чинит: логинится успешно, апп падает снова), а front-end аутэйдж: JS-бандл/ленивый чанк
+    # не загрузился (напр. отравленный CDN-кэш отдаёт index.html вместо .js — был такой инцидент на
+    # AMS-эдже Cloudflare). → SetupError(mounted=False): выживаем с бэкоффом, без релогина и выхода.
+    if await _error_boundary_shown(page):
+        raise SetupError(f'binodex OTC: {detail} + «Something went wrong» при живом токене — '
+                         f'front-end аутэйдж binodex (JS-бандл/чанк не загрузился, напр. CDN-кэш)',
+                         mounted=False)
     if await _app_shell_mounted(page):
         raise SetupError(f'binodex OTC: {detail}, фид жив, токен есть, апп смонтирован — '
                          f'сменились селекторы binodex')

@@ -28,6 +28,7 @@ logger = init_logger(__name__)
 INIT_RETRY_DELAY = 10
 SETUP_ATTEMPTS = 3  # попыток поднять/настроить OTC-сайт (SetupError mounted=True, селекторы) перед плановым выходом
 SETUP_OUTAGE_BACKOFF = 300  # сек паузы при front-end аутэйдже binodex (SetupError mounted=False) — выживаем, не выходим
+PROXY_BAN_TTL = 600  # сек: бан OTC-прокси, не поднявшего front-end (битый колокейшен/дохлый прокси)
 COOKIES_RETRY_DELAY_FAST = 120     # TV
 COOKIES_RETRY_DELAY_SLOW = 300     # TV
 COOKIES_FAST_ATTEMPTS = 5          # TV
@@ -39,6 +40,11 @@ _otc_recover_cycles = 0
 # Событие остановки (SIGTERM/SIGINT). Глобально — чтобы cookies-backoff (до 300с) в
 # _init_with_retry прерывался сигналом, а не ждал SIGKILL. Ставится в bot() ДО первого init.
 _stop_event: asyncio.Event | None = None
+# OTC: прокси-фолбэк. False = прямой режим (дефолт). Включается, когда прямой режим не поднял
+# front-end binodex (SetupError mounted=False — напр. отравленный CDN-эдж); прокси из
+# settings.proxy_data через локальный релей. Sticky до перезапуска процесса (рестарт сам заново
+# пробует direct — решение по дизайну). FIN/TradingView фолбэк не использует.
+_use_proxy = False
 
 
 def _reset_cookie_fails():
@@ -104,18 +110,47 @@ async def _recover_otc_cookies() -> bool:
     return True
 
 
+async def _ban_current_proxy() -> None:
+    """Текущий OTC-прокси не поднял front-end (битый колокейшен/дохлый) → бан в БД + перечитка
+    пула (забаненный выпадает из выборки) → следующий init возьмёт другой. Сбой бана не критичен."""
+    from settings.proxy import get_current_proxy, load_proxies_from_db
+    proxy = get_current_proxy()
+    if proxy is None:
+        return
+    try:
+        await database.ban_proxy(proxy.ip, PROXY_BAN_TTL)
+        await load_proxies_from_db(database)  # перечитать пул без забаненного
+        logger.warning(f'OTC-прокси: {proxy.ip} забанен на {PROXY_BAN_TTL // 60} мин '
+                       f'(не поднял front-end) — ротация на следующий')
+    except (Exception,) as err:
+        logger.warning(f'OTC-прокси: бан {proxy.ip} не удался: {err}')
+
+
+async def _mark_proxy_success() -> None:
+    """Текущий OTC-прокси поднял рабочий init → плюс в статистику (и снятие бана)."""
+    from settings.proxy import get_current_proxy
+    proxy = get_current_proxy()
+    if proxy is None:
+        return
+    try:
+        await database.update_proxy_stats(proxy.ip, success=True)
+    except (Exception,):
+        pass
+
+
 async def _init_with_retry():
     """init_load с обработкой отвала cookies. OTC (§4.3): CookiesExpired → авто-восстановление
     рефрешером (3 попытки → иначе выход). TV: Survive-backoff (сообщение + пауза, на повторе init
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
+    global _use_proxy
     setup_streak = 0  # подряд идущих SetupError (UI/селекторы) — до SETUP_ATTEMPTS, потом выход
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
         try:
-            manager = await init_load()
+            manager = await init_load(use_proxy=_use_proxy)
         except FeedOutage as error:
             # OTC: авторизация жива, но market-WS молчит браузер-фри — аутэйдж binodex (детектор уже
             # подтвердил feed_alive=False), НЕ отвал кук. Ждём возврат фида БРАУЗЕР-ФРИ (без рефреша,
@@ -126,12 +161,28 @@ async def _init_with_retry():
             continue
         except SetupError as error:
             if not error.mounted:
-                # OTC: апп-шелл binodex не смонтировался (висящий загрузочный сплеш — JS-бандл/фронт
-                # не поднялся, хотя /trade и WS-фид живы). Это front-end АУТЭЙДЖ binodex, НЕ селекторы
-                # и НЕ куки → выживаем: пауза + новый init, без выхода и без счётчика setup_streak
-                # (иначе транзиентный аут сайта валил бы бота). §4.5.
-                logger.warning(f'OTC: binodex висит на сплеше (апп не смонтировался) — front-end '
-                               f'аутэйдж, пауза {SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
+                # OTC: front-end binodex не поднялся при живых /trade+WS+токене — либо завис на
+                # загрузочном сплеше (JS-бандл не смонтировался), либо упал в error-boundary
+                # «Something went wrong» (ленивый чанк не загрузился, напр. отравленный CDN-кэш).
+                # И то и другое — front-end АУТЭЙДЖ binodex, НЕ селекторы и НЕ куки (релогин не чинит).
+                if not binary and not _use_proxy:
+                    # Прямой режим не поднял front-end → включаем прокси-фолбэк (sticky до
+                    # перезапуска) и СРАЗУ ретраим, без долгого backoff: прокси может сесть на
+                    # здоровый CF-колокейшен в обход битого (settings.proxy_data). §4.5.
+                    _use_proxy = True
+                    logger.report(f'OTC: прямой режим не поднял front-end binodex — перехожу на '
+                                  f'прокси-фолбэк (settings.proxy_data): {error}')
+                    continue
+                if not binary:  # уже на прокси и снова аутэйдж → прокси сел на битый колокейшен/мёртв
+                    await _ban_current_proxy()
+                    logger.warning(f'OTC: прокси не поднял front-end binodex — ротация, пауза '
+                                   f'{SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
+                    if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
+                        return None
+                    continue
+                # FIN: прокси не применяем — прежнее поведение (выживание с backoff)
+                logger.warning(f'front-end не поднялся — аутэйдж, пауза {SETUP_OUTAGE_BACKOFF // 60} '
+                               f'мин, выживаю: {error}')
                 if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
                     return None
                 continue
@@ -160,7 +211,11 @@ async def _init_with_retry():
             continue  # пересоздаём на новом витке — init перечитает куки
         if manager:
             _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
+            if _use_proxy:
+                await _mark_proxy_success()  # прокси поднял рабочий init → плюс в статистику
             return manager
+        if not binary and _use_proxy:
+            await _ban_current_proxy()  # на прокси init провалился (вероятно прокси мёртв) → бан+ротация
         logger.error(f'init_load провалился — пауза {INIT_RETRY_DELAY}с и повтор')
         if await _interruptible_sleep(INIT_RETRY_DELAY):
             return None

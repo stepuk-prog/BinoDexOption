@@ -240,16 +240,46 @@ STEALTH_JS = """
 """
 
 
-async def init_browser(storage_state=None) -> BrowserInitResult:
+async def _proxy_launch_options() -> dict:
+    """browser_launch_options + прокси из Program.settings.proxy_data через локальный релей
+    (settings/local_proxy — Firefox+Playwright ненадёжно жуёт proxy-auth напрямую). Выбранный
+    прокси запоминается в settings.proxy.current_proxy — main по нему ведёт stats/ban. Сбой
+    подбора/релея → базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
+    from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list
+    from settings.local_proxy import start_local_proxy
+    if not proxy_list:
+        await load_proxies_from_db(database)
+    proxy = get_unused_proxy()
+    if not proxy:
+        logger.error('OTC-прокси: нет активных прокси (settings.proxy_data) — поднимаю напрямую')
+        return browser_launch_options
+    opts = browser_launch_options.copy()
+    if proxy.login and proxy.password:
+        host, port = start_local_proxy(proxy.ip, proxy.port, proxy.login, proxy.password)
+        if not host:
+            logger.error(f'OTC-прокси: локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
+            return browser_launch_options
+        opts['proxy'] = {'server': f'http://{host}:{port}'}
+        logger.report(f'OTC: браузер через прокси {proxy.ip}:{proxy.port} (релей {host}:{port})')
+    else:
+        opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
+        logger.report(f'OTC: браузер через прокси {proxy.ip}:{proxy.port}')
+    return opts
+
+
+async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserInitResult:
     """Инициализация браузера Playwright.
     storage_state — свежий OTC Privy-стейт из БД (Survive §4.3); None → фоллбэк на
-    import-снимок cookies (для probe-скриптов, что зовут init_browser() без БД-перечитки)."""
+    import-снимок cookies (для probe-скриптов, что зовут init_browser() без БД-перечитки).
+    use_proxy — OTC-фолбэк: поднять браузер через прокси из settings.proxy_data (когда прямой
+    режим не поднял front-end binodex — напр. отравленный CDN-эдж). См. _proxy_launch_options."""
     state = storage_state if storage_state is not None else cookies
+    launch_options = await _proxy_launch_options() if use_proxy else browser_launch_options
     pw = None
     browser = None
     try:
         pw = await async_playwright().start()
-        browser = await pw.firefox.launch(**browser_launch_options)
+        browser = await pw.firefox.launch(**launch_options)
         # OTC (binodex): контекст со storage_state (Privy держит сессию в localStorage,
         # одних cookies мало). FIN (TV): обычный контекст, куки добавляются позже add_cookies.
         if not binary and isinstance(state, dict):
@@ -535,7 +565,7 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
         await close_program(manager=manager, status=1, text=f"Ошибка загрузки данных в браузер - {error}")
 
 
-async def init_load() -> BrowserManager | bool:
+async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
     """
     Запуск загрузки и настройки браузера. Survive §4.3: куки перечитываются из БД на
     КАЖДОМ init — пересоздание браузера после отвала cookies подхватывает свежий refresh
@@ -555,7 +585,8 @@ async def init_load() -> BrowserManager | bool:
             logger.error('Нет storage_state OTC (ни в БД, ни в import-снимке) — init провалился')
             return False
 
-    result = await init_browser(storage_state=storage_state)
+    # use_proxy — только OTC-фолбэк (FIN/TradingView — другой домен, не задет инцидентом)
+    result = await init_browser(storage_state=storage_state, use_proxy=(use_proxy and not binary))
     if not result.success:
         logger.error(result.manager_or_error)
         return False
