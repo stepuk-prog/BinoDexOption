@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### 2026-06-20 — DB: устойчивость к read-only после Patroni failover (`database/database.py`)
+- **Контекст.** После Patroni failover старый лидер демотится в read-only standby, а PgBouncer ещё
+  какое-то время раздаёт серверные соединения к нему → `UPDATE` падает `ReadOnlySQLTransactionError`
+  («в транзакции в режиме „только чтение“ нельзя выполнить UPDATE»). Симптом 2026-06-20: OTC-экземпляры
+  3m/5m спамили сбой в `plus_counter` (пул `binodex`) — писали в `option_data.counter` ровно в окно failover.
+- **Что сделано.**
+  - `ReadOnlySQLTransactionError` добавлена в восстановимую ветку `execute_query` (+ маркеры строк
+    `"read-only transaction"`/`"только чтение"` в `_PGBOUNCER_RECOVERABLE`): теперь это **ретрай**
+    (новая транзакция уедет на нового writable-лидера) + пересоздание пула, а не терминальный `return False`.
+  - **RW-aware health-check** в `_recreate_pool`: вместо `SELECT 1` (проходит и на RO-реплике →
+    пересоздание ошибочно скипалось → залипание на read-only-strand) — `SELECT NOT pg_is_in_recovery()`;
+    скип только если бэкенд реально writable.
+- **Семейный фикс.** Та же правка применена во всех ~20 проектах семьи (asyncpg + psycopg2-вариант
+  `ReadOnlySqlTransaction`); рекуррентный инцидент (Screens/BinodexScreens лечили 2026-06-03).
+
 ### 2026-06-14 — OTC: сбой сайта не рестартит процесс — единая логика «сайт не даёт работать → ждём» (`apps/main_app.py`)
 - **Контекст.** Все OTC-экземпляры спамили `‼️Аварийный выход … Перегружаюсь` каждые ~3 мин в
   тест-режиме binodex: при неснятом первом кадре («нет цены графика OTC» — `chartData` пуст и WS не
