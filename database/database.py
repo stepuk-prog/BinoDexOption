@@ -15,7 +15,7 @@ from typing import Awaitable, cast
 
 import asyncpg
 from asyncpg.exceptions import (CannotConnectNowError, ConnectionDoesNotExistError,
-                                InterfaceError)
+                                InterfaceError, ReadOnlySQLTransactionError)
 
 from logs import init_logger
 from settings.database_config import (DB_NAMES, init_json_codec, pg_user,
@@ -29,6 +29,11 @@ _PGBOUNCER_RECOVERABLE = (
     "server closed the connection unexpectedly",
     "terminating connection due to administrator command",
     "canceling statement due to",
+    # После Patroni failover старый лидер демотится в read-only standby; PgBouncer ещё
+    # раздаёт серверные соединения к нему → UPDATE падает «read-only transaction». Лечится
+    # ретраем (новая транзакция → writable-лидер) + пересозданием пула — поэтому recoverable.
+    "read-only transaction",
+    "только чтение",
 )
 
 # Таймаут ожидания свободного соединения из пула (правило: не зависать).
@@ -115,8 +120,13 @@ class Database:
             if pool is not None:
                 try:
                     async with pool.acquire(timeout=_ACQUIRE_TIMEOUT) as conn:
-                        await conn.fetchval("SELECT 1")
-                    return
+                        # RW-aware health-check: «SELECT 1» проходит и на RO-реплике, поэтому после
+                        # Patroni failover (старый лидер → standby) пул мог «пройти» проверку и НЕ
+                        # пересоздаться → залип бы на read-only-strand. Проверяем именно writable
+                        # (бэкенд НЕ в recovery); RO — не скипаем, идём пересоздавать.
+                        writable = await conn.fetchval("SELECT NOT pg_is_in_recovery()")
+                    if writable:
+                        return
                 except (Exception,):
                     pass
             try:
@@ -171,6 +181,7 @@ class Database:
                     self._last_series_logged = False
                     return res
             except (InterfaceError, CannotConnectNowError, ConnectionDoesNotExistError,
+                    ReadOnlySQLTransactionError,
                     ConnectionError, OSError, TimeoutError, asyncio.TimeoutError) as error:
                 # ConnectionError/OSError ловят встроенный ConnectionError('unexpected
                 # connection_lost() call') из asyncpg — без них он провалился бы в общий
