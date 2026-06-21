@@ -5,4 +5,4 @@ python-dotenv~=1.2.2
 pyrofork~=2.3.69
 tgcrypto-pyrofork~=1.2.8
 aiogram==3.28.2
-asyncpg~=0.31.0
+asyncpg~=0.31
