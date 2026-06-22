@@ -7,6 +7,7 @@ from pyrogram.errors import Unauthorized
 from logs import init_logger
 from settings.timing import (LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY, SHUTDOWN_STEP_TIMEOUT,
                              STATUS_WRITE_TIMEOUT)
+from settings.constant import EXIT_USERBOT
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -79,9 +80,10 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     """
     Полное закрытие программы: браузер → юзербот → БД (пулы+соединения) → aiogram.
     :param manager: BrowserManager — для отключения браузера (None на ранних выходах)
-    :param status: 0 — штатное завершение, 1 — на перезагрузку
+    :param status: код выхода (sys.exit) — его читает диспетчер. 0 — штатно, 1 — краш/перезагрузка,
+                   10/11/12/13 — browser/cookies/setup/userbot (таксономия в settings/constant.py)
     :param text: текст, отправляемый с завершением/ошибкой
-    :param cookies: ошибка от падения cookies
+    :param cookies: ошибка от падения cookies (легаси-флаг; пауза перед рестартом при status=1)
     """
     # 1. Браузер (на ранних выходах manager может отсутствовать)
     if manager is not None:
@@ -112,15 +114,14 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
 
 async def session_dead_shutdown(error, reason: str = ''):
     """
-    session юзербота недоступна → штатный стоп: ошибка в error-канал, критичный алерт в
-    ВЫДЕЛЕННЫЙ session-канал (НЕ cookies — иначе поток cookies похоронит алерт, §3.3),
-    запись status=false в БД (громко, §1.1), graceful-выход (status=0, без рестарта, пока
-    не обновят session). Вызывается на старте (мёртвый ключ или нет переподключения за N
-    попыток) и при отвале во время работы.
+    session юзербота недоступна → стоп с кодом EXIT_USERBOT: ошибка в error-канал, критичный
+    алерт в ВЫДЕЛЕННЫЙ session-канал (НЕ cookies — иначе поток cookies похоронит алерт, §3.3),
+    exit(EXIT_USERBOT) → диспетчер инициирует реавторизацию (scripts/reauth_userbot.py). status
+    НЕ трогаем (инвариант: status=false — только плановый weekend-выход binary). Вызывается на
+    старте (мёртвый ключ или нет переподключения за N попыток) и при отвале во время работы.
     """
-    from settings.config import program_id  # lazy — избегаем циклических импортов
     suffix = f" ({reason})" if reason else ''
     logger.error(f"Недоступна session юзербота{suffix}: {error}")
-    logger.session(f"🔒 Отвал юзербота — session недоступна{suffix}, требуется обновление данных. Останавливаюсь.")
-    await write_status_offline(program_id)
-    await close_program(manager=None, status=0, text="Отвал юзербота (session) 🔒")
+    logger.session(f"🔒 Отвал юзербота — session недоступна{suffix}, требуется реавторизация. Останавливаюсь.")
+    await close_program(manager=None, status=EXIT_USERBOT,
+                        text=f"Отвал юзербота (session) 🔒 (код {EXIT_USERBOT})")

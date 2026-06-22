@@ -16,6 +16,7 @@ from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
 from settings.timing import (USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, TG_SEND_TIMEOUT,
                              USERBOT_CONNECT_TIMEOUT)
+from settings.constant import EXIT_BROWSER, EXIT_COOKIES, EXIT_SETUP, BROWSER_MAX_ATTEMPTS
 
 logger = init_logger(__name__)
 
@@ -29,6 +30,12 @@ INIT_RETRY_DELAY = 10
 SETUP_ATTEMPTS = 3  # попыток поднять/настроить OTC-сайт (SetupError mounted=True, селекторы) перед плановым выходом
 SETUP_OUTAGE_BACKOFF = 300  # сек паузы при front-end аутэйдже binodex (SetupError mounted=False) — выживаем, не выходим
 PROXY_BAN_TTL = 600  # сек: бан OTC-прокси, не поднявшего front-end (битый колокейшен/дохлый прокси)
+# OTC: сколько front-end-аутэйджей подряд в прокси-режиме терпим (перебирая прокси), прежде чем
+# переотбить ПРЯМОЙ режим. Прокси-фолбэк рассчитан на отравленный CDN-эдж (прокси садится на
+# здоровый колокейшен в обход битого); но если лёг сам front-end binodex (аутэйдж), прокси не
+# помогут — нельзя залипать в карусели навсегда: каждые N неудач возвращаемся на direct, чтобы
+# поймать восстановление (иначе нода не оживёт без рестарта процесса — латч). §4.5.
+PROXY_REPROBE_AFTER = 3
 COOKIES_RETRY_DELAY_FAST = 120     # TV
 COOKIES_RETRY_DELAY_SLOW = 300     # TV
 COOKIES_FAST_ATTEMPTS = 5          # TV
@@ -42,9 +49,13 @@ _otc_recover_cycles = 0
 _stop_event: asyncio.Event | None = None
 # OTC: прокси-фолбэк. False = прямой режим (дефолт). Включается, когда прямой режим не поднял
 # front-end binodex (SetupError mounted=False — напр. отравленный CDN-эдж); прокси из
-# settings.proxy_data через локальный релей. Sticky до перезапуска процесса (рестарт сам заново
-# пробует direct — решение по дизайну). FIN/TradingView фолбэк не использует.
+# settings.proxy_data через локальный релей. НЕ sticky навсегда: после PROXY_REPROBE_AFTER неудач
+# подряд прокси-режим сбрасывается обратно в direct (переотбивка — front-end мог восстановиться,
+# иначе нода залипает до рестарта). FIN/TradingView фолбэк не использует.
 _use_proxy = False
+# OTC: счётчик front-end-аутэйджей подряд в прокси-режиме (для переотбивки direct). Сбрасывается
+# при успешном init и при каждом новом заходе в прокси-режим.
+_proxy_outage_streak = 0
 
 
 def _reset_cookie_fails():
@@ -91,8 +102,8 @@ async def _recover_otc_cookies() -> bool:
     """OTC-предохранитель. Сам релогин теперь INLINE в основном браузере (apps/otc_login,
     вызывается из otc_app.init_otc). Сюда CookiesExpired доходит = init не поднялся ДАЖЕ после
     inline-логина. Считаем подряд такие циклы: до RECOVER_ATTEMPTS → продолжаем (новый init снова
-    попробует inline-релогин); исчерпали без единого успешного init → проблема не в куках (сайт
-    лежит) → плановый выход (status=false, диспетчер не рестартит по кругу — §4.3).
+    попробует inline-релогин); исчерпали без единого успешного init → куки не восстановить →
+    exit(EXIT_COOKIES): диспетчер рефрешит куки / рестартит. status НЕ трогаем (инвариант: §4.3).
     :return: True — продолжаем (re-init); False — остановлены сигналом."""
     global _otc_recover_cycles
     if _stop_event is not None and _stop_event.is_set():
@@ -101,9 +112,8 @@ async def _recover_otc_cookies() -> bool:
     if _otc_recover_cycles > RECOVER_ATTEMPTS:
         logger.cookies(f'OTC: {RECOVER_ATTEMPTS} циклов восстановления подряд без успешного init '
                        f'({cook_name_otc}) — релогин не помог. Останавливаю работу')
-        await write_status_offline(program_id)
-        await close_program(manager=None, status=0,
-                            text=f'Не восстановить сессию binodex для {cook_name_otc} 🍪🛑')  # sys.exit
+        await close_program(manager=None, status=EXIT_COOKIES,
+                            text=f'Не восстановить сессию binodex для {cook_name_otc} 🍪🛑 (код {EXIT_COOKIES})')  # sys.exit
         return False  # страховка (close_program делает sys.exit)
     logger.warning(f'OTC: init не поднялся после inline-релогина ({cook_name_otc}), '
                    f'цикл {_otc_recover_cycles}/{RECOVER_ATTEMPTS} — повтор init')
@@ -144,8 +154,9 @@ async def _init_with_retry():
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
-    global _use_proxy
+    global _use_proxy, _proxy_outage_streak
     setup_streak = 0  # подряд идущих SetupError (UI/селекторы) — до SETUP_ATTEMPTS, потом выход
+    browser_fails = 0  # подряд провалов подъёма браузера (НЕ куки/селекторы/прокси) → EXIT_BROWSER
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
@@ -166,17 +177,31 @@ async def _init_with_retry():
                 # «Something went wrong» (ленивый чанк не загрузился, напр. отравленный CDN-кэш).
                 # И то и другое — front-end АУТЭЙДЖ binodex, НЕ селекторы и НЕ куки (релогин не чинит).
                 if not binary and not _use_proxy:
-                    # Прямой режим не поднял front-end → включаем прокси-фолбэк (sticky до
-                    # перезапуска) и СРАЗУ ретраим, без долгого backoff: прокси может сесть на
-                    # здоровый CF-колокейшен в обход битого (settings.proxy_data). §4.5.
+                    # Прямой режим не поднял front-end → включаем прокси-фолбэк и СРАЗУ ретраим, без
+                    # долгого backoff: прокси может сесть на здоровый CF-колокейшен в обход битого
+                    # (settings.proxy_data). Новый заход в прокси-режим → стрик с нуля. §4.5.
                     _use_proxy = True
+                    _proxy_outage_streak = 0
                     logger.report(f'OTC: прямой режим не поднял front-end binodex — перехожу на '
                                   f'прокси-фолбэк (settings.proxy_data): {error}')
                     continue
                 if not binary:  # уже на прокси и снова аутэйдж → прокси сел на битый колокейшен/мёртв
                     await _ban_current_proxy()
-                    logger.warning(f'OTC: прокси не поднял front-end binodex — ротация, пауза '
-                                   f'{SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
+                    _proxy_outage_streak += 1
+                    if _proxy_outage_streak >= PROXY_REPROBE_AFTER:
+                        # Перебрали PROXY_REPROBE_AFTER прокси без mount — это уже не «битый эдж в
+                        # обход», а аутэйдж самого front-end binodex (или весь регион). Прокси не
+                        # спасут → возвращаемся на прямой режим: front-end мог восстановиться, и
+                        # direct оживёт сам, БЕЗ рестарта процесса (фикс латча). §4.5.
+                        _use_proxy = False
+                        _proxy_outage_streak = 0
+                        logger.report(f'OTC: {PROXY_REPROBE_AFTER} прокси подряд не подняли front-end '
+                                      f'— похоже на аутэйдж binodex, не битый эдж; возвращаюсь на '
+                                      f'прямой режим (переотбивка), пауза {SETUP_OUTAGE_BACKOFF // 60} мин')
+                    else:
+                        logger.warning(f'OTC: прокси не поднял front-end binodex — ротация '
+                                       f'({_proxy_outage_streak}/{PROXY_REPROBE_AFTER}), пауза '
+                                       f'{SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
                     if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
                         return None
                     continue
@@ -194,9 +219,8 @@ async def _init_with_retry():
             if setup_streak >= SETUP_ATTEMPTS:
                 logger.cookies(f'OTC: сайт не настраивается за {SETUP_ATTEMPTS} попытки '
                                f'({cook_name_otc}) — нужно ручное вмешательство (селекторы binodex). Останавливаю')
-                await write_status_offline(program_id)
-                await close_program(manager=None, status=0,
-                                    text=f'OTC: сайт не настраивается — проверить селекторы binodex ⚙️🛑')
+                await close_program(manager=None, status=EXIT_SETUP,
+                                    text=f'OTC: сайт не настраивается — проверить селекторы binodex ⚙️🛑 (код {EXIT_SETUP})')
                 return None  # close_program делает sys.exit; страховка
             if await _interruptible_sleep(INIT_RETRY_DELAY):
                 return None
@@ -211,11 +235,24 @@ async def _init_with_retry():
             continue  # пересоздаём на новом витке — init перечитает куки
         if manager:
             _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
+            _proxy_outage_streak = 0  # init поднялся (direct или прокси) → стрик аутэйджей сброшен
+            browser_fails = 0         # браузер поднялся → сбрасываем счётчик провалов подъёма
             if _use_proxy:
                 await _mark_proxy_success()  # прокси поднял рабочий init → плюс в статистику
             return manager
         if not binary and _use_proxy:
-            await _ban_current_proxy()  # на прокси init провалился (вероятно прокси мёртв) → бан+ротация
+            # На прокси init провалился (вероятно прокси мёртв) → бан+ротация; это НЕ поломка
+            # браузера ноды, поэтому browser_fails не трогаем (иначе прокси-карусель ложно дала бы EXIT_BROWSER).
+            await _ban_current_proxy()
+        else:
+            browser_fails += 1
+            if browser_fails >= BROWSER_MAX_ATTEMPTS:
+                # Браузер не поднялся подряд BROWSER_MAX_ATTEMPTS раз (не куки/селекторы/фид/прокси —
+                # те идут своими ветками): нода, вероятно, не может поднять Firefox → отдаём диспетчеру
+                # (failover на другую ноду), exit(EXIT_BROWSER). status НЕ трогаем (инвариант).
+                await close_program(manager=None, status=EXIT_BROWSER,
+                                    text=f'Браузер не поднялся {BROWSER_MAX_ATTEMPTS}× — отдаю ноду диспетчеру ☄️ (код {EXIT_BROWSER})')
+                return None  # close_program делает sys.exit; страховка
         logger.error(f'init_load провалился — пауза {INIT_RETRY_DELAY}с и повтор')
         if await _interruptible_sleep(INIT_RETRY_DELAY):
             return None
@@ -337,14 +374,12 @@ async def bot():
     # ждём фид браузер-фри (apps/binodex_feed) и стартуем, только когда котировки вернутся.
     if not binary and not await feed_alive():
         if not await _await_binodex_feed(at_start=True):
-            await write_status_offline(program_id)
             await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
             return
 
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
     manager = await _init_with_retry()
     if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
-        await write_status_offline(program_id)
         await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
         return
 
@@ -427,10 +462,10 @@ async def bot():
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
                 return
 
-    # Сюда — только по SIGTERM/SIGINT: помечаем программу остановленной (status=false)
-    # и чисто закрываемся. Юзербот гасит сам close_program (_close_userbot с таймаутом);
-    # единственное сообщение о закрытии шлёт close_program(text=...) ниже.
-    await write_status_offline(program_id)
+    # Сюда — только по SIGTERM/SIGINT: чисто закрываемся с кодом 0 (штатная остановка извне).
+    # status НЕ трогаем (инвариант: status=false выставляет только плановый weekend-выход binary;
+    # стоп инициировал диспетчер — он сам управляет своим состоянием). Юзербот гасит сам
+    # close_program (_close_userbot с таймаутом); единственное сообщение о закрытии — ниже.
     await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
 
 

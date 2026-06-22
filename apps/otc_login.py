@@ -34,8 +34,17 @@ CODE_POLL_EVERY = 3
 
 REQUIRED_LOGIN_SELECTORS = ("login_open", "login_email", "login_submit", "login_code_inputs")
 
+IMAP_OP_TIMEOUT = 30   # сек на одну IMAP-операцию в потоке (connect-таймаут 20с покрывает только connect)
 
-# ── IMAP / код Privy (sync — зовём через asyncio.to_thread) ───────────────────────────────────
+
+async def _imap_thread(fn, *args, timeout: int = IMAP_OP_TIMEOUT):
+    """IMAP-операция в потоке под жёстким потолком: зависший сервер в середине сессии не вешает
+    async-флоу навсегда (поток-сирота добьётся сокет-таймаутом). asyncio.to_thread сам не
+    отменяем, но await вернётся по таймауту → флоу не залипает."""
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout)
+
+
+# ── IMAP / код Privy (sync — зовём через _imap_thread: to_thread + потолок) ───────────────────
 def _imap_connect(mail: str, app_pass: str) -> imaplib.IMAP4_SSL:
     imap = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=20)
     imap.login(mail, app_pass)
@@ -172,12 +181,12 @@ async def otc_inline_login(page: Page, context: BrowserContext,
     landing = sel.get('landing_url') or URL_LANDING
     trade = sel.get('trade_url') or URL_TRADE
     try:
-        imap = await asyncio.to_thread(_imap_connect, mail, app_pass)
+        imap = await _imap_thread(_imap_connect, mail, app_pass)
     except (Exception,) as err:
         logger.error(f'OTC inline-логин: не подключиться к почте (IMAP) — {err}')
         return False
     try:
-        baseline = set(await asyncio.to_thread(_privy_uids, imap))   # старые коды — игнор
+        baseline = set(await _imap_thread(_privy_uids, imap))   # старые коды — игнор
         await _goto_retry(page, landing)
         await _clear_session(page, context)
         await _goto_retry(page, landing)  # перезагрузка начисто
@@ -189,7 +198,8 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         except PWTimeout:
             await page.locator(sel["login_submit"]).first.click(timeout=8000)
             await _wait_code_inputs(page, sel["login_code_inputs"], 15000)
-        code = await asyncio.to_thread(_wait_for_code, imap, baseline)
+        code = await _imap_thread(_wait_for_code, imap, baseline,
+                                  timeout=CODE_WAIT_SECONDS + IMAP_OP_TIMEOUT)
         await _enter_code(page, sel["login_code_inputs"], code)
         await page.wait_for_function(
             "() => !!window.localStorage.getItem('privy:token')", timeout=30000)
@@ -197,11 +207,14 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         if not page.url.rstrip("/").endswith("/trade"):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
             return False
-        await asyncio.to_thread(_purge_privy, imap)
+        await _imap_thread(_purge_privy, imap)
         logger.report('OTC: inline-релогин binodex успешен')
         return True
     except (Exception,) as err:
         logger.warning(f'OTC inline-логин не удался: {err}')
         return False
     finally:
-        await asyncio.to_thread(_safe_logout, imap)
+        try:
+            await _imap_thread(_safe_logout, imap, timeout=15)
+        except (Exception,):
+            pass  # logout под потолком; зависший сервер не должен держать выход из флоу

@@ -12,6 +12,21 @@ bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах
 
+# Коды выхода процесса — их читает диспетчер (WD/systemd) и принимает решения. ВАЖНО (инвариант):
+# programdata.status=false (write_status_offline) выставляет ТОЛЬКО плановый weekend-выход binary;
+# сбойные коды ниже status НЕ трогают — диспетчер сам решает по коду.
+#   0  — штатная остановка извне (SIGTERM/SIGINT): диспетчер ничего не делает;
+#   1  — непредвиденный краш: рестарт;
+#   10 — браузер не поднялся BROWSER_MAX_ATTEMPTS раз подряд → failover на другую ноду;
+#   11 — куки протухли и авто-релогин (RECOVER_ATTEMPTS) не помог → рефреш куков / рестарт;
+#   12 — сайт binodex не настроился при живых куках (вероятно сменились селекторы) → нужен человек;
+#   13 — отвал session Pyrogram-юзербота → реавторизация (scripts/reauth_userbot.py).
+EXIT_BROWSER = 10
+EXIT_COOKIES = 11
+EXIT_SETUP = 12
+EXIT_USERBOT = 13
+BROWSER_MAX_ATTEMPTS = 3    # подъёмов браузера подряд; больше биться смысла нет → exit(EXIT_BROWSER)
+
 # Таблицы таймфреймов (перенесены из Data_set.py)
 spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минута'},
                  {'timeframe': '3m', 'search_tf': '300', 'name_tf': '3 минуты'},

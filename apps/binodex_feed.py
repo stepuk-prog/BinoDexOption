@@ -25,6 +25,7 @@ _HEADERS = {'Origin': otc_ws_origin, 'User-Agent': 'Mozilla/5.0'}  # origin из
 FEED_PROBE_PAIR = 'EUR/USD'   # дефолтная пара — присутствует всегда
 FEED_ALIVE_TIMEOUT = 10.0     # сколько ждать первого ценового кадра в одной попытке
 FEED_WAIT_POLL = 30.0         # пауза между попытками в wait_for_feed (аутэйдж тянется минутами)
+FEED_WAIT_HEARTBEAT = 600.0   # как часто логировать «фид всё ещё молчит» при затяжном ожидании
 
 
 def _subscribe_frame(pair: str) -> str:
@@ -71,8 +72,12 @@ async def feed_alive(pair: str = FEED_PROBE_PAIR, timeout: float = FEED_ALIVE_TI
 async def wait_for_feed(stop_event=None, pair: str = FEED_PROBE_PAIR) -> bool:
     """Ждать, пока binodex снова начнёт отдавать котировки (браузер не держим). Возвращает
     True — фид вернулся; False — прервано stop_event (SIGTERM). Уведомления «вниз/вверх» —
-    на вызывающем (шлёт ОДНО сообщение до и одно после)."""
-    while not (stop_event is not None and stop_event.is_set()):
+    на вызывающем (шлёт ОДНО сообщение до и одно после).
+    Heartbeat в лог раз в ~10 мин ожидания — чтобы затяжное молчание фида (в т.ч. смена протокола
+    binodex) не было «серым отказом» без следов."""
+    waited = 0.0
+    next_heartbeat = FEED_WAIT_HEARTBEAT   # порог следующего лога; растёт окнами — не зависит от
+    while not (stop_event is not None and stop_event.is_set()):   # кратности HEARTBEAT/POLL
         if await feed_alive(pair):
             return True
         if stop_event is not None:
@@ -83,4 +88,8 @@ async def wait_for_feed(stop_event=None, pair: str = FEED_PROBE_PAIR) -> bool:
                 pass
         else:
             await asyncio.sleep(FEED_WAIT_POLL)
+        waited += FEED_WAIT_POLL
+        if waited >= next_heartbeat:
+            logger.warning(f'wait_for_feed: фид binodex молчит уже ~{int(waited // 60)} мин (pair={pair})')
+            next_heartbeat += FEED_WAIT_HEARTBEAT
     return False
