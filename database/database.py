@@ -10,7 +10,6 @@
 """
 import asyncio
 import random
-import time
 from typing import Awaitable, cast
 
 import asyncpg
@@ -156,7 +155,6 @@ class Database:
         каждой ошибке. `_ensure_pool` поднимает пул, если он None (в т.ч. после
         проваленного recreate) — иначе запрос навсегда отдавал бы False."""
         for attempt in range(1, retries + 1):
-            t0 = time.monotonic()
             recoverable_err = None
             try:
                 await self._ensure_pool(db)
@@ -197,10 +195,6 @@ class Database:
                     # обязывает вернуть False, но стек НЕ теряем (иначе реальные баги невидимы).
                     logger.error(f"Непредвиденная SQL-ошибка в {func} (пул '{db}'): {msg}", exc_info=True)
                     return False
-            finally:
-                elapsed = (time.monotonic() - t0) * 1000
-                if elapsed > 300:
-                    logger.warning(f"slow SQL [{func}, {db}] {elapsed:.0f} ms")
 
             # сюда — только при восстановимой ошибке (иначе уже вернули результат/False)
             logger.warning(f"Соединение пула '{db}' разорвано в {func} ({attempt}/{retries}): {recoverable_err}")
