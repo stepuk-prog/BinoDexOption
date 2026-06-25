@@ -339,7 +339,11 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     :return: словарь с данными для опциона
     """
     active_binary_list = await database.option_data_tv(tf=log_data.find_timeframe, exclude_ids=used_val)
-    if not active_binary_list:  # None или пустой список
+    if active_binary_list is False:  # сбой пула (контракт execute_query) — это отвал БД, НЕ «нет пар»
+        await close_program(manager=manager, status=1,
+                            text='Сбой БД при чтении пар (option_data_tv) — перезапуск')
+        return False  # close_program вызывает sys.exit, но на всякий случай
+    if not active_binary_list:  # пустой список — реально нет валютных пар для опциона
         await close_program(manager=manager, status=1, text='Не найдено валютных пар для опциона')
         return False  # close_program вызывает sys.exit, но на всякий случай
 
