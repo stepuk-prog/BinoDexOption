@@ -25,11 +25,25 @@ _SESSION_FAIL_MARKERS = (
     'NO SUCH FILE OR DIRECTORY',   # .session-файл пропал (тест-режим)
 )
 
+# AUTH_KEY_DUPLICATED (406) — НЕ смерть ключа, а конкурентный доступ: тот же ключ
+# одновременно держит другая нода (перехлёст при failover). Отпускается сам, как только
+# второй клиент отключается → ключ снова валиден. Поэтому при отвале на СТАРТЕ его ретраим
+# перед эскалацией (см. main.py, ветка B), а не хороним сразу как UNREGISTERED/REVOKED.
+# Маркер остаётся и в _SESSION_FAIL_MARKERS: после исчерпания ретраев это всё равно отвал
+# session (плановый выход с кодом EXIT_USERBOT).
+_SESSION_RECOVERABLE_MARKERS = ('AUTH_KEY_DUPLICATED',)
+
 
 def session_failed(error: BaseException) -> bool:
     """session юзербота доказано мертва: тип Unauthorized ИЛИ строковый маркер (§3.1)."""
     return isinstance(error, Unauthorized) or any(
         m in str(error).upper() for m in _SESSION_FAIL_MARKERS)
+
+
+def session_recoverable(error: BaseException) -> bool:
+    """Отвал session восстановим сам собой (конкурентный доступ к ключу, не его смерть) →
+    на старте ретраить перед фаталом, а не хоронить сразу. См. _SESSION_RECOVERABLE_MARKERS."""
+    return any(m in str(error).upper() for m in _SESSION_RECOVERABLE_MARKERS)
 
 
 async def write_status_offline(program_id: int):

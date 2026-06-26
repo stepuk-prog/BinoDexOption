@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from apps.app import get_water, time_sleep, request_shutdown
 from apps.browser_app import init_load
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
-                           write_status_offline)
+                           session_recoverable, write_status_offline)
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import feed_alive, wait_for_feed
@@ -297,8 +297,10 @@ async def bot():
 
     # Запуск юзербота — две ветки (§3.2). A: ключ доказано мёртв (session_failed) →
     # сразу штатный стоп с записью status=false и session-алертом, без ретраев (каждая
-    # попытка пойдёт с тем же отозванным ключом). B: transient-обрыв (сеть/таймаут) →
-    # до USERBOT_CONNECT_ATTEMPTS попыток; не переподключились → тот же плановый выход.
+    # попытка пойдёт с тем же отозванным ключом). B: transient-обрыв (сеть/таймаут) ИЛИ
+    # AUTH_KEY_DUPLICATED (session_recoverable — ключ занят другой нодой при failover,
+    # отпустится сам) → до USERBOT_CONNECT_ATTEMPTS попыток; не переподключились → тот же
+    # плановый выход (отвал session, код EXIT_USERBOT).
     last_error = None
     for attempt in range(1, USERBOT_CONNECT_ATTEMPTS + 1):
         try:
@@ -307,10 +309,10 @@ async def bot():
             await asyncio.wait_for(app.start(), timeout=USERBOT_CONNECT_TIMEOUT)
             break
         except (Exception,) as error:
-            if session_failed(error):                # ветка A — без ретраев
+            if session_failed(error) and not session_recoverable(error):  # ветка A — без ретраев
                 await session_dead_shutdown(error)   # sys.exit(0); return — страховка
                 return
-            last_error = error                       # ветка B — копим и ретраим
+            last_error = error                       # ветка B (+ восстановимый дубль ключа) — копим и ретраим
             logger.warning(f"Попытка {attempt}/{USERBOT_CONNECT_ATTEMPTS} запуска юзербота: {error}")
             try:
                 if getattr(app, "is_connected", False):
