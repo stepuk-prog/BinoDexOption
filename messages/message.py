@@ -176,7 +176,7 @@ def minus_dogon_message():
                   f'<b><i>Разница пунктов: {price_data["dif_price"]}</i></b> '
                   f'<emoji id="5431577498364158238">📊</emoji>'
                   f'</blockquote>\n\n')
-    s_message += f'<i>Итог прогноза: <b><u>МИНУС</u></b></i> <emoji id="5390874368177873184">❌</emoji>\n\n'
+    s_message += f'<i>Итог прогноза: <b>минус</b></i> <emoji id="5390874368177873184">❌</emoji>\n\n'
     return s_message
 
 
