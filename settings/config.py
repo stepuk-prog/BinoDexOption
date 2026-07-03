@@ -114,6 +114,26 @@ signal_channel_override = os.getenv("SIGNAL_CHANNEL")
 if signal_channel_override:
     channel_id = int(signal_channel_override)
     logger.info("SIGNAL_CHANNEL override: channel_id=%s", channel_id)
+
+# ── Пересылка вех серии плюсов в темы форума ботом-модератором ─────────────────────────────
+# Общий бот-модератор (ОДИН на все программы) форвардит веху «N прогнозов в ряд» из канала в
+# СЛУЧАЙНУЮ тему форума. Пересылку делает именно бот, а не юзербот (у юзерботов проблема с
+# постингом в темы форума). Форвард (не копия) — чтобы в теме было видно канал-источник.
+# Фича включается ТОЛЬКО когда заданы все три env: MODERATOR (токен бота) + FORUM (chat_id
+# форума) + непустой TOPICS (id тем через запятую); иначе тихо выключена (feature-flag).
+forum_bot_token = os.getenv("MODERATOR")
+forum_id = opt_int("FORUM", 0) or None
+forum_topics = []
+for _t in os.getenv("TOPICS", "").replace(" ", "").split(","):
+    if _t:
+        try:
+            forum_topics.append(int(_t))
+        except ValueError:
+            logger.warning("TOPICS: пропущен нечисловой id %r", _t)
+forum_forward_enabled = bool(forum_bot_token and forum_id and forum_topics)
+if not forum_forward_enabled and (forum_bot_token or forum_id or forum_topics):
+    logger.warning("Пересылка вех в темы форума выключена: заданы не все из "
+                   "MODERATOR/FORUM/TOPICS")
 option_data = Option(tf=timeframe, dogon=option['dogon'])
 # translocation — пара [start_random, end_random] из jsonb БД. Проверяем явно, иначе
 # NULL/короткий массив дал бы TypeError/IndexError на импорте (краш до подъёма логгера).

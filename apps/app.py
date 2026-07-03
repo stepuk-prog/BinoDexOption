@@ -9,6 +9,7 @@ from playwright.async_api import Page
 
 from apps.browser_app import init_valute_browser
 from apps.exit_app import close_program
+from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
 from logs import init_logger
 from classes.Option_class import Option
@@ -62,6 +63,11 @@ def get_water():
         return False, None
 
 
+# Вехи, на которых веха-пост дополнительно пересылается ботом-модератором в случайную тему
+# форума (forward_plus_milestone). Раньше (5, 10) — только пост в канал, без пересылки.
+FORWARD_MILESTONES = frozenset({15, 20, 25, 30, 35, 40, 45, 50})
+
+
 async def check_plus():
     """Проверка количества плюсов"""
     kol_plus = await database.plus_counter(program_id=program_id)
@@ -76,9 +82,13 @@ async def check_plus():
         await asyncio.sleep(CHECK_PLUS_DELAY)  # пауза перед постом-вехой (не в каждом плюсовом цикле)
         caption = plus_message(count)
         photo = f'{PLUS_IMAGE_DIR}/{count}.png'
-        ok, err = await send_photo_safe(photo, caption, mes_type=f'сообщение {count} плюс')
+        ok, err, msg_id = await send_photo_safe(photo, caption,
+                                                mes_type=f'сообщение {count} плюс', return_message=True)
         if not ok:
             return False, f'Ошибка отправки сообщения {count} плюс! - {err}'
+        # Пересылка вехи в случайную тему форума (вторичное действие — не рвёт цикл при сбое).
+        if count in FORWARD_MILESTONES and msg_id:
+            await forward_plus_milestone(msg_id, count)
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
         bug_fix = await dop_plus_message()
         if bug_fix[0]:
@@ -352,7 +362,7 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     else:
         log_data.add_option_data(active_binary_list[0])
 
-    await init_valute_browser(manager, log_data.name.replace('/', ''))
+    await init_valute_browser(manager, log_data.name.replace('/', ''), log_data.exchange)
     return True
 
 

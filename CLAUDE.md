@@ -1,9 +1,12 @@
 # BinoOptions — контекст проекта (для Claude Code)
 
-Async-бот торговых сигналов по опционам. Два режима: **FIN** (TradingView/FXCM) и **OTC**
+Async-бот торговых сигналов по опционам. Два режима: **FIN** (TradingView; биржа котировок —
+из БД `assets.binary_assets.exchange`, дефолт OANDA) и **OTC**
 (binodex.app). Снимает график через **Playwright (Firefox)**, постит сигналы в Telegram-канал
 через **Pyrogram**-юзербота; служебные логи — через **aiogram**. Данные сигналов готовит
-внешний сервис **BinoOptionData**.
+внешний сервис **BinoOptionData**. Вехи серии плюсов (15/20/…/50) дополнительно **пересылаются**
+(форвардом) в случайную тему форума отдельным **ботом-модератором** (один на все программы;
+юзерботы в темы форума не постят) — `apps/forum_forward.py`, env `MODERATOR`/`FORUM`/`TOPICS`.
 
 GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 

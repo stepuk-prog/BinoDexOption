@@ -80,6 +80,15 @@ async def _close_database():
         logger.warning(f"Ошибка закрытия пулов БД: {e}")
 
 
+async def _close_moderator_bot():
+    """Закрытие aiogram-сессии бота-модератора (пересылка вех в темы форума), если создавался."""
+    try:
+        from apps.forum_forward import close_moderator_bot
+        await close_moderator_bot()
+    except (Exception,) as e:
+        logger.warning(f"Ошибка закрытия бота-модератора: {e}")
+
+
 async def _close_telegram_logger():
     """Закрытие aiogram-сессии логгера (последним; единственный report о закрытии — в close_program)."""
     try:
@@ -116,8 +125,9 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     else:
         logger.report(text)
 
-    # 3. Юзербот и БД
+    # 3. Юзербот, бот-модератор и БД
     await _close_userbot()
+    await _close_moderator_bot()
     await _close_database()
 
     # 4. Финальный report + закрытие aiogram (после него логгер-бот недоступен)

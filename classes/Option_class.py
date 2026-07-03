@@ -20,6 +20,7 @@ class Option:  # Класс структуры хранения данных в 
     # настройки валютной пары
     name: str = ''  # название валюты
     id_val: int = 0  # id валюты
+    exchange: str = 'OANDA'  # биржа/провайдер котировок TV (assets.binary_assets.exchange); FIN-скрин
     browser_name: str = ''  # название валюты для поиска в браузере
     name_emoji: str = ''  # название валюты с эмодзи
     round: int = 0  # параметры округления
@@ -65,6 +66,7 @@ class Option:  # Класс структуры хранения данных в 
 
     def clear_data(self):
         self.name = ''  # название валюты
+        self.exchange = 'OANDA'  # биржа котировок TV (перезаписывается fill_binary; для OTC не нужна)
         self.browser_name = ''  # название валюты для поиска в браузере
         self.name_emoji = ''  # название валюты с эмодзи
         self.round = 0  # параметры округления
@@ -123,6 +125,9 @@ class Option:  # Класс структуры хранения данных в 
         self.name = data['name_val']
         self.round = data['round']
         self.id_val = data['val_id']
+        # Биржа котировок TV задаётся в БД (assets.binary_assets.exchange) — меняется без правки
+        # кода. Дефолт 'OANDA' на случай старой вьюхи без колонки / NULL по LEFT JOIN.
+        self.exchange = data.get('exchange') or 'OANDA'
         valname = self.name.split('/')
         self.link_val = link1 + valname[0] + valname[1] + link2 + valname[0] + valname[1]
         self.browser_name = self.name.replace('/', '')

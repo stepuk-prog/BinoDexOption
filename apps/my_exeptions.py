@@ -44,22 +44,26 @@ async def session_dead() -> bool:
 
 
 async def send_photo_safe(photo, caption, mes_type: str,
-                          timeout: float = TG_SEND_TIMEOUT) -> tuple[bool, str]:
+                          timeout: float = TG_SEND_TIMEOUT,
+                          return_message: bool = False):
     """Единый помощник отправки фото в основной канал с таймаутом и восстановлением при
     обрыве (раньше этот паттерн дублировался в main_app._try_send, app.check_plus и
-    app.dop_plus_message). :return: (ok, error_text)."""
+    app.dop_plus_message). :return: (ok, error_text); при return_message=True — плюс третий
+    элемент message_id отправленного поста (None при неудаче) — нужен для пересылки вехи в
+    тему форума (apps/forum_forward)."""
     try:
-        await asyncio.wait_for(
+        sent = await asyncio.wait_for(
             get_app().send_photo(chat_id=channel_id, photo=photo, caption=caption),
             timeout=timeout)
         _reset_transient_strikes()  # пост ушёл — цепочка невылеченных транзиентов прервана
-        return True, ''
+        return (True, '', sent.id) if return_message else (True, '')
     except asyncio.TimeoutError:
         logger.error("❌ Таймаут отправки (%s)", mes_type)
-        return False, 'Таймаут Pyrogram'
+        return (False, 'Таймаут Pyrogram', None) if return_message else (False, 'Таймаут Pyrogram')
     except (Exception,) as error:
         logger.error("❌ Ошибка отправки (%s): %s", mes_type, error)
-        return await lost_connection_photo(error=error, photo=photo, text=caption, mes_type=mes_type)
+        result = await lost_connection_photo(error=error, photo=photo, text=caption, mes_type=mes_type)
+        return result if return_message else result[:2]
 
 
 async def lost_connection_photo(error, photo, text, mes_type):
@@ -69,7 +73,8 @@ async def lost_connection_photo(error, photo, text, mes_type):
     :param photo: фото неотправленного сообщения
     :param text: текст неотправленного сообщения
     :param mes_type: Тип сообщения (первое, итоговое и т.д.)
-    :return: возвращает True, либо False, если исправить ошибку не удалось
+    :return: (ok, error_text, message_id) — message_id заполнен только при УСПЕШНОМ
+             повторе отправки (для пересылки вехи в тему форума), иначе None.
     """
     global _transient_401_strikes
     bot = get_app()
@@ -82,18 +87,18 @@ async def lost_connection_photo(error, photo, text, mes_type):
         if wait > _FLOODWAIT_MAX:
             logger.session(f'⚠️ Пост ({mes_type}) не доставлен: FloodWait {wait}s превышает '
                            f'потолок {_FLOODWAIT_MAX}s — пропуск')
-            return False, 'FloodWait превышает потолок'
+            return False, 'FloodWait превышает потолок', None
         logger.warning(f'{mes_type}: FloodWait — ждём {wait}s и повторяю')
         await asyncio.sleep(wait)
         try:
-            await asyncio.wait_for(
+            sent = await asyncio.wait_for(
                 bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
                 timeout=TG_RECONNECT_TIMEOUT)
             _reset_transient_strikes()
-            return True, ''
+            return True, '', sent.id
         except (Exception,) as err:
             logger.session(f'⚠️ Пост ({mes_type}) не доставлен: повтор после FloodWait не удался — {err}')
-            return False, 'повтор после FloodWait не удался'
+            return False, 'повтор после FloodWait не удался', None
     # session_failed = тип Unauthorized ИЛИ строковый маркер (AUTH_KEY_* и пр.). Но голый
     # Unauthorized («Auth key not found») бывает транзиентом на медиа-DC при ЖИВОМ ключе —
     # хоронить бота тогда нельзя. Маркеры однозначно мёртвые; голый 401 различаем get_me().
@@ -101,7 +106,7 @@ async def lost_connection_photo(error, photo, text, mes_type):
         key_alive_transient = isinstance(error, Unauthorized) and not await session_dead()
         if not key_alive_transient:
             await session_dead_shutdown(error)  # session мертва — штатный стоп без рестарта (sys.exit)
-            return False, 'Сессия юзербота недействительна'  # явный возврат: не полагаемся только на sys.exit
+            return False, 'Сессия юзербота недействительна', None  # явный возврат: не полагаемся только на sys.exit
         # иначе: транзиент-401 при живом ключе → лечим как обрыв (restart + resend) ниже
     if 'Connection lost' in str(error) or isinstance(error, Unauthorized):
         # В heal-ветку с Unauthorized попадают ТОЛЬКО транзиент-401 при живом ключе (мёртвый
@@ -112,11 +117,11 @@ async def lost_connection_photo(error, photo, text, mes_type):
             # Таймаут на restart+resend — зависший reconnect не должен вешать цикл (правило 6)
             await asyncio.wait_for(bot.restart(), timeout=TG_RECONNECT_TIMEOUT)
             logger.error(f'Транзиент-сбой отправки ({mes_type}): {error}. Переподключился (restart)')
-            await asyncio.wait_for(
+            sent = await asyncio.wait_for(
                 bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
                 timeout=TG_RECONNECT_TIMEOUT)
             _reset_transient_strikes()  # вылечилось — цепочка прервана
-            return True, ''
+            return True, '', sent.id
         except (Exception,) as err:
             if is_transient_401:
                 _transient_401_strikes += 1
@@ -126,7 +131,7 @@ async def lost_connection_photo(error, photo, text, mes_type):
                     # стоп: 🔒 в session-канал + status=false + graceful-выход (без рестарта).
                     await session_dead_shutdown(
                         error, reason=f'{_transient_401_strikes} транзиент-401 подряд не вылечились')
-                    return False, 'Сессия юзербота недействительна (эскалация транзиент-401)'
+                    return False, 'Сессия юзербота недействительна (эскалация транзиент-401)', None
                 # Порог не достигнут → ⚠️ в session-канал, бот продолжает (status не трогаем).
                 # Это пока не 🔒-отвал — переавторизация не требуется.
                 logger.session(f'⚠️ Пост ({mes_type}) не доставлен: транзиент-401 не вылечился '
@@ -135,7 +140,7 @@ async def lost_connection_photo(error, photo, text, mes_type):
                 # Обрыв связи не вылечился restart+повтором — пост потерян, бот продолжает.
                 logger.session(f'⚠️ Пост ({mes_type}) не доставлен: обрыв связи '
                                f'не вылечился restart+повтором: {err}')
-            return False, f'Переподключиться не удалось - {err}'
+            return False, f'Переподключиться не удалось - {err}', None
     else:
         error_message = f'Ошибка отправки {mes_type}! - {error}'
-        return False, error_message
+        return False, error_message, None

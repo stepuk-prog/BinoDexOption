@@ -19,7 +19,7 @@
 Представления с готовыми сигналами (уже только enabled-активы). Читаются `option_data_tv` / `option_data_pocket`.
 
 - **Фильтр/сортировка:** `timeframe`, `val_id`; FIN — `ORDER BY strong DESC, binary_percent DESC, itog_stat_up DESC`; OTC — `ORDER BY otc_percent DESC, itog_stat_up DESC`.
-- **Колонки, читаемые в `Option` (fill_binary/fill_otc):** `val_id`, `name_val`, `round`, `base_emoji`, `second_emoji`, `resume` (FIN) / `buy` (OTC), `dir_force_down/up`, `volume_profile_down/up`, `average_interest_down/up`, `volume_balance_down/up`, `itog_stat_down/up`.
+- **Колонки, читаемые в `Option` (fill_binary/fill_otc):** `val_id`, `name_val`, `round`, `base_emoji`, `second_emoji`, `resume` (FIN) / `buy` (OTC), `dir_force_down/up`, `volume_profile_down/up`, `average_interest_down/up`, `volume_balance_down/up`, `itog_stat_down/up`; FIN дополнительно **`exchange`** (TV-код биржи котировок из `assets.binary_assets.exchange`, напр. `OANDA`) — подставляется в поиск символа TV как `<exchange>:<pair>` (`init_valute_browser`), дефолт в коде `'OANDA'`. Колонку `exchange` в `assets.binary_assets` и её проброс в эту вьюху наполняет/владеет сервис **BinoOptionData**.
 
 ### `option_data.counter`
 Счётчики серий плюсов/минусов. `plus_counter` / `minus_counter`.

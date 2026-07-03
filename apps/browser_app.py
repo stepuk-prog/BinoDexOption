@@ -461,9 +461,9 @@ async def _reset_search_category(page) -> None:
         logger.warning(f"Не удалось сбросить категорию поиска TV: {e}")
 
 
-async def _remove_fxcm_chip(page) -> None:
-    """Снятие вторичного чипа биржи (FXCM-scope) в диалоге поиска. TV запоминает scope
-    после выбора FXCM-символа и иначе отсеивает поиск по формату EXCHANGE:SYMBOL.
+async def _remove_exchange_chip(page) -> None:
+    """Снятие вторичного чипа биржи (exchange-scope) в диалоге поиска. TV запоминает scope
+    после выбора символа с биржей и иначе отсеивает поиск по формату EXCHANGE:SYMBOL.
     Без падений (если чипа нет — просто выходим)."""
     chip = page.locator(scope_chip).first
     try:
@@ -474,19 +474,20 @@ async def _remove_fxcm_chip(page) -> None:
             except (Exception,):
                 await chip.click(timeout=TIMEOUT_SHORT)
     except (Exception,) as e:
-        logger.warning(f"Не удалось снять FXCM-чип поиска TV: {e}")
+        logger.warning(f"Не удалось снять exchange-чип поиска TV: {e}")
 
 
-async def _click_fxcm_pair(page, pair: str) -> bool:
-    """Клик по FXCM-строке в диалоге поиска по data-symbol-name="FX:<pair>" + фолбэки.
+async def _click_exchange_pair(page, pair: str, exchange: str) -> bool:
+    """Клик по строке нужной биржи в диалоге поиска по data-symbol-name="<exchange>:<pair>"
+    + фолбэки. exchange — TV-код биржи из БД (assets.binary_assets.exchange), напр. 'OANDA'.
     Строки рендерятся через overlap-manager-root → ищем на уровне page; visibility
     у строк TV нестабилен → ждём attached и пробуем несколько стратегий клика."""
     candidates = [
-        page.locator(f'[data-symbol-name="FX:{pair}"]').first,
+        page.locator(f'[data-symbol-name="{exchange}:{pair}"]').first,
         page.locator(
-            f'[data-name="symbol-search-dialog-content-item"]:has([title="FXCM"]):has-text("{pair}")'
+            f'[data-name="symbol-search-dialog-content-item"]:has([title="{exchange}"]):has-text("{pair}")'
         ).first,
-        page.locator(f'div[class*="itemRow"]:has([title="FXCM"]):has-text("{pair}")').first,
+        page.locator(f'div[class*="itemRow"]:has([title="{exchange}"]):has-text("{pair}")').first,
     ]
     for loc in candidates:
         try:
@@ -512,13 +513,14 @@ async def _click_fxcm_pair(page, pair: str) -> bool:
     return False
 
 
-async def init_valute_browser(manager: BrowserManager, valute: str):
+async def init_valute_browser(manager: BrowserManager, valute: str, exchange: str = 'OANDA'):
     """
-    Настройка валюты в окне браузера (TradingView, котировки FXCM).
+    Настройка валюты в окне браузера (TradingView).
     :param manager: менеджер браузера
     :param valute: название валютной пары (например 'EURUSD')
+    :param exchange: TV-код биржи котировок из БД (assets.binary_assets.exchange), напр. 'OANDA'
     """
-    pair = valute.replace('/', '').replace('FX:', '').upper()
+    pair = valute.replace('/', '').replace(f'{exchange}:', '').upper()
     try:
         for page_name, page in manager.pages.items():
             logger.info(f"🔄 Переключение валюты на странице: {page_name}")
@@ -543,24 +545,24 @@ async def init_valute_browser(manager: BrowserManager, valute: str):
             # Сброс категории на «Все» (sticky-фильтр TV иначе ломает поиск).
             # Диалог дождётся через wait_for внутри — фиксированный sleep не нужен.
             await _reset_search_category(page)
-            # И снятие FXCM-чипа: иначе scope от прошлого выбора отсеивает EXCHANGE:SYMBOL.
-            await _remove_fxcm_chip(page)
+            # И снятие exchange-чипа: иначе scope от прошлого выбора отсеивает EXCHANGE:SYMBOL.
+            await _remove_exchange_chip(page)
 
-            # Ввод символа в формате FX:<pair> (FXCM): exchange-префикс поднимает
+            # Ввод символа в формате <exchange>:<pair>: exchange-префикс поднимает
             # нужный фид наверх вместо строк всех провайдеров.
             valute_input = page.locator(f".{search_val}").first
             await valute_input.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
-            await valute_input.fill(f"FX:{pair}")
+            await valute_input.fill(f"{exchange}:{pair}")
 
-            # Клик по FXCM-строке по data-symbol-name; _click_fxcm_pair сам ждёт
+            # Клик по строке нужной биржи по data-symbol-name; _click_exchange_pair сам ждёт
             # появления строки (wait_for attached), доп. пауза после ввода не нужна.
-            if not await _click_fxcm_pair(page, pair):
+            if not await _click_exchange_pair(page, pair, exchange):
                 await close_program(
                     manager=manager, status=1,
-                    text=f"Ошибка загрузки данных в браузер - не найдена FXCM-строка FX:{pair}")
+                    text=f"Ошибка загрузки данных в браузер - не найдена строка {exchange}:{pair}")
                 return
 
-            logger.info(f"✅ Валюта FX:{pair} установлена на странице {page_name}")
+            logger.info(f"✅ Валюта {exchange}:{pair} установлена на странице {page_name}")
     except (Exception,) as error:
         await close_program(manager=manager, status=1, text=f"Ошибка загрузки данных в браузер - {error}")
 
