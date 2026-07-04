@@ -33,6 +33,11 @@
 - **Фильтр:** `timeframe`, `"binary"`, `program` (ключ `PROG_KEY`).
 - **Используемые колонки:** `program_id`, `channel_id`, `dogon`, `user_bot`, `cookies_tv`, `cookies_pocket`, `translocation`, `prog_name`, `session_file`.
 
+### `settings.forum_message`
+id последней вехи серии плюсов, пересланной ботом-модератором в тему форума. Перед новой пересылкой в тему бот удаляет ранее сохранённое сообщение — в теме держим только свежую веху, **независимо от программы-отправителя** (ключ — тема, не программа). Чтение — `get_forum_message`, запись (upsert) — `save_forum_message`; логика в `apps/forum_forward.py`. DDL — `scripts/forum_message.sql`.
+
+- Колонки: `forum_id`, `topic_id`, `message_id`, `updated_at`; **PK `(forum_id, topic_id)`**.
+
 ### `settings.binodex_settings`
 CSS/XPath-селекторы сайта binodex.app (`binodex_selectors`; на старте читается целиком, значение по `par_name` достаёт `apps/setting_app.find_par`).
 
@@ -84,6 +89,7 @@ TV-cookies для авторизации TradingView (`get_tv_cookies`). Пло�
 |-----------------------------------------|---------|-----------------------------------------------------|
 | `option_data_tv` / `option_data_pocket` | binodex | `option_data.binary_data_view` / `otc_data_view`    |
 | `plus_counter` / `minus_counter`        | binodex | `option_data.counter`                               |
+| `get_forum_message` / `save_forum_message` | binodex | `settings.forum_message`                         |
 | `option_setting` (bootstrap)            | binodex | `settings.option_setting`                           |
 | `binodex_selectors` (+ bootstrap)       | binodex | `settings.binodex_settings`                         |
 | `pages`                                 | binodex | `cookies.pages`                                     |

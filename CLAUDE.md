@@ -7,6 +7,8 @@ Async-бот торговых сигналов по опционам. Два р�
 внешний сервис **BinoOptionData**. Вехи серии плюсов (15/20/…/50) дополнительно **пересылаются**
 (форвардом) в случайную тему форума отдельным **ботом-модератором** (один на все программы;
 юзерботы в темы форума не постят) — `apps/forum_forward.py`, env `MODERATOR`/`FORUM`/`TOPICS`.
+Перед пересылкой бот удаляет прошлую веху В ЭТОЙ ТЕМЕ (в теме держим только свежую, ключ — тема, а
+не программа): id хранится в `settings.forum_message` (БД binodex; DDL `scripts/forum_message.sql`).
 
 GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 
