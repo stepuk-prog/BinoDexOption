@@ -149,20 +149,39 @@ async def _enter_code(page: Page, sel: str, code: str) -> None:
             await cells.nth(i).fill(ch)
 
 
+# Транзиентные сбои навигации Firefox, лечащиеся повтором goto: гонка редиректа Privy
+# (NS_BINDING_ABORTED) ИЛИ короткий блип сети/CDN до binodex.app (NS_ERROR_* / таймаут goto).
+# НЕ путать с реально протухшей сессией — та проявляется уже ПОСЛЕ успешной навигации (нет кнопки
+# пары / privy:token), а не ошибкой goto. Принцип «сбой binodex → переждать/повторить, а не выходить»:
+# единичный NS_ERROR_FAILURE не должен мгновенно сжигать цикл восстановления сессии (Recover-3→Exit).
+_RETRYABLE_GOTO_ERRORS = (
+    'NS_BINDING_ABORTED',                # Privy сам инициирует редирект при загрузке → Firefox рвёт навигацию
+    'NS_ERROR_FAILURE',                  # generic network failure (наблюдался блип до binodex.app/Cloudflare)
+    'NS_ERROR_NET_RESET',
+    'NS_ERROR_NET_TIMEOUT',
+    'NS_ERROR_NET_INTERRUPT',
+    'NS_ERROR_CONNECTION_REFUSED',
+    'NS_ERROR_PROXY_CONNECTION_REFUSED',
+    'NS_ERROR_UNKNOWN_HOST',             # транзиентный сбой DNS
+    'Timeout',                           # PWTimeout самого goto (домен не ответил за timeout)
+)
+
+
 async def _goto_retry(page: Page, url: str, attempts: int = 3, pause: float = 1.5) -> None:
-    """page.goto с ретраями ТОЛЬКО на NS_BINDING_ABORTED: binodex/Privy во время загрузки сам
-    инициирует редирект → Firefox обрывает навигацию (гонка, не реальный сбой). Прочие ошибки —
-    сразу наверх; исчерпали попытки — пробрасываем последнюю."""
+    """page.goto с ретраями на транзиентные сбои навигации (гонка редиректа Privy или блип
+    сети/CDN — см. _RETRYABLE_GOTO_ERRORS). Прочие ошибки — сразу наверх; исчерпали попытки —
+    пробрасываем последнюю."""
     last = None
     for i in range(1, attempts + 1):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             return
         except (Exception,) as err:
-            if 'NS_BINDING_ABORTED' not in str(err):
+            if not any(m in str(err) for m in _RETRYABLE_GOTO_ERRORS):
                 raise
             last = err
-            logger.warning(f'OTC inline-логин: goto {url} → NS_BINDING_ABORTED ({i}/{attempts}), повтор')
+            logger.warning(f'OTC inline-логин: goto {url} → транзиентный сбой ({i}/{attempts}), '
+                           f'повтор: {str(err).splitlines()[0]}')
             if i < attempts:
                 await asyncio.sleep(pause)
     raise last
