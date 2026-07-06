@@ -685,30 +685,31 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             clip = {'x': round(box['x']), 'y': round(box['y']),
                     'width': round(box['width']), 'height': round(box['height'])}
             # Защита от пустого канваса: после переключения пары канвас ~1-3с пустой (свечи не
-            # дорисованы) — не постим голый кадр. Ждём отрисовку до CANVAS_READY_SECONDS (отдельный
-            # бюджет, не сжигаем MAX_SCREENSHOT_ATTEMPTS); пробные захваты канваса отбрасываем.
-            # Бюджет — wall-clock (time.monotonic), НЕ сумма sleep'ов: каждый _canvas_alpha — это
-            # _eval (до EVAL_TIMEOUT), поэтому «waited += 0.4» сильно недосчитывал реальное время
-            # и бюджет CANVAS_READY_SECONDS растягивался в разы.
+            # дорисованы) — не постим голый кадр. Ждём отрисовку до CANVAS_READY_SECONDS (wall-clock
+            # по time.monotonic — каждый _canvas_alpha это _eval до EVAL_TIMEOUT). Кадр канваса
+            # СНИМАЕМ ОДИН раз за итерацию и им же проверяем непустоту — убрали двойной toDataURL
+            # (было probe+захват = 2 PNG-энкода/кадр в стационаре). Ценовой брекет (reads_before →
+            # t_shot → канвас → reads_after) держим ВНУТРИ итерации, чтобы медиана оставалась
+            # синхронной с кадром; пустой кадр НЕ постим (ждём/ретраим до бюджета).
             deadline = time.monotonic() + CANVAS_READY_SECONDS
+            canvas_img = None
+            reads: list[float] = []
+            t_shot = time.time()
             while True:
-                probe = await _canvas_alpha(element)
-                if sum(probe.getchannel('A').histogram()[16:]) >= probe.width * probe.height * CANVAS_MIN_OPAQUE:
+                reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
+                t_shot = time.time()
+                candidate = await _canvas_alpha(element)
+                reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
+                if sum(candidate.getchannel('A').histogram()[16:]) >= candidate.width * candidate.height * CANVAS_MIN_OPAQUE:
+                    canvas_img = candidate  # непустой кадр — используем его же как снимок
                     break
                 if time.monotonic() >= deadline:
-                    probe = None
-                    break
+                    break  # свечи так и не появились за бюджет → ретрай попытки
                 await asyncio.sleep(0.4)
-            if probe is None:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
+            if canvas_img is None:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: канвас пуст "
                                f"{CANVAS_READY_SECONDS:.0f}с (свечи не отрисованы) для {asset}")
                 continue
-            # Канвас готов. Цена графика = медиана чтений chartData.price ВОКРУГ кадра; кадр =
-            # toDataURL канваса (прозрачные свечи). t_shot фиксируем для фолбэка на WS.
-            reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
-            t_shot = time.time()
-            canvas_img = await _canvas_alpha(element)
-            reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
             if reads:
                 price = statistics.median(reads)
             else:
@@ -882,10 +883,8 @@ async def _reload_otc_once(page: Page) -> bool:
     except (Exception,) as error:
         logger.warning(f'OTC: reload страницы перед опционом не удался - {error}')
         return False
-    try:
-        await page.wait_for_load_state('networkidle', timeout=TIMEOUT_LONG)
-    except (Exception,):
-        pass  # постоянный WS-поток может мешать networkidle — не критично (как в init_otc)
+    # networkidle НЕ ждём: постоянный WS-поток binodex не даёт ему сойтись — вырабатывался весь
+    # TIMEOUT_LONG (15с) вхолостую на каждом reload. Готовность даёт лестница ниже (on_trade → gate).
     if not on_trade(page.url):
         logger.warning(f'OTC: после reload редирект с /trade на {page.url}')
         return False

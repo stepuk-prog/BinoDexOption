@@ -255,7 +255,10 @@ async def _proxy_launch_options() -> dict:
         return browser_launch_options
     opts = browser_launch_options.copy()
     if proxy.login and proxy.password:
-        host, port = start_local_proxy(proxy.ip, proxy.port, proxy.login, proxy.password)
+        # start_local_proxy синхронный (time.sleep + socket.connect до ~3.3с) → в тред, иначе
+        # блокировал бы event loop (WS-колбэки, обработчик SIGTERM) на всё окно старта релея.
+        host, port = await asyncio.to_thread(
+            start_local_proxy, proxy.ip, proxy.port, proxy.login, proxy.password)
         if not host:
             logger.error(f'Прокси({PROXY_SCOPE}): локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
             return browser_launch_options

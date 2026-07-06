@@ -1,4 +1,5 @@
 """Менеджер браузера Playwright (контекст, страницы, корректное закрытие)."""
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -40,3 +41,11 @@ class BrowserManager:
                     logger.warning(f"{label}: соединение с драйвером уже потеряно — {e}")
                 else:
                     logger.error(f"Ошибка при закрытии ({label}): {e}")
+        # Гасим локальный прокси-релей, если поднимали его для OTC-фолбэка (в direct-режиме — no-op
+        # по внутреннему гарду). Иначе daemon-поток релея переживал бы браузер, который обслуживал.
+        # stop() синхронный (join до 2с) → в тред, чтобы не блокировать event loop на teardown.
+        try:
+            from settings.local_proxy import stop_local_proxy
+            await asyncio.to_thread(stop_local_proxy)
+        except (Exception,) as e:
+            logger.warning(f"stop_local_proxy при закрытии не удался: {e}")
