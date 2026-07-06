@@ -241,29 +241,29 @@ STEALTH_JS = """
 
 
 async def _proxy_launch_options() -> dict:
-    """browser_launch_options + прокси из Program.settings.proxy_data через локальный релей
-    (settings/local_proxy — Firefox+Playwright ненадёжно жуёт proxy-auth напрямую). Выбранный
-    прокси запоминается в settings.proxy.current_proxy — main по нему ведёт stats/ban. Сбой
-    подбора/релея → базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
-    from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list
+    """browser_launch_options + :50100-HTTP-прокси из binodex.settings.proxy_data через локальный
+    релей (settings/local_proxy — Firefox+Playwright НЕ умеет socks5-auth и ненадёжно жуёт http-auth
+    напрямую). Выбранный прокси запоминается в settings.proxy.current_proxy — main по нему ведёт
+    stats/ban. Сбой подбора/релея → базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
+    from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list, PROXY_SCOPE
     from settings.local_proxy import start_local_proxy
     if not proxy_list:
         await load_proxies_from_db(database)
     proxy = get_unused_proxy()
     if not proxy:
-        logger.error('OTC-прокси: нет активных прокси (settings.proxy_data) — поднимаю напрямую')
+        logger.error(f'Прокси({PROXY_SCOPE}): нет активных :50100 (settings.proxy_data) — поднимаю напрямую')
         return browser_launch_options
     opts = browser_launch_options.copy()
     if proxy.login and proxy.password:
         host, port = start_local_proxy(proxy.ip, proxy.port, proxy.login, proxy.password)
         if not host:
-            logger.error(f'OTC-прокси: локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
+            logger.error(f'Прокси({PROXY_SCOPE}): локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
             return browser_launch_options
         opts['proxy'] = {'server': f'http://{host}:{port}'}
-        logger.report(f'OTC: браузер через прокси {proxy.ip}:{proxy.port} (релей {host}:{port})')
+        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port} (релей {host}:{port})')
     else:
         opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
-        logger.report(f'OTC: браузер через прокси {proxy.ip}:{proxy.port}')
+        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port}')
     return opts
 
 

@@ -123,27 +123,27 @@ async def _recover_otc_cookies() -> bool:
 async def _ban_current_proxy() -> None:
     """Текущий OTC-прокси не поднял front-end (битый колокейшен/дохлый) → бан в БД + перечитка
     пула (забаненный выпадает из выборки) → следующий init возьмёт другой. Сбой бана не критичен."""
-    from settings.proxy import get_current_proxy, load_proxies_from_db
+    from settings.proxy import get_current_proxy, load_proxies_from_db, PROXY_SCOPE
     proxy = get_current_proxy()
     if proxy is None:
         return
     try:
-        await database.ban_proxy(proxy.ip, PROXY_BAN_TTL)
+        await database.ban_proxy(proxy.ip, PROXY_BAN_TTL, PROXY_SCOPE)
         await load_proxies_from_db(database)  # перечитать пул без забаненного
-        logger.warning(f'OTC-прокси: {proxy.ip} забанен на {PROXY_BAN_TTL // 60} мин '
+        logger.warning(f'Прокси({PROXY_SCOPE}): {proxy.ip} забанен на {PROXY_BAN_TTL // 60} мин '
                        f'(не поднял front-end) — ротация на следующий')
     except (Exception,) as err:
-        logger.warning(f'OTC-прокси: бан {proxy.ip} не удался: {err}')
+        logger.warning(f'Прокси({PROXY_SCOPE}): бан {proxy.ip} не удался: {err}')
 
 
 async def _mark_proxy_success() -> None:
-    """Текущий OTC-прокси поднял рабочий init → плюс в статистику (и снятие бана)."""
-    from settings.proxy import get_current_proxy
+    """Текущий OTC-прокси поднял рабочий init → плюс в статистику (триггер снимет бан scope'а)."""
+    from settings.proxy import get_current_proxy, PROXY_SCOPE
     proxy = get_current_proxy()
     if proxy is None:
         return
     try:
-        await database.update_proxy_stats(proxy.ip, success=True)
+        await database.update_proxy_stats(proxy.ip, True, PROXY_SCOPE)
     except (Exception,):
         pass
 

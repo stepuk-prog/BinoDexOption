@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### 2026-07-06 — Прокси-пул: общий в БД binodex + раздельный бан по рынку (унификация со Screens)
+- **Пул переехал из Program.settings.proxy_data → binodex.settings.proxy_data** (`database/database.py`,
+  `db='program'` → `db='binodex'`). Единый пул семейства ботов; те же строки читает BinodexScreens.
+- **Раздельный бан по scope** (`_PROXY_SCOPE`): OTC банит прокси в полях `*_binodex`, FIN/TradingView —
+  в общих (`is_banned`/`banned_until`/…). scope выводится из `binary` в `settings/proxy.py`
+  (`PROXY_SCOPE = 'tv' if binary else 'binodex'`). `get_active_proxies`/`ban_proxy`/`update_proxy_stats`
+  принимают `scope`; вызовы в `main.py`/`browser_app.py` прокидывают `PROXY_SCOPE`. **Usage-политика
+  не изменена: прокси задействуются только в OTC** (FIN остаётся direct — TV другой домен); scope 'tv'
+  поддержан на уровне БД для единообразия, но в BinoOptions не активен.
+- **Только :50100 (HTTP)**: выборка/бан фильтруют `port = 50100` — их поднимает локальный релей
+  (Firefox не умеет socks5-auth); :50101 (SOCKS5) — для requests-ботов семейства.
+- **Разбан — БД-триггером** `settings.proxy_auto_unban` (по свежему успеху / истёкшему `banned_until`);
+  ручное снятие бана на успехе из `update_proxy_stats` убрано (не дублируем триггер). `total_requests`
+  больше не пишется (в scoped-схеме нет).
+- Control-flow в `main.py` (sticky-proxy латч `PROXY_REPROBE_AFTER`) без изменений.
+
 ### 2026-07-06 — Плюс-посты: порог форум-пересылки 25+ и единый множитель суммы ×10000
 - **Пересылка на форум — с вехи 25** (`apps/app.py`): `FORWARD_MILESTONES` сужён с
   `{15,20,25,30,35,40,45,50}` до `{25,30,35,40,45,50}`. Вехи 5/10/15/20 постятся только в канал,

@@ -333,59 +333,78 @@ class Database:
         return await self.execute_query(sql, program_id, fetch_mode='execute',
                                         func='close_program', db='program')
 
-    # -------------------- Прокси (OTC-фолбэк, Program.settings.proxy_data) --------------------
-    # Общий пул прокси со статистикой/банами; используется когда прямой режим не поднял front-end
-    # binodex (напр. отравленный CDN-эдж). Контракт совпадает с проектом Screens (общая таблица).
+    # ── Прокси (settings.proxy_data в БД binodex; раздельный бан TV/binodex) ─────────
+    # Пул общий на семейство ботов, живёт в БД binodex (пул 'binodex'). Схема-по-порту:
+    # для BROWSER-бота (Playwright-Firefox) берём ТОЛЬКО :50100 (HTTP) — их поднимает локальный
+    # релей (Firefox ненадёжно жуёт socks5-auth); :50101 (SOCKS5) — для requests-ботов семейства.
+    # Бан РАЗДЕЛЬНЫЙ по рынку (scope): OTC-фолбэк банит прокси для binodex (поля *_binodex),
+    # FIN/TradingView — для TV (общие поля). BinoOptions задействует прокси только в OTC (scope
+    # 'binodex'); scope 'tv' поддержан на уровне БД для единообразия с семейством. Разбан НЕ тут:
+    # его делает БД-триггер settings.proxy_auto_unban (по свежему успеху / истёкшему banned_until).
+    # Здесь только выставляем бан и пишем статистику.
 
-    async def get_active_proxies(self):
-        """Активные прокси из Program.settings.proxy_data. Истёкшие баны авто-возвращаются,
-        long_ban исключены всегда. Сортировка priority↓, last_used↑ — равномерная нагрузка между
-        процессами/нодами. list[Record(ip, port, login, password)] | [] | False."""
-        sql = '''
-            SELECT ip, port, login, password
-            FROM settings.proxy_data
-            WHERE is_active = true
-              AND long_ban = false
-              AND (is_banned = false OR banned_until < now())
-            ORDER BY priority DESC, last_used_at ASC NULLS FIRST
-        '''
-        return await self.execute_query(sql, fetch_mode='all',
-                                        func='get_active_proxies', db='program')
+    # scope → (is_banned, banned_until, long_ban, last_used_at, last_success_at,
+    #          last_failure_at, successful_requests, failed_requests)
+    _PROXY_SCOPE = {
+        'binodex': ('is_banned_binodex', 'banned_until_binodex', 'long_ban_binodex',
+                    'last_used_at_binodex', 'last_success_at_binodex',
+                    'last_failure_at_binodex', 'successful_requests_binodex',
+                    'failed_requests_binodex'),
+        'tv':      ('is_banned', 'banned_until', 'long_ban', 'last_used_at',
+                    'last_success_at', 'last_failure_at', 'successful_requests',
+                    'failed_requests'),
+    }
 
-    async def ban_proxy(self, ip: str, ttl_seconds: int = 600):
-        """Временный бан прокси (failover-координация между процессами/нодами): сдохший/севший
-        на битый колокейшен прокси выпадает из выборки на ttl_seconds для всех."""
-        sql = '''
-            UPDATE settings.proxy_data
-            SET is_banned = true,
-                banned_until = now() + make_interval(secs => $2),
-                failed_requests = failed_requests + 1,
-                last_failure_at = now(),
-                last_used_at = now(),
-                updated_at = now()
-            WHERE ip = $1
-        '''
-        return await self.execute_query(sql, ip, ttl_seconds, fetch_mode='execute',
-                                        func='ban_proxy', db='program')
+    async def get_active_proxies(self, scope: str):
+        """Активные :50100 (HTTP) прокси для BROWSER-бота из settings.proxy_data (binodex).
+        scope='binodex' (OTC) | 'tv' (FIN). Фильтр по бан-полям scope'а (long_ban +
+        is_banned/banned_until); ротация — свежайший last_used_at scope'а в хвост.
+        Возвращает list[dict(ip,port,login,password)] | [] (пусто) | False (ошибка БД)."""
+        b_is, b_until, b_long, b_used = (self._PROXY_SCOPE[scope][i] for i in (0, 1, 2, 3))
+        sql = (
+            "SELECT ip, port, login, password FROM settings.proxy_data "
+            "WHERE is_active = true AND port = 50100 "
+            f"AND {b_long} = false "
+            f"AND ({b_is} = false OR {b_until} < now()) "
+            f"ORDER BY priority DESC, {b_used} ASC NULLS FIRST"
+        )
+        rows = await self.execute_query(sql, fetch_mode='all', func='get_active_proxies', db='binodex')
+        if not rows:
+            return rows  # [] | False — прокинуть наверх без маскировки
+        return [{'ip': r['ip'], 'port': r['port'],
+                 'login': r['login'], 'password': r['password']} for r in rows]
 
-    async def update_proxy_stats(self, ip: str, success: bool = True):
-        """Статистика прокси. При успехе снимаем бан (кроме long_ban)."""
+    async def ban_proxy(self, ip: str, ttl_seconds: int, scope: str):
+        """Временный бан прокси ip для scope'а (OTC→binodex-поля, FIN→TV-поля). TTL — секунды
+        до авто-разбана (триггер снимет по banned_until < now()). True|False."""
+        b_is, b_until, _b_long, b_used, _b_ok, b_fail_ts, _b_succ, b_fail = self._PROXY_SCOPE[scope]
+        sql = (
+            "UPDATE settings.proxy_data SET "
+            f"{b_is} = true, "
+            f"{b_until} = now() + make_interval(secs => $2), "
+            f"{b_fail} = {b_fail} + 1, {b_fail_ts} = now(), {b_used} = now(), "
+            "updated_at = now() "
+            "WHERE ip = $1 AND port = 50100"
+        )
+        return await self.execute_query(sql, ip, float(ttl_seconds), fetch_mode='execute',
+                                        func='ban_proxy', db='binodex')
+
+    async def update_proxy_stats(self, ip: str, success: bool, scope: str):
+        """Статистика прокси ip для scope'а. На успехе пишем last_success (триггер снимет бан
+        scope'а по свежему last_success), на провале — last_failure + счётчик. Разбан по успеху
+        делает триггер proxy_auto_unban, тут его НЕ дублируем. True|False."""
+        b_is, b_until, _b_long, b_used, b_ok_ts, b_fail_ts, b_succ, b_fail = self._PROXY_SCOPE[scope]
         if success:
-            sql = '''
-                UPDATE settings.proxy_data
-                SET total_requests = total_requests + 1,
-                    successful_requests = successful_requests + 1,
-                    last_success_at = now(), last_used_at = now(),
-                    is_banned = false, banned_until = null, updated_at = now()
-                WHERE ip = $1 AND long_ban = false
-            '''
+            sql = (
+                "UPDATE settings.proxy_data SET "
+                f"{b_succ} = {b_succ} + 1, {b_ok_ts} = now(), {b_used} = now(), "
+                "updated_at = now() WHERE ip = $1 AND port = 50100"
+            )
         else:
-            sql = '''
-                UPDATE settings.proxy_data
-                SET total_requests = total_requests + 1,
-                    failed_requests = failed_requests + 1,
-                    last_failure_at = now(), last_used_at = now(), updated_at = now()
-                WHERE ip = $1
-            '''
+            sql = (
+                "UPDATE settings.proxy_data SET "
+                f"{b_fail} = {b_fail} + 1, {b_fail_ts} = now(), {b_used} = now(), "
+                "updated_at = now() WHERE ip = $1 AND port = 50100"
+            )
         return await self.execute_query(sql, ip, fetch_mode='execute',
-                                        func='update_proxy_stats', db='program')
+                                        func='update_proxy_stats', db='binodex')
