@@ -64,8 +64,8 @@ def get_water():
 
 
 # Вехи, на которых веха-пост дополнительно пересылается ботом-модератором в случайную тему
-# форума (forward_plus_milestone). Раньше (5, 10) — только пост в канал, без пересылки.
-FORWARD_MILESTONES = frozenset({15, 20, 25, 30, 35, 40, 45, 50})
+# форума (forward_plus_milestone). Ниже 25 (5/10/15/20) — только пост в канал, без пересылки.
+FORWARD_MILESTONES = frozenset({25, 30, 35, 40, 45, 50})
 
 
 async def check_plus():
