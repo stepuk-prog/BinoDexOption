@@ -134,6 +134,12 @@ forum_forward_enabled = bool(forum_bot_token and forum_id and forum_topics)
 if not forum_forward_enabled and (forum_bot_token or forum_id or forum_topics):
     logger.warning("Пересылка вех в темы форума выключена: заданы не все из "
                    "MODERATOR/FORUM/TOPICS")
+# BOT_LINK — url зелёной кнопки под партнёрским сообщением, которое бот-модератор шлёт в ту же
+# тему ПОСЛЕ вехи-форварда (send_photo, НЕ форвард). Не задан → партнёрка не шлётся (форвард работает).
+bot_link = (os.getenv("BOT_LINK") or '').strip() or None
+partner_message_enabled = forum_forward_enabled and bool(bot_link)
+if forum_forward_enabled and not bot_link:
+    logger.warning("Партнёрское сообщение на форуме выключено: не задан BOT_LINK (веха-форвард работает)")
 option_data = Option(tf=timeframe, dogon=option['dogon'])
 # translocation — пара [start_random, end_random] из jsonb БД. Проверяем явно, иначе
 # NULL/короткий массив дал бы TypeError/IndexError на импорте (краш до подъёма логгера).

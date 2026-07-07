@@ -262,23 +262,29 @@ class Database:
                                         func='minus_counter', db='binodex')
 
     async def get_forum_message(self, forum_id: int, topic_id: int):
-        """id последней вехи, пересланной ботом-модератором в тему topic_id форума forum_id
-        (binodex.settings.forum_message). Нужен, чтобы удалить её ПЕРЕД новой пересылкой
-        (в теме держим только свежую веху, независимо от программы-отправителя). int | None | False."""
-        sql = ("SELECT message_id FROM settings.forum_message "
+        """Строка последней пересылки в тему topic_id форума forum_id (binodex.settings.forum_message).
+        Нужна, чтобы удалить ПЕРЕД новой пересылкой И веху (message_id), И доп-партнёрское сообщение
+        (extra_message_id, может быть NULL — его пишет не каждая программа) — в теме держим только
+        свежую пару, независимо от программы-отправителя. Record(message_id, extra_message_id) | None
+        (записи нет) | False (сбой)."""
+        sql = ("SELECT message_id, extra_message_id FROM settings.forum_message "
                "WHERE forum_id = $1 AND topic_id = $2")
-        return await self.execute_query(sql, forum_id, topic_id, fetch_mode='val',
+        return await self.execute_query(sql, forum_id, topic_id, fetch_mode='row',
                                         func='get_forum_message', db='binodex')
 
-    async def save_forum_message(self, forum_id: int, topic_id: int, message_id: int):
-        """Запомнить id только что пересланной вехи (upsert по (forum_id, topic_id)) — чтобы
-        удалить её перед следующей пересылкой в ту же тему. True | False (сбой)."""
-        sql = ("INSERT INTO settings.forum_message (forum_id, topic_id, message_id, updated_at) "
-               "VALUES ($1, $2, $3, now()) "
+    async def save_forum_message(self, forum_id: int, topic_id: int, message_id: int,
+                                 extra_message_id: int | None = None):
+        """Запомнить id только что пересланной вехи + опц. доп-партнёрского сообщения (upsert по
+        (forum_id, topic_id)) — чтобы удалить их перед следующей пересылкой в ту же тему.
+        extra_message_id=None → колонка обнуляется. True | False (сбой)."""
+        sql = ("INSERT INTO settings.forum_message "
+               "(forum_id, topic_id, message_id, extra_message_id, updated_at) "
+               "VALUES ($1, $2, $3, $4, now()) "
                "ON CONFLICT (forum_id, topic_id) DO UPDATE "
-               "SET message_id = EXCLUDED.message_id, updated_at = EXCLUDED.updated_at")
-        return await self.execute_query(sql, forum_id, topic_id, message_id, fetch_mode='execute',
-                                        func='save_forum_message', db='binodex')
+               "SET message_id = EXCLUDED.message_id, "
+               "extra_message_id = EXCLUDED.extra_message_id, updated_at = EXCLUDED.updated_at")
+        return await self.execute_query(sql, forum_id, topic_id, message_id, extra_message_id,
+                                        fetch_mode='execute', func='save_forum_message', db='binodex')
 
     async def pages(self, program: str, mode: str):
         """Страницы браузера из общей binodex.cookies.pages по (program, mode),

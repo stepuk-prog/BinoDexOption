@@ -248,6 +248,29 @@ def plus_message(count: int) -> str:
     return _plus_head(str(count)) + _plus_earn(amount) + pl_mes
 
 
+def partner_message() -> str:
+    """Партнёрское сообщение (фото partner_1.png + зелёная inline-кнопка), которое бот-модератор
+    шлёт в тему форума ПОСЛЕ вехи-форварда серии плюсов (apps/forum_forward.py). HTML с custom-emoji
+    (<tg-emoji>) — интенциональная вложенность <i>/<b>. Из эталона ForumTrade."""
+    return (
+        '<i><b>Что получает новый участник закрытого сообщества трейдера Smoke FX</b>:</i>\n\n'
+
+        '<blockquote><i><b>1.</b>    Прибыльные торговые сессии вместе с</i>'
+        '<i><b> Smoke FX AI  — ежедневно 24/7</b>\n\n'
+
+        '</i><i><b>2. </b>   10 закрытых торговых групп на </i><i><b>FIN,</b> </i>'
+        '<i><b>STCK, CRPT и OTC активы — более 10.000 прогнозов</b>\n\n'
+
+        '</i><i><b>3. </b>   Полный доступ к торговому инструменту </i>'
+        '<b><i>Smoke FX Alpha AI — 8 AI-алгоритмов</i></b></blockquote>\n\n'
+
+        '<tg-emoji emoji-id="5375129357373165375">🔗</tg-emoji> '
+        '<i>Каждый желающий может получить бесплатный доступ в закрытую группу за 1 минуту, '
+        'просто жми на кнопку ниже </i>'
+        '<i><tg-emoji emoji-id="5470177992950946662">👇</tg-emoji></i>'
+    )
+
+
 def dop_plus10_message():
     message = ('<b><i>Алгоритм Smoke FX AI выдаёт серию плюсов в ряд!</i></b> '
                '<emoji id="5431449001532594346">⚡️</emoji>\n\n')
