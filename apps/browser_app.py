@@ -1,5 +1,7 @@
 
 import asyncio
+import re
+import time
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -270,6 +272,32 @@ async def _proxy_launch_options() -> dict:
     return opts
 
 
+# Static-именованные entry-файлы binodex (app.js/app.css) на любом поддомене binodex.app.
+_BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/app\.(?:js|css)")
+
+
+async def _bust_binodex_cdn(context) -> None:
+    """Обойти протухший Cloudflare-кэш binodex.app. Эдж отдаёт устаревший `/assets/app.js`
+    (static-имя, cf-cache HIT ~сутки), ссылающийся на уже удалённый локаль-чанк → тот 404-ит с
+    MIME text/plain → Firefox блокирует ES-модуль (NS_ERROR_CORRUPTED_CONTENT) → SPA binodex не
+    бутстрапится (пустая страница, график/форма логина не появляются). Свежий Playwright-профиль
+    без кэша ловит это на КАЖДОМ старте; обычный браузер грузит из старого кэша.
+    Добавляем cache-bust query к static-именованным entry (app.js/app.css) → CF MISS → origin
+    отдаёт свежий app.js с живыми чанками. Хэш-чанки иммутабельны — не трогаем. Хостовый фильтр:
+    только binodex, TradingView-режим (FIN) не задет."""
+    token = str(int(time.time()))
+
+    async def _cb(route):
+        url = route.request.url
+        sep = "&" if "?" in url else "?"
+        try:
+            await route.continue_(url=f"{url}{sep}_cb={token}")
+        except (Exception,):   # старый Playwright без override url — не ломаем загрузку
+            await route.continue_()
+
+    await context.route(_BINODEX_APPJS_RE, _cb)
+
+
 async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserInitResult:
     """Инициализация браузера Playwright.
     storage_state — свежий OTC Privy-стейт из БД (Survive §4.3); None → фоллбэк на
@@ -292,6 +320,7 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
             context = await browser.new_context(storage_state=state, **context_options)
         else:
             context = await browser.new_context(**context_options)
+        await _bust_binodex_cdn(context)   # обойти протухший CDN-кэш binodex app.js (иначе пустая страница)
 
         # Добавляем stealth скрипт на уровне контекста (для всех страниц)
         await context.add_init_script(STEALTH_JS)

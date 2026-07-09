@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-07-09 — Fixed: binodex пустая страница в Playwright (протухший CDN-кэш)
+- **`apps/browser_app.py` `_bust_binodex_cdn`.** Cloudflare-эдж отдаёт устаревший `/assets/app.js`
+  (static-имя, `cf-cache-status: HIT`, `age ~42ч`), ссылающийся на уже удалённый локаль-чанк → тот
+  404-ит с MIME `text/plain` → Firefox блокирует ES-модуль (`NS_ERROR_CORRUPTED_CONTENT`) → SPA
+  binodex не бутстрапится: пустая страница, график/форма логина не появляются. Свежий
+  Playwright-профиль ловит это на КАЖДОМ старте браузера; обычный браузер грузит из старого кэша.
+  **Не связано с прокси** — иной egress ловит тот же 404. Фикс: `context.route` добавляет cache-bust
+  query к static-именованным entry (`app.js`/`app.css`) → CF MISS → origin отдаёт свежий app.js с
+  живыми чанками; хэш-чанки иммутабельны, не трогаем; хостовый фильтр — только binodex, FIN/TV не задет.
+
 ### 2026-07-06 — Прокси-пул: общий в БД binodex + раздельный бан по рынку (унификация со Screens)
 - **Пул переехал из Program.settings.proxy_data → binodex.settings.proxy_data** (`database/database.py`,
   `db='program'` → `db='binodex'`). Единый пул семейства ботов; те же строки читает BinodexScreens.
