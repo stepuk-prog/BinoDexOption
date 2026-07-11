@@ -36,6 +36,13 @@ PROXY_BAN_TTL = 600  # сек: бан OTC-прокси, не поднявшег�
 # помогут — нельзя залипать в карусели навсегда: каждые N неудач возвращаемся на direct, чтобы
 # поймать восстановление (иначе нода не оживёт без рестарта процесса — латч). §4.5.
 PROXY_REPROBE_AFTER = 3
+# Сколько ПОЛНЫХ циклов «прокси исчерпаны → назад на direct» терпим при front-end аутэйдже,
+# прежде чем признать его устойчивым С ЭТОЙ НОДЫ и отдать её диспетчеру: exit(EXIT_SETUP) →
+# GD переносит провайдер-диверсно (front-end может подняться с egress другой ноды; если лёг
+# глобально — GD после пары диверсных попыток встанет в ALARM+hold по контракту). Раньше здесь
+# выживали БЕСКОНЕЧНО → egress-специфичный аутэйдж не эскалировал, ловил только оператор. §4.5.
+# =1: после ОДНОЙ полной провайдер-диверсии (direct+прокси, ~15 мин) отдаём ноду диспетчеру.
+SETUP_OUTAGE_MAX_CYCLES = 1
 COOKIES_RETRY_DELAY_FAST = 120     # TV
 COOKIES_RETRY_DELAY_SLOW = 300     # TV
 COOKIES_FAST_ATTEMPTS = 5          # TV
@@ -157,6 +164,7 @@ async def _init_with_retry():
     global _use_proxy, _proxy_outage_streak
     setup_streak = 0  # подряд идущих SetupError (UI/селекторы) — до SETUP_ATTEMPTS, потом выход
     browser_fails = 0  # подряд провалов подъёма браузера (НЕ куки/селекторы/прокси) → EXIT_BROWSER
+    outage_cycles = 0  # полных «direct→прокси-исчерпание» циклов front-end-аутэйджа → EXIT_SETUP (§4.5)
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
@@ -195,9 +203,26 @@ async def _init_with_retry():
                         # direct оживёт сам, БЕЗ рестарта процесса (фикс латча). §4.5.
                         _use_proxy = False
                         _proxy_outage_streak = 0
-                        logger.report(f'OTC: {PROXY_REPROBE_AFTER} прокси подряд не подняли front-end '
-                                      f'— похоже на аутэйдж binodex, не битый эдж; возвращаюсь на '
-                                      f'прямой режим (переотбивка), пауза {SETUP_OUTAGE_BACKOFF // 60} мин')
+                        outage_cycles += 1
+                        if outage_cycles >= SETUP_OUTAGE_MAX_CYCLES:
+                            # Аутэйдж УСТОЙЧИВ с этой ноды (direct+прокси исчерпаны
+                            # SETUP_OUTAGE_MAX_CYCLES раз) — не залипаем тут вечно. Отдаём ноду
+                            # диспетчеру: exit(EXIT_SETUP) → GD провайдер-диверсный перенос (front-end
+                            # может подняться с egress другой ноды; глобальный аутэйдж → GD после
+                            # диверсных попыток встанет в ALARM+hold). status НЕ трогаем (инвариант
+                            # §4.3: краш ≠ self-disable → GD обязан failover'ить).
+                            logger.report(f'OTC: front-end аутэйдж binodex не преодолён за '
+                                          f'{SETUP_OUTAGE_MAX_CYCLES} цикла (direct+прокси) — отдаю ноду '
+                                          f'диспетчеру для провайдер-диверсного переноса ☄️ (код {EXIT_SETUP})')
+                            await close_program(manager=None, status=EXIT_SETUP,
+                                                text=f'OTC: front-end аутэйдж binodex устойчив с этой ноды '
+                                                     f'({SETUP_OUTAGE_MAX_CYCLES} цикла) — перенос на другого '
+                                                     f'провайдера ☄️ (код {EXIT_SETUP})')
+                            return None  # close_program делает sys.exit; страховка
+                        logger.report(f'OTC: {PROXY_REPROBE_AFTER} прокси подряд не подняли front-end — '
+                                      f'похоже на аутэйдж binodex, не битый эдж; возвращаюсь на прямой режим '
+                                      f'(переотбивка), пауза {SETUP_OUTAGE_BACKOFF // 60} мин '
+                                      f'[цикл {outage_cycles}/{SETUP_OUTAGE_MAX_CYCLES}]')
                     else:
                         logger.warning(f'OTC: прокси не поднял front-end binodex — ротация '
                                        f'({_proxy_outage_streak}/{PROXY_REPROBE_AFTER}), пауза '
