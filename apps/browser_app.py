@@ -275,16 +275,29 @@ async def _proxy_launch_options() -> dict:
 # Static-именованные entry-файлы binodex (app.js/app.css) на любом поддомене binodex.app.
 _BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/app\.(?:js|css)")
 
+# Навигации-перезагрузки cache-buster'а самого binodex: ?boot-recovery=<ts> / ?chunk-recovery=<ts>.
+_BINODEX_RECOVERY_RE = re.compile(
+    r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/[^?]*\?(?:[^#]*&)?(?:boot|chunk)-recovery=")
+
 
 async def _bust_binodex_cdn(context) -> None:
-    """Обойти протухший Cloudflare-кэш binodex.app. Эдж отдаёт устаревший `/assets/app.js`
-    (static-имя, cf-cache HIT ~сутки), ссылающийся на уже удалённый локаль-чанк → тот 404-ит с
-    MIME text/plain → Firefox блокирует ES-модуль (NS_ERROR_CORRUPTED_CONTENT) → SPA binodex не
-    бутстрапится (пустая страница, график/форма логина не появляются). Свежий Playwright-профиль
-    без кэша ловит это на КАЖДОМ старте; обычный браузер грузит из старого кэша.
-    Добавляем cache-bust query к static-именованным entry (app.js/app.css) → CF MISS → origin
-    отдаёт свежий app.js с живыми чанками. Хэш-чанки иммутабельны — не трогаем. Хостовый фильтр:
-    только binodex, TradingView-режим (FIN) не задет."""
+    """Обойти два дефекта фронта binodex.app в Playwright-Firefox (свежий профиль без кэша).
+
+    1) ПРОТУХШИЙ CDN-КЭШ: эдж отдаёт устаревший `/assets/app.js` (static-имя, cf-cache HIT ~сутки),
+       ссылающийся на удалённый чанк → 404 с MIME text/plain → Firefox блокирует ES-модуль → SPA не
+       бутстрапится. Добавляем cache-bust query к static-entry (app.js/app.css) → CF MISS → свежий
+       app.js с живыми чанками. Хэш-чанки иммутабельны — не трогаем.
+
+    2) ЦИКЛ CHUNK-RECOVERY (инцидент 2026-07-20): binodex ловит сбой динамического import()
+       chunk-error-хендлером и перезагружает страницу с `?chunk-recovery=<ts>`/`?boot-recovery=<ts>`
+       (cache-buster). В Firefox (и десктопном, и Playwright — в Chrome бага НЕТ) один чанк/ресурс
+       (вероятно ресурс Privy под Cloudflare-челленджем) стабильно «падает» → хендлер перезагружает
+       УЖЕ РАБОЧУЮ страницу → перезагрузка обрывает запросы (NS_BINDING_ABORTED) → снова «сбой» →
+       бесконечный self-reload, SPA не оседает. Проверено: если ГЛУШИТЬ эти навигации-перезагрузки,
+       страница остаётся смонтированной и торговый UI /trade поднимается штатно. Поэтому abort'им
+       top-level навигации с recovery-параметром — рабочая страница не сносится. Хостовый фильтр:
+       только binodex, TradingView-режим (FIN) не задет.
+    """
     token = str(int(time.time()))
 
     async def _cb(route):
@@ -295,7 +308,20 @@ async def _bust_binodex_cdn(context) -> None:
         except (Exception,):   # старый Playwright без override url — не ломаем загрузку
             await route.continue_()
 
+    async def _kill_recovery(route):
+        # Глушим ТОЛЬКО top-level навигацию-перезагрузку (не ресурсные запросы с тем же параметром):
+        # abort оставляет уже отрисованную страницу живой. Не-навигацию пропускаем без изменений.
+        req = route.request
+        try:
+            if req.is_navigation_request():
+                await route.abort()
+                return
+        except (Exception,):
+            pass
+        await route.continue_()
+
     await context.route(_BINODEX_APPJS_RE, _cb)
+    await context.route(_BINODEX_RECOVERY_RE, _kill_recovery)
 
 
 async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserInitResult:
