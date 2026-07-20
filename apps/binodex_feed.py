@@ -1,4 +1,4 @@
-"""Браузер-фри health-чек фида котировок binodex (api-coins.binodex.io, Socket.IO).
+"""Браузер-фри health-чек фида котировок binodex (api-coins.binodex.app, Socket.IO).
 
 Позволяет понять «binodex отдаёт котировки» БЕЗ запуска headless-браузера. В аутэйдже binodex
 (сайт на /trade, но WS не шлёт ценовые кадры, window.chartData=None — рынок закрыт / сбой на
@@ -19,7 +19,9 @@ from settings.browser_config import otc_ws_origin
 
 logger = init_logger(__name__)
 
-_WS_URL = 'wss://api-coins.binodex.io/market/?EIO=4&transport=websocket'
+# Домен переехал api-coins.binodex.io → .app (грабли 2026-07-20). Браузер реально коннектится
+# на .app — health-чек зеркалим туда же (на .io пока алиас, но не полагаемся).
+_WS_URL = 'wss://api-coins.binodex.app/market/?EIO=4&transport=websocket'
 _HEADERS = {'Origin': otc_ws_origin, 'User-Agent': 'Mozilla/5.0'}  # origin из binodex_settings
 
 FEED_PROBE_PAIR = 'EUR/USD'   # дефолтная пара — присутствует всегда
