@@ -42,7 +42,10 @@ from settings.browser_config import (otc_trade_url, otc_select_pair, otc_categor
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
-PRICE_WS_HINT = "api-coins.binodex.io"  # WS котировок binodex
+# WS котировок binodex. TLD-агностично: домен переехал api-coins.binodex.io → .app (грабли
+# 2026-07-20, всплыло при переезде на Chromium — реальный WS теперь wss://api-coins.binodex.app/market/;
+# Firefox до этого гейта не доходил). Иначе ws_connected не выставлялся → ложное «WS-токен протух».
+PRICE_WS_HINT = "api-coins.binodex."  # WS котировок binodex (TLD-агностично: .io/.app)
 
 # Цена графика прямо со страницы: движок binodex держит её в window.chartData = {symbol, price}.
 # price — анимированное значение, которое рисуется на ярлыке (округляется до decimals в main_app).
@@ -414,6 +417,18 @@ async def _privy_authenticated(page: Page) -> bool:
         return False
 
 
+async def _authed_safe(page: Page) -> bool:
+    """privy:token жив? БЕЗОПАСНЫЙ дефолт True при сбое чтения (страница навигирует на boot-recovery/
+    лендинг — eval может бросить): не прочитали токен → НЕ винить куки (не гнать релогин впустую).
+    Отличается от _privy_authenticated (тот на любой сбой → False): здесь сбой чтения ≠ «токена нет».
+    Нужен для трактовки редиректа с /trade — куки виним ТОЛЬКО когда токена достоверно нет."""
+    try:
+        return bool(await asyncio.wait_for(
+            page.evaluate("() => !!localStorage.getItem('privy:token')"), timeout=5))
+    except (Exception,):
+        return True
+
+
 async def _error_boundary_shown(page: Page) -> bool:
     """binodex показал React error-boundary («Something went wrong») — апп упал на буте. На
     битой/протухшей сессии Privy/инициализация бросает исключение → boundary, причём privy:token
@@ -445,10 +460,21 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     from apps.binodex_feed import feed_alive  # лениво: модуль тянет browser_config (bootstrap)
     if not await feed_alive():
         raise FeedOutage(f'binodex OTC: {detail} + market-WS молчит браузер-фри — аутэйдж binodex')
+    # За время ожидания UI binodex мог увести с /trade на ?boot-recovery=… / лендинг (само-сброс
+    # фронта, когда апп-шелл не поднялся). Токен ЖИВ → это аутэйдж их фронта, НЕ куки (релогин
+    # бесполезен) → SetupError(mounted=False): прокси-фолбэк + переподъём. Токена нет → сессия
+    # реально протухла → CookiesExpired. authed — безопасный дефолт True (грабли 2026-07: boot-recovery).
+    authed = await _authed_safe(page)
+    if not page.url.rstrip('/').endswith('/trade'):
+        if authed:
+            raise SetupError(f'binodex OTC: {detail} + редирект с /trade на {page.url} при живой '
+                             f'авторизации — аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)
+        raise CookiesExpired(f'binodex OTC: {detail} + редирект с /trade на {page.url}, '
+                             f'нет privy:token — сессия протухла')
     # Токен очищен (Privy сбросил протухшую сессию на буте) → реальная смерть сессии → релогин.
     # Проверяем ДО error-boundary: иначе «Something went wrong» поверх мёртвой сессии увёл бы в
     # выживание-без-релогина вместо восстановления кук.
-    if not await _privy_authenticated(page):
+    if not authed:
         raise CookiesExpired(f'binodex OTC: {detail} + нет privy:token (Demo) — сессия протухла')
     # Токен ЖИВ, но апп упал с error-boundary «Something went wrong» — это НЕ битая сессия (релогин
     # её не чинит: логинится успешно, апп падает снова), а front-end аутэйдж: JS-бандл/ленивый чанк
@@ -750,18 +776,21 @@ async def _verify_otc_ready(page: Page) -> None:
     сменившиеся селекторы). Редирект с /trade разводит _raise_ui_dead ПО ЖИВОСТИ privy:token, а не
     безусловно как отвал кук. WS-фид для BinoOptions НЕ критичен (цена из chartData, WS — фолбэк/
     liveness): не поднялся → лог деградации, БЕЗ raise."""
-    # Редирект с /trade НЕ трактуем безусловно как отвал кук: binodex может увести на лендинг/
-    # boot-recovery при ЖИВОЙ сессии (аутэйдж их фронта — релогин бесполезен, воспроизводится и на
-    # свежем логине, и на чистом браузере без кук; инцидент 2026-07-20: /trade и / зациклены на
-    # ?boot-recovery=<ts>). Разводит _raise_ui_dead ПО ЖИВОСТИ privy:token: форма логина / нет токена
-    # → CookiesExpired (релогин); токен жив → SetupError(mounted=False) — прокси-фолбэк + выживание с
-    # бэкоффом, без релогина и ложного «не могу восстановить куки». _raise_ui_dead всегда raises.
+    # authed читаем ПЕРВОЙ — от неё зависит трактовка редиректа (куки vs аутэйдж фронта binodex).
+    authed = await _authed_safe(page)
     if not on_trade(page.url):
-        await _raise_ui_dead(page, f'редирект с /trade на {page.url}')
+        # binodex увёл с /trade. Токен ЖИВ → апп-шелл не поднялся и фронт САМ сбросил на лендинг/
+        # ?boot-recovery=… (их само-восстановление) при живой сессии = аутэйдж их фронта, НЕ куки:
+        # релогин бесполезен → SetupError(mounted=False) (прокси-фолбэк + переподъём). Токена нет →
+        # storage_state реально протух → CookiesExpired. Грабли 2026-07: boot-recovery.
+        if authed:
+            raise SetupError(f'binodex OTC: редирект с /trade на {page.url} при живой авторизации — '
+                             f'аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)
+        raise CookiesExpired(f'binodex OTC: редирект с /trade на {page.url}, нет privy:token — сессия протухла')
     # Ранний гейт «сессии нет вовсе» (чистый контекст). На ПРОТУХШЕЙ (но присутствующей) сессии
     # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
     # буте → ловит авторитетная перепроверка ниже.
-    if not await _privy_authenticated(page):
+    if not authed:
         raise CookiesExpired('binodex OTC: нет privy:token (нет сессии) — нужен логин')
     # SPA не обязательно доехала: при сплеше чарт виснет, кнопка выбора пары не появляется.
     # _raise_ui_dead разводит: форма/Demo/error → CookiesExpired; фид мёртв → FeedOutage; токен жив,

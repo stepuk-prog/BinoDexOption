@@ -11,7 +11,7 @@ from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
 from logs import init_logger
 from settings import win_x, win_y
-from settings.browser_set import browser_launch_options, context_options
+from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
     tf_link_price, pop_up2, pop_up3, scope_chip, panel_toggle, panel_wrap
 from settings.config import (cookies, database, binary, prog_key, cookies_tv_id,
@@ -242,20 +242,32 @@ STEALTH_JS = """
 """
 
 
-async def _proxy_launch_options() -> dict:
-    """browser_launch_options + :50100-HTTP-прокси из binodex.settings.proxy_data через локальный
-    релей (settings/local_proxy — Firefox+Playwright НЕ умеет socks5-auth и ненадёжно жуёт http-auth
-    напрямую). Выбранный прокси запоминается в settings.proxy.current_proxy — main по нему ведёт
-    stats/ban. Сбой подбора/релея → базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
+async def _proxy_launch_options(chromium: bool = False) -> dict:
+    """launch-опции + :50100-HTTP-прокси из binodex.settings.proxy_data. Chromium (binodex) умеет
+    http-proxy с auth НАТИВНО (username/password в опции proxy) — local-relay не нужен. Firefox (TV)
+    socks5/http-auth напрямую не жуёт → через локальный релей (settings/local_proxy). Выбранный прокси
+    запоминается в settings.proxy.current_proxy — main по нему ведёт stats/ban. Сбой подбора/релея →
+    базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
     from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list, PROXY_SCOPE
-    from settings.local_proxy import start_local_proxy
+    base = chromium_launch_options if chromium else browser_launch_options
     if not proxy_list:
         await load_proxies_from_db(database)
     proxy = get_unused_proxy()
     if not proxy:
         logger.error(f'Прокси({PROXY_SCOPE}): нет активных :50100 (settings.proxy_data) — поднимаю напрямую')
-        return browser_launch_options
-    opts = browser_launch_options.copy()
+        return base
+    opts = base.copy()
+    if chromium:
+        # Chromium: нативный proxy-auth, без релея.
+        server = {'server': f'http://{proxy.ip}:{proxy.port}'}
+        if proxy.login and proxy.password:
+            server['username'] = proxy.login
+            server['password'] = proxy.password
+        opts['proxy'] = server
+        logger.report(f'Прокси({PROXY_SCOPE}): Chromium через {proxy.ip}:{proxy.port} (нативный auth)')
+        return opts
+    # Firefox (TV): через локальный релей (Playwright-Firefox не жуёт http-auth напрямую).
+    from settings.local_proxy import start_local_proxy
     if proxy.login and proxy.password:
         # start_local_proxy синхронный (time.sleep + socket.connect до ~3.3с) → в тред, иначе
         # блокировал бы event loop (WS-колбэки, обработчик SIGTERM) на всё окно старта релея.
@@ -331,21 +343,30 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
     use_proxy — OTC-фолбэк: поднять браузер через прокси из settings.proxy_data (когда прямой
     режим не поднял front-end binodex — напр. отравленный CDN-эдж). См. _proxy_launch_options."""
     state = storage_state if storage_state is not None else cookies
-    launch_options = await _proxy_launch_options() if use_proxy else browser_launch_options
+    # Движок: binodex (OTC, = not binary) → Chromium (новый фронт binodex не бутстрапится в Firefox —
+    # boot-recovery-цикл / Privy 403 с датацентр-IP, грабли 2026-07-20); TV (binary) → Firefox.
+    binodex = not binary
+    launch_options = (await _proxy_launch_options(chromium=binodex) if use_proxy
+                      else (chromium_launch_options if binodex else browser_launch_options))
+    # Контекст: Chromium НЕ подменяем UA (нативный Chrome-UA; Firefox-UA палил бы automation и
+    # рассинхронил client hints). Firefox — наш useragent из context_options.
+    ctx_options = ({k: v for k, v in context_options.items() if k != 'user_agent'}
+                   if binodex else context_options)
     pw = None
     browser = None
     try:
         pw = await async_playwright().start()
-        browser = await pw.firefox.launch(**launch_options)
+        launcher = pw.chromium if binodex else pw.firefox
+        browser = await launcher.launch(**launch_options)
         # OTC (binodex): контекст со storage_state (Privy держит сессию в localStorage,
         # одних cookies мало). FIN (TV): обычный контекст, куки добавляются позже add_cookies.
         if not binary and isinstance(state, dict):
             # state здесь — storage_state-dict из jsonb (Playwright принимает обычный dict);
             # тип StorageState — TypedDict, поэтому инспекцию типа подавляем.
             # noinspection PyTypeChecker
-            context = await browser.new_context(storage_state=state, **context_options)
+            context = await browser.new_context(storage_state=state, **ctx_options)
         else:
-            context = await browser.new_context(**context_options)
+            context = await browser.new_context(**ctx_options)
         await _bust_binodex_cdn(context)   # обойти протухший CDN-кэш binodex app.js (иначе пустая страница)
 
         # Добавляем stealth скрипт на уровне контекста (для всех страниц)

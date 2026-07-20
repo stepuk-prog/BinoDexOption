@@ -55,3 +55,16 @@ context_options = {
     # Цветовая схема
     'color_scheme': 'dark',
 }
+
+# --- Chromium (только binodex-домен: OTC) -------------------------------------------------
+# Новый фронт binodex НЕ бутстрапится в Playwright Firefox (зацикливается на boot-recovery-сплеше,
+# апп-шелл не монтируется; с датацентр-IP Privy отдаёт 403/400 и #root пуст — грабли 2026-07-20).
+# В Chromium поднимается за ~2с. TV/TradingView (binary) остаётся на Firefox — там всё работает.
+# Движок выбирается в browser_app.init_browser по binodex (= not binary). UA для Chromium НЕ
+# подменяем (нативный Chrome-UA совпадает с бинарём; подмена на Firefox-UA палила бы automation).
+chromium_launch_args = [
+    '--disable-blink-features=AutomationControlled',  # убрать automation-флаг (navigator.webdriver и пр.)
+    '--no-sandbox',                                   # headless-сервер (в т.ч. под ограниченным юзером)
+    '--disable-dev-shm-usage',                        # /dev/shm мал на серверах → /tmp, без крэшей вкладок
+]
+chromium_launch_options = {'headless': _headless, 'args': chromium_launch_args}
