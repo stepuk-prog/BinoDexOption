@@ -427,8 +427,9 @@ async def _error_boundary_shown(page: Page) -> bool:
 
 
 async def _raise_ui_dead(page: Page, detail: str) -> None:
-    """UI не поднялся — развести причину на классы (канон, docs/lifecycle-standard §4.5).
-    Всегда бросает:
+    """UI не поднялся ИЛИ редирект с /trade — развести причину на классы (канон, docs/lifecycle-
+    standard §4.5). Работает и на лендинге/boot-recovery (localStorage тот же origin, feed_alive
+    браузер-фри, апп-шелл там не смонтирован → mounted=False). Всегда бросает:
       • видна форма логина → CookiesExpired (отвал кук → релогин);
       • формы нет, market-WS молчит браузер-фри (feed_alive=False) → FeedOutage (аутэйдж фида);
       • формы нет, фид ЖИВ, нет privy:token (Privy очистил → Demo) → CookiesExpired (сессия мертва, релогин);
@@ -744,11 +745,19 @@ async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
 
 async def _verify_otc_ready(page: Page) -> None:
     """Авторизация + готовность торгового UI на /trade. Возвращается при успехе; иначе raises:
-    CookiesExpired (нужен релогин: редирект / нет токена / Demo / форма логина / error-boundary),
-    FeedOutage (аутэйдж фида), SetupError (UI/селекторы). WS-фид для BinoOptions НЕ критичен (цена
-    из chartData, WS — фолбэк/liveness): не поднялся → лог деградации, БЕЗ raise."""
+    CookiesExpired (нужен релогин: нет токена / Demo / форма логина), FeedOutage (аутэйдж фида),
+    SetupError (front-end аутэйдж binodex — в т.ч. редирект/boot-recovery при ЖИВОМ токене — либо
+    сменившиеся селекторы). Редирект с /trade разводит _raise_ui_dead ПО ЖИВОСТИ privy:token, а не
+    безусловно как отвал кук. WS-фид для BinoOptions НЕ критичен (цена из chartData, WS — фолбэк/
+    liveness): не поднялся → лог деградации, БЕЗ raise."""
+    # Редирект с /trade НЕ трактуем безусловно как отвал кук: binodex может увести на лендинг/
+    # boot-recovery при ЖИВОЙ сессии (аутэйдж их фронта — релогин бесполезен, воспроизводится и на
+    # свежем логине, и на чистом браузере без кук; инцидент 2026-07-20: /trade и / зациклены на
+    # ?boot-recovery=<ts>). Разводит _raise_ui_dead ПО ЖИВОСТИ privy:token: форма логина / нет токена
+    # → CookiesExpired (релогин); токен жив → SetupError(mounted=False) — прокси-фолбэк + выживание с
+    # бэкоффом, без релогина и ложного «не могу восстановить куки». _raise_ui_dead всегда raises.
     if not on_trade(page.url):
-        raise CookiesExpired(f'binodex OTC: вход слетел (редирект с /trade на {page.url})')
+        await _raise_ui_dead(page, f'редирект с /trade на {page.url}')
     # Ранний гейт «сессии нет вовсе» (чистый контекст). На ПРОТУХШЕЙ (но присутствующей) сессии
     # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
     # буте → ловит авторитетная перепроверка ниже.
