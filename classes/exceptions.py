@@ -11,11 +11,13 @@ class CookiesExpired(Exception):
 
 
 class FeedOutage(Exception):
-    """OTC: сайт на /trade и сессия жива (privy:token есть, формы логина нет), но market-WS
-    не отдаёт котировки — подтверждено браузер-фри пробой (apps/binodex_feed.feed_alive=False).
-    Это аутэйдж binodex (рынок закрыт / сбой на стороне сайта), НЕ отвал кук. Ловится в
-    main.py::_init_with_retry → выгрузка браузера + браузер-фри ожидание возврата фида, БЕЗ
-    рефреша кук и БЕЗ выхода. См. docs/lifecycle-standard.md §4.5."""
+    """OTC: аутэйдж НА СТОРОНЕ binodex, подтверждённый браузер-фри (apps/binodex_feed) — одно из:
+      • market-WS не отдаёт котировки (feed_alive=False) — рынок закрыт / сбой фида;
+      • auth/config API api.binodex.app не отвечает 5xx (api_alive=False) — backend-аутэйдж: Privy-
+        логин падает, app-shell не монтируется (грабли 2026-07-23, Cloudflare 502).
+    В обоих случаях релогин/прокси/смена движка бесполезны (всё тянет тот же сервис). Ловится в
+    main.py::_init_with_retry → выгрузка браузера + браузер-фри ожидание восстановления
+    (wait_for_feed→binodex_ready), БЕЗ рефреша кук и БЕЗ выхода. См. docs/lifecycle-standard.md §4.5."""
     pass
 
 

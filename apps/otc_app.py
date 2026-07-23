@@ -441,6 +441,19 @@ async def _error_boundary_shown(page: Page) -> bool:
         return False
 
 
+async def _raise_if_backend_down(detail: str) -> None:
+    """Backend-аутэйдж binodex доминирует над всеми прочими причинами: если auth/config API
+    (api.binodex.app) не отвечает (5xx/таймаут) браузер-фри — ни релогин, ни прокси, ни смена движка
+    не помогут (Privy-логин и монтирование app-shell тянут ИМЕННО этот API). Кидаем FeedOutage →
+    main выгружает браузер и ЖДЁТ восстановления браузер-фри (wait_for_feed→binodex_ready), без
+    петли релогина/прокси-каруселей и без выхода. Проверяем ТОЛЬКО на диагностике сбоя (не на
+    happy-path) — лишний сетевой пробой на каждом успешном init не нужен. Грабли 2026-07-23."""
+    from apps.binodex_feed import api_alive  # лениво: модуль тянет browser_config (bootstrap)
+    if not await api_alive():
+        raise FeedOutage(f'binodex OTC: {detail} + auth-API api.binodex.app не отвечает (5xx/таймаут) '
+                         f'браузер-фри — backend-аутэйдж binodex')
+
+
 async def _raise_ui_dead(page: Page, detail: str) -> None:
     """UI не поднялся ИЛИ редирект с /trade — развести причину на классы (канон, docs/lifecycle-
     standard §4.5). Работает и на лендинге/boot-recovery (localStorage тот же origin, feed_alive
@@ -454,7 +467,10 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
       • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл СМОНТИРОВАН → SetupError(mounted=True): сменились
         селекторы → N ретраев → плановый выход;
       • формы нет, фид ЖИВ, токен ЕСТЬ, апп-шелл НЕ смонтировался (сплеш) → SetupError(mounted=False):
-        front-end аутэйдж binodex → выживаем с бэкоффом, без выхода."""
+        front-end аутэйдж binodex → выживаем с бэкоффом, без выхода.
+    ПЕРЕД всем этим: auth-API (api.binodex.app) 5xx браузер-фри → FeedOutage (backend-аутэйдж
+    доминирует: релогин/прокси/движок бесполезны, пока API лежит; грабли 2026-07-23)."""
+    await _raise_if_backend_down(detail)
     if await _login_modal_open(page):
         raise CookiesExpired(f'binodex OTC: {detail} + всплыла форма логина — куки протухли')
     from apps.binodex_feed import feed_alive  # лениво: модуль тянет browser_config (bootstrap)
@@ -779,10 +795,14 @@ async def _verify_otc_ready(page: Page) -> None:
     # authed читаем ПЕРВОЙ — от неё зависит трактовка редиректа (куки vs аутэйдж фронта binodex).
     authed = await _authed_safe(page)
     if not on_trade(page.url):
-        # binodex увёл с /trade. Токен ЖИВ → апп-шелл не поднялся и фронт САМ сбросил на лендинг/
-        # ?boot-recovery=… (их само-восстановление) при живой сессии = аутэйдж их фронта, НЕ куки:
-        # релогин бесполезен → SetupError(mounted=False) (прокси-фолбэк + переподъём). Токена нет →
-        # storage_state реально протух → CookiesExpired. Грабли 2026-07: boot-recovery.
+        # binodex увёл с /trade. Сперва — backend: auth-API 5xx браузер-фри → это НЕ куки и НЕ
+        # front-end-аутэйдж, а падение бэкенда binodex (Privy-логин на 502); релогин/прокси не
+        # помогут → FeedOutage (браузер-фри ожидание). Грабли 2026-07-23.
+        await _raise_if_backend_down(f'редирект с /trade на {page.url}')
+        # Токен ЖИВ → апп-шелл не поднялся и фронт САМ сбросил на лендинг/?boot-recovery=… (их само-
+        # восстановление) при живой сессии = аутэйдж их фронта, НЕ куки: релогин бесполезен →
+        # SetupError(mounted=False) (прокси-фолбэк + переподъём). Токена нет → storage_state реально
+        # протух → CookiesExpired. Грабли 2026-07: boot-recovery.
         if authed:
             raise SetupError(f'binodex OTC: редирект с /trade на {page.url} при живой авторизации — '
                              f'аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)

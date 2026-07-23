@@ -73,6 +73,9 @@ otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_setting
 otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://binodex.app/trade')
 otc_landing_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'landing_url'), 'https://binodex.app/')
 otc_ws_origin = next((i['par_value'] for i in otc_setting if i['par_name'] == 'ws_origin'), 'https://binodex.app')
+# База auth/config API binodex (Privy-логин, /config) — для браузер-фри health-чека backend-аутэйджа
+# (apps/binodex_feed.api_alive). Отдельный сервис от market-WS; при его 502 app-shell не монтируется.
+otc_api_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'api_url'), 'https://api.binodex.app')
 
 otc_select_pair = find_par(data=otc_setting, par='select_pair_add')
 # Кнопка категории «Валюты» в модалке выбора

@@ -9,7 +9,7 @@ from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            session_recoverable, write_status_offline)
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
-from apps.binodex_feed import feed_alive, wait_for_feed
+from apps.binodex_feed import binodex_ready, wait_for_feed
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
@@ -171,10 +171,11 @@ async def _init_with_retry():
         try:
             manager = await init_load(use_proxy=_use_proxy)
         except FeedOutage as error:
-            # OTC: авторизация жива, но market-WS молчит браузер-фри — аутэйдж binodex (детектор уже
-            # подтвердил feed_alive=False), НЕ отвал кук. Ждём возврат фида БРАУЗЕР-ФРИ (без рефреша,
-            # без выхода, без спама в cookies-канал). Фид вернулся → новый виток init.
-            logger.warning(f'OTC: аутэйдж binodex ({error}) — жду восстановления фида браузер-фри')
+            # OTC: аутэйдж binodex — market-WS молчит ЛИБО auth-API api.binodex.app лежит (5xx),
+            # подтверждено браузер-фри. НЕ отвал кук и НЕ front-end-аутэйдж: релогин/прокси не помогут,
+            # пока сервис binodex недоступен. Ждём восстановления БРАУЗЕР-ФРИ (без рефреша, без выхода,
+            # без спама в cookies-канал). binodex_ready вернулся → новый виток init.
+            logger.warning(f'OTC: аутэйдж binodex ({error}) — жду восстановления браузер-фри')
             if not await _await_binodex_feed(at_start=True):
                 return None  # остановлены сигналом во время ожидания фида
             continue
@@ -300,12 +301,12 @@ async def _await_binodex_feed(at_start: bool) -> bool:
     одно вверх. True — котировки вернулись (можно поднимать браузер); False — остановлены сигналом.
     at_start=True — текст «браузер не поднимаю»; False (рантайм) — «выгрузил браузер»."""
     if at_start:
-        logger.report('🕓 binodex не отдаёт котировки — браузер не поднимаю, жду восстановления фида')
+        logger.report('🕓 binodex недоступен (фид/бэкенд) — браузер не поднимаю, жду восстановления')
     else:
-        logger.report('🕓 binodex перестал отдавать котировки — выгрузил браузер, посты на паузе, жду восстановления')
+        logger.report('🕓 binodex стал недоступен (фид/бэкенд) — выгрузил браузер, посты на паузе, жду восстановления')
     if not await wait_for_feed(_stop_event):
         return False  # SIGTERM во время ожидания
-    logger.report('✅ binodex снова отдаёт котировки — поднимаю браузер, продолжаю работу')
+    logger.report('✅ binodex снова доступен (фид+API) — поднимаю браузер, продолжаю работу')
     return True
 
 
@@ -397,9 +398,10 @@ async def bot():
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен
 
-    # OTC-аутэйдж ДО запуска браузера: binodex не отдаёт котировки → не поднимаем тяжёлый Firefox,
-    # ждём фид браузер-фри (apps/binodex_feed) и стартуем, только когда котировки вернутся.
-    if not binary and not await feed_alive():
+    # OTC-аутэйдж ДО запуска браузера: binodex недоступен (market-WS молчит ЛИБО auth-API
+    # api.binodex.app лежит) → не поднимаем тяжёлый браузер, ждём восстановления браузер-фри
+    # (apps/binodex_feed.binodex_ready) и стартуем, только когда и фид, и API вернутся.
+    if not binary and not await binodex_ready():
         if not await _await_binodex_feed(at_start=True):
             await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
             return
@@ -421,12 +423,13 @@ async def bot():
         if stop_event.is_set():
             break
 
-        # OTC-аутэйдж в рантайме: опцион не снялся И binodex не отдаёт котировки (браузер-фри
-        # проверка feed_alive). Это аутэйдж на стороне binodex (рынок закрыт/сбой), а НЕ наш отвал
-        # кук/краш → не рестартим и не спамим алертами: выгружаем тяжёлый браузер, ждём фид браузер-
-        # фри, поднимаемся при восстановлении. Отвал кук/краш — фид при этом ЖИВ (feed_alive=True),
-        # поэтому сюда не попадают и отрабатывают штатные ветки ниже.
-        if not binary and not res_option.result and not await feed_alive():
+        # OTC-аутэйдж в рантайме: опцион не снялся И binodex недоступен (браузер-фри binodex_ready:
+        # market-WS молчит ЛИБО auth-API api.binodex.app лежит). Это аутэйдж на стороне binodex
+        # (рынок закрыт/сбой/backend-502), а НЕ наш отвал кук/краш → не рестартим и не спамим
+        # алертами: выгружаем тяжёлый браузер, ждём восстановления браузер-фри, поднимаемся при
+        # возврате. Отвал кук/краш — binodex при этом ЖИВ (binodex_ready=True), поэтому сюда не
+        # попадают и отрабатывают штатные ветки ниже.
+        if not binary and not res_option.result and not await binodex_ready():
             try:
                 # Верхняя граница: зависший Firefox-close не должен подвесить аварийную выгрузку.
                 await asyncio.wait_for(manager.close(), timeout=50)
