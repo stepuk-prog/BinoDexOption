@@ -14,7 +14,7 @@ from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
     tf_link_price, pop_up2, pop_up3, scope_chip, panel_toggle, panel_wrap
-from settings.config import (cookies, database, binary, prog_key, cookies_tv_id,
+from settings.config import (cookies, database, binary, browser_engine, prog_key, cookies_tv_id,
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
@@ -336,6 +336,18 @@ async def _bust_binodex_cdn(context) -> None:
     await context.route(_BINODEX_RECOVERY_RE, _kill_recovery)
 
 
+def _use_chromium() -> bool:
+    """Выбор движка. env BROWSER форсит явно (firefox|chromium); при auto (дефолт) — по режиму:
+    binodex (OTC, not binary) → Chromium, TV (binary) → Firefox. Поведение фронта binodex скачет
+    между движками (грабли 2026-07-20 / цикл ?boot-recovery) — BROWSER переключает без правок кода.
+    См. settings.config.browser_engine."""
+    if browser_engine == "chromium":
+        return True
+    if browser_engine == "firefox":
+        return False
+    return not binary
+
+
 async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserInitResult:
     """Инициализация браузера Playwright.
     storage_state — свежий OTC Privy-стейт из БД (Survive §4.3); None → фоллбэк на
@@ -343,9 +355,10 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
     use_proxy — OTC-фолбэк: поднять браузер через прокси из settings.proxy_data (когда прямой
     режим не поднял front-end binodex — напр. отравленный CDN-эдж). См. _proxy_launch_options."""
     state = storage_state if storage_state is not None else cookies
-    # Движок: binodex (OTC, = not binary) → Chromium (новый фронт binodex не бутстрапится в Firefox —
-    # boot-recovery-цикл / Privy 403 с датацентр-IP, грабли 2026-07-20); TV (binary) → Firefox.
-    binodex = not binary
+    # Движок: env BROWSER (auto|firefox|chromium). auto — по режиму: binodex (OTC) → Chromium
+    # (фронт binodex не бутстрапился в Firefox — boot-recovery-цикл / Privy 403, грабли 2026-07-20);
+    # TV (binary) → Firefox. См. _use_chromium.
+    binodex = _use_chromium()
     launch_options = (await _proxy_launch_options(chromium=binodex) if use_proxy
                       else (chromium_launch_options if binodex else browser_launch_options))
     # Контекст: Chromium НЕ подменяем UA (нативный Chrome-UA; Firefox-UA палил бы automation и

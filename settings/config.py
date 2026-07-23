@@ -23,6 +23,17 @@ database = Database()
 
 timeframe = os.getenv("TIMEFRAME")
 binary = parse_bool(os.getenv("BINARY", "0"))
+
+# Явный выбор движка браузера. Поведение фронта binodex нестабильно: то не бутстрапится в Firefox
+# (грабли 2026-07-20 → ушли на Chromium), то наоборот Chromium уходит в цикл ?boot-recovery, а
+# Firefox работает. Чтобы переключать движок без правок кода/деплоя:
+#   auto (дефолт) — по режиму: binodex (OTC, not binary) → chromium, TV (binary) → firefox;
+#   firefox|chromium — принудительно этот движок независимо от режима.
+# Влияет ТОЛЬКО на выбор движка (apps/browser_app._use_chromium); привязку логина/кук/прокси к
+# режиму (binary) не трогает.
+browser_engine = os.getenv("BROWSER", "auto").lower()
+if browser_engine not in ("auto", "firefox", "chromium"):
+    raise ValueError(f"BROWSER='{browser_engine}' не поддерживается (auto|firefox|chromium)")
 # Ключ программы — фильтр своих строк в общей settings.option_setting.
 prog_key = os.getenv("PROG_KEY")
 
