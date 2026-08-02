@@ -1,5 +1,6 @@
 
 import asyncio
+import os
 import re
 import time
 
@@ -26,6 +27,46 @@ from classes.result_types import BrowserInitResult, OperationResult
 logger = init_logger(__name__)
 
 EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate (у Playwright нет встроенного таймаута)
+
+# Грабли 2026-08-02 (node-6, лёг BinoStoch): Playwright ≥1.5x перепроверяет host-requirements,
+# если маркеру <build>/DEPENDENCIES_VALIDATED больше 30 дней (kMaximumReValidationPeriod).
+# Проверка ОБХОДИТ каталог билда и stat-ит каждую запись, а `<build>/firefox/lock` — симлинк на
+# "<ip>:+<pid>", висячий ПО ДИЗАЙНУ: его оставляет любой запущенный Firefox, в т.ч. ДРУГОГО бота
+# на той же ноде (кэш ~/.cache/ms-playwright общий для всего флота). Итог: `ENOENT ... stat
+# '.../firefox/lock'` на КАЖДЫЙ launch, маркер не обновляется → нода залипает навсегда.
+# Лечится снятием симлинка: владельцу он после старта не нужен (читается только при старте,
+# профиль Playwright лежит в /tmp). Флотовый свип того же класса — pw_lock_sweep.sh
+# (ExecStartPre юнитов + ночной таймер pw-lock-sweep.timer, ставит DeployManager).
+_PW_STALE_LOCK_RE = re.compile(r"ENOENT.*?stat '([^']*/(?:firefox|chrome-linux\d*)/lock)'")
+
+
+def _heal_stale_pw_lock(error_text: str) -> bool:
+    """Снять висячий lock-симлинк из каталога билда Playwright. True — сняли, есть смысл в ретрае."""
+    match = _PW_STALE_LOCK_RE.search(error_text)
+    if not match:
+        return False
+    lock_path = match.group(1)
+    # Только висячий СИМЛИНК: обычный файл/живая цель — не наш случай, руками не трогаем.
+    if not os.path.islink(lock_path) or os.path.exists(lock_path):
+        return False
+    try:
+        os.unlink(lock_path)
+    except OSError as error:
+        logger.error(f'Висячий Playwright-lock {lock_path} не снялся: {error}')
+        return False
+    logger.report(f'Снят висячий Playwright-lock {lock_path} (блокировал запуск браузера) — повтор запуска')
+    return True
+
+
+async def launch_healing_stale_lock(launcher, **launch_kwargs):
+    """`launcher.launch(...)` с ОДНИМ ретраем после снятия висячего Playwright-lock (см. выше).
+    Не наш случай → исключение пробрасывается как было."""
+    try:
+        return await launcher.launch(**launch_kwargs)
+    except Exception as error:
+        if not _heal_stale_pw_lock(str(error)):
+            raise
+        return await launcher.launch(**launch_kwargs)
 
 
 def _is_signin_url(url: str) -> bool:
@@ -370,7 +411,7 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
     try:
         pw = await async_playwright().start()
         launcher = pw.chromium if binodex else pw.firefox
-        browser = await launcher.launch(**launch_options)
+        browser = await launch_healing_stale_lock(launcher, **launch_options)
         # OTC (binodex): контекст со storage_state (Privy держит сессию в localStorage,
         # одних cookies мало). FIN (TV): обычный контекст, куки добавляются позже add_cookies.
         if not binary and isinstance(state, dict):
