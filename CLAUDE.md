@@ -33,12 +33,6 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 
 ## OTC / binodex (важное)
 - Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `docs/COOKIES_BINODEX.md`.
-- **Кадр OTC** — `element.screenshot` по боксу канваса. Подложку рисует браузер: свой слой `#bino_bg`
-  по боксу канваса, залитый `constant.bg_otc_color` (чёрный) — `apply_bg_layer`;
-  штатный фон binodex `.wrap_bg` выключен за аккаунтом (CPU). Индикатор
-  графика включается на каждом старте (`apply_indicator`, имя в `binodex_settings.indicator_name`) —
-  binodex держит набор в localStorage, а он не всегда есть в storage_state. Ярлык пары попадает в
-  кадр сам; off-zone вторым проходом прячет прочий HTML внутри бокса (иначе тулбар уедет в пост).
 - Цена кадра OTC — из **`window.chartData.price`** (значение, которое движок рисует на ярлыке; медиана нескольких чтений вокруг скрина в `screenshot_otc`). **WS** `api-coins.binodex.io` (трекер `classes/price_tracker.py`) — для liveness/детекта и как фолбэк: WS опережает график на ~150 мс, поэтому как цену кадра не годится. Подробно: `docs/BINODEX_PRICE.md`.
 - Выбор пары — модалка binodex по селекторам из `settings.binodex_settings`; **auto-wait вместо sleep** (проверено на живом сайте, ~1.15с).
 - **Авто-рефреш кук** (Privy email-OTP): при отвале OTC-кук бот перелогинивается **INLINE в основном браузере** — `apps/otc_login.py::otc_inline_login` (логин по коду с почты, селекторы `login_*` из `binodex_settings`), вызывается из `otc_app.init_otc` при `CookiesExpired`. Подпроцесс-воркер убран. `main._recover_otc_cookies` — счётчик-предохранитель: **Recover-3→Exit** (§4.3). Креды почты — `telegram.telegram.mail`/`mail_app_pass` (Gmail app-password). Privy шлёт код с `no-reply@privy.io` И `no-reply@mail.privy.io` (фильтр по домену).
