@@ -6,6 +6,18 @@
 > `setup_candle_scale_item`/`setup_chart_scale_item` (оставлены по тексту `'30S'`/`'H1'` —
 > value-specific; id у пункта похоже привязан к активному, а не к значению),
 > `setup_indicator_item` (индикаторы в проде отключены), `login_*` (Privy, вне зоны).
+>
+> **Статус 2026-08-04: опасение подтвердилось.** Вопреки записи выше, `setup_candle_scale_item` и
+> `setup_chart_scale_item` в БД всё-таки оказались переведены на `#id` — и это тихо ломало
+> настройку: id binodex вешает на АКТИВНЫЙ пункт списка (`.chart_period_active` /
+> `.profile_add_wrap_selected_wrap_option_active`), поэтому клик выбирал уже выбранное, а на
+> закрытом дропдауне `wait_for` падал по таймауту. Масштаб держался сам собой (аккаунт/
+> `storage_state`), а не выставлялся программами. Обе строки возвращены на текстовые селекторы
+> (`.chart_setting_modal_items >> text="30S"`, `.profile_add_wrap_selected_wrap_options >> text="H1"`) —
+> проверено на живом сайте. **На `#id` эти два пункта не переводить.**
+>
+> Значения списков binodex (2026-08-04): свеча — `5S 15S 30S 1M 5M 15M 30M 1H 4H`;
+> график — `M15 M30 H1 H3 H12 D1 D7 D14`.
 
 ## Селекторы binodex
 

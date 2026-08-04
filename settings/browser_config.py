@@ -100,6 +100,11 @@ otc_login_email = next((i['par_value'] for i in otc_setting if i['par_name'] == 
 # (новый контекст из storage_state → дефолт; reload в рамках сессии значение держит). Поэтому
 # выставляются в init_otc на каждом старте, а не только на релогине.
 # Пункты выбираются ПО ТЕКСТУ (порядок списков на binodex плавает): свеча '30S', график 'H1'.
+# ВАЖНО: пункты (`*_item`) на #id переводить НЕЛЬЗЯ — binodex вешает id `setup_candle_scale_item`/
+# `setup_chart_scale_item` на АКТИВНЫЙ пункт списка, а не на значение: клик выбирал бы уже
+# выбранное, т.е. масштаб молча не выставлялся бы вовсе (грабли 2026-08-04, проверено на живом
+# сайте — id сидел на `.chart_period_active` / `..._option_active`; строки в БД общие на все
+# программы семьи, вернули текстовые селекторы). См. docs/binodex_id_request.md.
 otc_candle_scale = find_par(data=otc_setting, par='setup_candle_scale')
 otc_candle_scale_item = find_par(data=otc_setting, par='setup_candle_scale_item')
 otc_chart_scale = find_par(data=otc_setting, par='setup_chart_scale')
