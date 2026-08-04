@@ -13,7 +13,6 @@ decimals делает main_app через option_data.round (= otc_assets.decima
 графика (canvas) + QR.
 """
 import asyncio
-import base64
 import re
 import statistics
 import time
@@ -21,7 +20,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from PIL import Image
-from playwright.async_api import Page, WebSocket, FloatRect
+from playwright.async_api import Page, WebSocket
 
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
@@ -31,13 +30,14 @@ from apps.exit_app import close_program
 from apps.otc_login import otc_inline_login
 from logs import init_logger
 from settings.config import screenshot_path, database, prog_key, cookies_pocket_id
-from settings.constant import globe_otc_path
+from settings.constant import bg_otc_color
 from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
-                                     otc_chart_scale, otc_chart_scale_item)
+                                     otc_chart_scale, otc_chart_scale_item,
+                                     otc_indicators_btn, otc_indicator_item, otc_indicator_name)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -309,7 +309,6 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         target = pair + ' OTC'
         for _ in range(32):
             if tracker.get_price(target) is not None:
-                await _build_label_cutout(page, target)   # запечь вырезку ярлыка, пока off-zone снят
                 return True
             await asyncio.sleep(0.25)
         logger.warning(f"OTC: пара '{pair}' не прогрузилась на binodex (нет WS-котировки за 8с) — пропускаю")
@@ -318,7 +317,9 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         logger.warning(f"OTC: ошибка выбора пары {pair} — {error}")
         return False
     finally:
-        await _apply_offzone(page)   # off-zone восстанавливается на ЛЮБОМ исходе (успех/неудача/ошибка)
+        # Слои кадра (подложка + off-zone) восстанавливаются на ЛЮБОМ исходе (успех/неудача/ошибка):
+        # off-zone снимался в начале ради модалки, а подложку мог снести reload перед выбором пары.
+        await _restore_frame_layers(page)
 
 
 async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
@@ -531,118 +532,123 @@ async def apply_chart_scale(page: Page) -> None:
             logger.warning(f"OTC: не удалось выставить масштаб ({name}): {error}")
 
 
-# ── Композит кадра OTC (глобус-файл + прозрачный канвас + ярлык пары + QR) ────────────────────────────
-# Глобус (`.wrap_bg`) на binodex ВЫКЛЕН за аккаунтом (главный потребитель CPU headless-рендера,
-# docs/BINODEX_CPU.md), поэтому график грузится на тёмном фоне (~40% CPU вместо ~90%). Сам глобус
-# в пост подкладываем композитом из статичного файла под прозрачный канвас — кадр выглядит как
-# раньше, но браузер глобус не рендерит. Слои: глобус(файл, низ) + канвас(toDataURL, прозрачные
-# свечи/оси/часы/ценник) + ярлык пары(вырезка, см. ниже) + QR.
+# ── Кадр OTC: своя подложка слоем в браузере + element.screenshot ─────────────────────────────────────
+# Штатный фон binodex (`.wrap_bg`) ВЫКЛЕН за аккаунтом — он главный потребитель CPU headless-рендера
+# (docs/BINODEX_CPU.md), поэтому график грузится на сплошном тёмном фоне. Свою подложку кладём
+# СВОИМ слоем `#bino_bg` (fixed, z-index:-1, промоутнут на отдельный слой) ровно по боксу канваса:
+# картинка ложится 1:1 с кадром, композиция не зависит от вьюпорта. Кадр снимаем element.screenshot
+# — ярлык пары, часы «Время закрытия» и ценник (HTML/канвас) попадают в него сами.
+#
+# Раньше кадр собирался композитом в PIL (глобус-файл + прозрачный канвас + вырезка ярлыка по
+# разнице кадров). Перезамер 2026-08-04 показал, что ПОД OFF-ZONE слой фона стоит всего +4…6 пт CPU
+# (23%→27%) и +85 мс на кадр — дешевле, чем держать вырезку ярлыка (самая хрупкая часть пайплайна:
+# двойной снимок региона, дёрганье visibility чужого элемента, попиксельное матирование).
+_BG_LAYER_ID = 'bino_bg'   # ВАЖНО: тот же id захардкожен в белом списке _HIDE_OFFZONE_JS
 
-# toDataURL канваса → пиксели с альфой; w/h — бэкстор канваса, css* — его CSS-бокс (ресайз при DPR).
-_CANVAS_ALPHA_JS = ("el => ({ url: el.toDataURL('image/png'), w: el.width, h: el.height,"
-                    " cssw: Math.round(el.getBoundingClientRect().width),"
-                    " cssh: Math.round(el.getBoundingClientRect().height) })")
-
-# Ярлык пары (флаг+пара+OTC+payout) — HTML поверх канваса, в toDataURL он НЕ попадает, поэтому
-# кладём отдельным слоем. Находим по содержимому+геометрии (у верх-левого угла бокса канваса,
-# текст с 'OTC' и '%') — устойчиво к ротации классов binodex; ставим маркер data-otc-lbl.
-_LABEL_BOX_JS = r"""
-(sel) => {
+# Слой подложки по боксу канваса. Пересоздаётся идемпотентно: reload страницы сносит DOM,
+# поэтому зовётся и в init_otc, и после каждого выбора пары (рядом с off-zone).
+_BG_LAYER_JS = r"""
+({sel, color, id}) => {
   const cv = document.querySelector(sel);
   if (!cv) return null;
-  const b = cv.getBoundingClientRect();
-  let best = null, area = 0;
-  for (const el of document.querySelectorAll('body *')) {
-    const t = el.textContent || '';
-    if (!t.includes('OTC') || !t.includes('%')) continue;
-    const r = el.getBoundingClientRect();
-    if (r.left < b.left + 24 && r.top < b.top + 44 && r.width > 0 && r.width < 360 && r.height < 80) {
-      const a = r.width * r.height; if (a > area) { area = a; best = el; }
-    }
-  }
-  if (!best) return null;
-  best.setAttribute('data-otc-lbl', '1');
-  const r = best.getBoundingClientRect();
-  return {x: r.left, y: r.top, w: r.width, h: r.height};
+  const r = cv.getBoundingClientRect();
+  let el = document.getElementById(id);
+  if (!el) { el = document.createElement('div'); el.id = id; document.body.appendChild(el); }
+  el.style.cssText = 'position:fixed; z-index:-1; pointer-events:none;' +
+    `left:${r.left}px; top:${r.top}px; width:${r.width}px; height:${r.height}px;` +
+    `background:${color}; transform:translateZ(0); will-change:transform;` +
+    'backface-visibility:hidden;';
+  el.style.setProperty('visibility', 'visible', 'important');   // пережить уже наложенный off-zone
+  return {w: Math.round(r.width), h: Math.round(r.height)};
 }
 """
 
-_globe_asset: Image.Image | None = None        # глобус-файл (RGBA), грузится один раз
-_label_cutout_cache: dict = {}                  # {asset: (cutout RGBA, (dx, dy))} — вырезка ярлыка на пару
+# Отрисованы ли свечи: доля непрозрачных пикселей канваса по даунсэмплу 64×40 (drawImage, без
+# PNG-энкода — дешевле прежнего toDataURL и не зависит от способа съёмки кадра). Пустой канвас → 0.
+_CANVAS_FILL_JS = r"""
+el => {
+  const w = 64, h = 40;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(el, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  let n = 0;
+  for (let i = 3; i < d.length; i += 4) if (d[i] > 16) n++;
+  return n / (w * h);
+}
+"""
 
+# Набор включённых индикаторов из localStorage binodex (`indicators/chart-<n>` = JSON-массив имён).
+_INDICATORS_JS = r"""
+() => {
+  const out = [];
+  for (const k of Object.keys(localStorage)) {
+    if (!/^indicators\//.test(k)) continue;
+    try { const v = JSON.parse(localStorage.getItem(k) || '[]'); if (Array.isArray(v)) out.push(...v); }
+    catch (e) { /* мусор в ключе — просто пропускаем */ }
+  }
+  return out;
+}
+"""
 
-def _load_globe(size) -> Image.Image:
-    """Глобус-файл (RGBA) под размер канваса; кэш в памяти (файл читаем один раз)."""
-    global _globe_asset
-    if _globe_asset is None:
-        _globe_asset = Image.open(globe_otc_path).convert('RGBA')
-    return _globe_asset if _globe_asset.size == tuple(size) else _globe_asset.resize(size, Image.Resampling.LANCZOS)
-
-
-async def _canvas_alpha(element) -> Image.Image:
-    """Пиксели канваса с альфой (toDataURL), приведённые к CSS-боксу (ресайз при DPR)."""
-    d = await _eval(element, _CANVAS_ALPHA_JS)
-    img = Image.open(BytesIO(base64.b64decode(d['url'].split(',', 1)[1]))).convert('RGBA')
-    if (d['w'], d['h']) != (d['cssw'], d['cssh']):
-        img = img.resize((d['cssw'], d['cssh']), Image.Resampling.LANCZOS)
-    return img
-
-
-def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int = 10) -> Image.Image:
-    """Вырезка ярлыка по разнице: A (ярлык виден) − B (фон). Альфа = clamp(|A−B|*k).
-    Так фон (где A==B) становится прозрачным, остаётся только сам ярлык — без «короба»."""
-    a, b = crop_a.convert('RGB').load(), crop_b.convert('RGB').load()
-    out = Image.new('RGBA', crop_a.size)
-    o = out.load()
-    for y in range(crop_a.size[1]):
-        for x in range(crop_a.size[0]):
-            ra, ga, ba = a[x, y]; rb, gb, bb = b[x, y]
-            d = abs(ra - rb) + abs(ga - gb) + abs(ba - bb)
-            o[x, y] = (ra, ga, ba, 0 if d < thr else min(255, d * k))
-    return out
-
-
-async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
-    """Вырезка ярлыка пары (с прозрачным фоном) и её позиция относительно бокса канваса.
-    Глобус НЕ включаем — снимаем регион дважды при выкл глобусе: ярлык виден (A) и скрыт (B),
-    вычитаем фон. None — если не собрать. Строить нужно при СНЯТОМ off-zone (полный UI) — иначе
-    ярлык не захватится; поэтому пересборка (rebuild=True) идёт из select_otc_pair до off-zone.
-    rebuild=True — пересобрать с нуля (актуальный payout на каждый выбор пары); rebuild=False
-    (из screenshot_otc) — взять готовое из кэша, собранного на этом же выборе пары."""
-    key = symbol_key(asset)
-    if not rebuild and key in _label_cutout_cache:
-        return _label_cutout_cache[key]
+async def apply_bg_layer(page: Page) -> bool:
+    """Подложить свой слой под канвас (см. _BG_LAYER_JS). Зовётся в init_otc и после каждого
+    выбора пары: reload страницы сносит DOM вместе со слоем. Идемпотентно — слой переиспользуется.
+    Ошибка не критична: кадр соберётся на штатном тёмном фоне binodex (тёмно-синий) — логируем."""
     try:
-        lb = await _eval(page, _LABEL_BOX_JS, screen_zone_otc)
-        if not lb:
-            return None
-        lx, ly, lw, lh = round(lb['x']), round(lb['y']), round(lb['w']), round(lb['h'])
-        region: FloatRect = {'x': lx, 'y': ly, 'width': lw, 'height': lh}
-        a_buf = await _shot(page, clip=region)                           # A: ярлык виден
-        await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
-                          " if (e) e.style.setProperty('visibility','hidden','important'); }")
-        try:
-            await page.wait_for_timeout(150)
-            b_buf = await _shot(page, clip=region)                       # B: фон без ярлыка
-        finally:                                                          # вернуть ярлык в любом случае
-            await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
-                              " if (e) e.style.removeProperty('visibility'); }")
-        # Пиксельное матирование — синхронный CPU-цикл; уводим в поток, чтобы не блокировать event loop.
-        cutout = await asyncio.to_thread(_matte_label, Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
-        result = (cutout, (lx - clip['x'], ly - clip['y']))
-        _label_cutout_cache[key] = result
-        return result
+        box = await _eval(page, _BG_LAYER_JS,
+                          {'sel': screen_zone_otc, 'color': bg_otc_color, 'id': _BG_LAYER_ID})
+        if not box:
+            logger.warning('OTC: подложка не легла — нет канваса для позиционирования слоя')
+            return False
+        return True
     except (Exception,) as err:
-        logger.debug(f"OTC {asset}: вырезка ярлыка не удалась ({err}) — кадр без ярлыка")
-        return None
+        logger.warning(f'OTC: подложка не легла ({err}) — кадр будет на тёмном фоне binodex')
+        return False
+
+
+async def apply_indicator(page: Page) -> None:
+    """Включить индикатор графика (binodex_settings.indicator_name, например 'Whale Absorption').
+    binodex держит набор в localStorage (`indicators/chart-<n>`), а контекст поднимается из
+    storage_state в БД, где индикатора может не быть → включаем на каждом старте браузера, как и
+    масштабы (apply_chart_scale). Идемпотентно: уже включён → выходим без кликов. localStorage
+    переживает reload в рамках сессии, поэтому зовём только из init_otc.
+    Требует СНЯТОГО off-zone (модалка индикаторов вне зоны канваса) — так и стоит в init_otc.
+    Ошибки не критичны (индикатор — оформление кадра, не данные): лог и продолжаем."""
+    if not (otc_indicator_name and otc_indicators_btn and otc_indicator_item):
+        return
+    try:
+        if otc_indicator_name in (await _eval(page, _INDICATORS_JS) or []):
+            return                                    # уже включён (пришёл со storage_state)
+        await page.locator(otc_indicators_btn).first.click(timeout=TIMEOUT_SHORT)
+        item = page.locator(otc_indicator_item).filter(has_text=otc_indicator_name).first
+        await item.wait_for(state='visible', timeout=TIMEOUT_SHORT)
+        await item.click(timeout=TIMEOUT_SHORT)
+        # Модалка закрывается сама по выбору; подтверждаем по localStorage, а не по DOM.
+        for _ in range(10):
+            if otc_indicator_name in (await _eval(page, _INDICATORS_JS) or []):
+                logger.info(f"OTC: индикатор '{otc_indicator_name}' включён")
+                return
+            await asyncio.sleep(0.3)
+        logger.warning(f"OTC: индикатор '{otc_indicator_name}' не включился — кадр без него")
+    except (Exception,) as err:
+        logger.warning(f"OTC: не удалось включить индикатор '{otc_indicator_name}': {err}")
+    finally:
+        try:                                          # страховка: модалка индикаторов не должна
+            await page.keyboard.press('Escape')       # остаться открытой (перекроет график)
+        except (Exception,):
+            pass
 
 
 # ── off-zone оптимизация CPU (~40→~22%): скрыть UI вне зоны скрина ─────────────────────────────────
-# Весь UI вне канваса (правое торговое меню, аккаунт-бар, сайдбар) рендерится зря (в кадр через
-# toDataURL не попадает) — прячем `visibility:hidden`, экономия ~17 пт. В БЕЛОМ СПИСКЕ остаются
-# видимыми #setup_settings_open (по нему _ui_loaded детектит отвал кук в рантайме — НЕЛЬЗЯ прятать!)
-# и ярлык пары (нужен для вырезки + это кнопка открытия модалки). Применяем после выбора пары и в
-# init_otc; СНИМАЕМ на время select_otc_pair (модалка выбора — вне зоны, под off-zone не кликается).
+# Весь UI вне канваса (правое торговое меню, аккаунт-бар, сайдбар) рендерится зря и в кадр не
+# попадает (кадр — клип по боксу канваса) — прячем `visibility:hidden`, экономия ~17 пт. В БЕЛОМ
+# СПИСКЕ остаются видимыми #setup_settings_open (по нему _ui_loaded детектит отвал кук в рантайме —
+# НЕЛЬЗЯ прятать!), ярлык пары (он ВНУТРИ бокса канваса → идёт в кадр, плюс это кнопка модалки) и
+# наш слой подложки #bino_bg (он вне цепочки канваса, иначе off-zone погасил бы фон кадра).
+# Применяем после выбора пары и в init_otc; СНИМАЕМ на время select_otc_pair (модалка выбора —
+# вне зоны, под off-zone не кликается).
 _HIDE_OFFZONE_JS = r"""
 (sel) => {
   const cv = document.querySelector(sel);
@@ -650,8 +656,13 @@ _HIDE_OFFZONE_JS = r"""
   const keep = new Set();
   for (let e = cv; e; e = e.parentElement) keep.add(e);
   let n = 0;
+  // transition:none — у binodex на части UI висит `transition: .5s`, и visibility АНИМИРУЕТСЯ:
+  // computed остаётся 'visible' ещё полсекунды после нашей установки. Кадр снимается раньше, и
+  // спрятанное попадало в пост. Глушим переход, чтобы скрытие было мгновенным (снимается в
+  // _CLEAR_OFFZONE_JS вместе с visibility).
   for (const el of document.querySelectorAll('body *')) {
     if (keep.has(el) || el === cv || el.contains(cv)) continue;
+    el.style.setProperty('transition', 'none', 'important');
     el.style.setProperty('visibility', 'hidden', 'important');
     n++;
   }
@@ -660,17 +671,43 @@ _HIDE_OFFZONE_JS = r"""
     for (let e = el; e; e = e.parentElement) e.style.setProperty('visibility', 'visible', 'important');
     for (const d of el.querySelectorAll('*')) d.style.setProperty('visibility', 'visible', 'important');
   };
-  show(document.querySelector('#setup_settings_open'));    // детект кук (_ui_loaded) — обязательно видим
-  const pl = document.querySelector('#select_pair_add');   // ярлык пары (вырезка + кнопка модалки)
+  const settings = document.querySelector('#setup_settings_open');
+  show(settings);                                          // детект кук (_ui_loaded) — обязательно видим
+  const pl = document.querySelector('#select_pair_add');   // ярлык пары (в кадре + кнопка модалки)
   show(pl);
   if (pl && pl.parentElement) show(pl.parentElement);
+  show(document.getElementById('bino_bg'));                // подложка кадра (id = _BG_LAYER_ID)
+
+  // Второй проход — ЧИСТКА КАДРА. Кадр снимается element.screenshot по боксу канваса, поэтому
+  // любой видимый HTML внутри этого бокса попадёт в пост: тулбар-кнопки graph_pair_setting,
+  // селектор масштаба, боковые ручки. Раньше (кадр из canvas.toDataURL) они были не важны, а
+  // show(pl.parentElement) выше как раз возвращает видимость соседям ярлыка. Прячем всё видимое,
+  // что ПЕРЕСЕКАЕТ бокс, кроме: цепочки канваса, ярлыка, подложки и кнопки детекта кук.
+  // Правило геометрическое, а не по классам binodex — переживает ротацию их разметки.
+  const b = cv.getBoundingClientRect();
+  const bg = document.getElementById('bino_bg');
+  for (const el of document.querySelectorAll('body *')) {
+    if (el === cv || el.contains(cv) || el === bg) continue;
+    if (pl && (el === pl || pl.contains(el) || el.contains(pl))) continue;
+    if (settings && (el === settings || el.contains(settings))) continue;   // не трогать детект кук
+    if (getComputedStyle(el).visibility !== 'visible') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (r.right <= b.left || r.left >= b.right || r.bottom <= b.top || r.top >= b.bottom) continue;
+    el.style.setProperty('transition', 'none', 'important');   // без этого скрытие «доезжает» 0.5с
+    el.style.setProperty('visibility', 'hidden', 'important');
+    n++;
+  }
   return n;
 }
 """
 
-# Снять off-zone: убрать наши инлайновые visibility со всех элементов (binodex inline-visibility не использует).
-_CLEAR_OFFZONE_JS = ("() => { for (const el of document.querySelectorAll('body *'))"
-                     " if (el.style && el.style.visibility) el.style.removeProperty('visibility'); }")
+# Снять off-zone: убрать наши инлайновые visibility/transition со всех элементов (binodex инлайн
+# ни то, ни другое не использует, поэтому чужого не затираем).
+_CLEAR_OFFZONE_JS = ("() => { for (const el of document.querySelectorAll('body *')) {"
+                     " if (!el.style) continue;"
+                     " if (el.style.visibility) el.style.removeProperty('visibility');"
+                     " if (el.style.transition) el.style.removeProperty('transition'); } }")
 
 
 async def _apply_offzone(page: Page) -> None:
@@ -689,26 +726,21 @@ async def _clear_offzone(page: Page) -> None:
         logger.debug(f"OTC off-zone clear: {err}")
 
 
-async def _build_label_cutout(page: Page, asset: str) -> None:
-    """Запечь вырезку ярлыка пары, ПОКА off-zone снят (полный UI) — иначе ярлык не захватится.
-    Вызывается из select_otc_pair при успехе ДО восстановления off-zone (finally). Ошибки не
-    критичны — кадр соберётся и без вырезки (ярлык просто не ляжет)."""
-    try:
-        box = await page.locator(screen_zone_otc).first.bounding_box()
-        if box:
-            clip = {'x': round(box['x']), 'y': round(box['y']),
-                    'width': round(box['width']), 'height': round(box['height'])}
-            await _label_cutout(page, asset, clip, rebuild=True)   # пересобрать (актуальный payout), пока off-zone снят
-    except (Exception,) as err:
-        logger.debug(f"OTC {asset}: подготовка вырезки ярлыка не удалась — {err}")
+async def _restore_frame_layers(page: Page) -> None:
+    """Вернуть слои кадра после выбора пары: подложка (её мог снести reload) + off-zone.
+    Зовётся из select_otc_pair на ЛЮБОМ исходе — порядок важен только тем, что off-zone
+    белым списком оставляет подложку видимой (см. _HIDE_OFFZONE_JS)."""
+    await apply_bg_layer(page)
+    await _apply_offzone(page)
 
 
 async def screenshot_otc(page: Page, asset: str = None, qr=None):
-    """Кадр графика binodex композитом (глобус-файл + прозрачный канвас + ярлык пары + QR) +
-    цена графика (медиана чтений window.chartData.price вокруг кадра). chartData.price — то
-    значение, что движок рисует на ярлыке; точнее WS-тика, который опережает график на ~150 мс
-    (см. docs/BINODEX_PRICE.md). Если chartData недоступен — фолбэк на WS-цену по моменту кадра.
-    Глобус НЕ рендерится браузером (выкл за аккаунтом, экономия CPU) — подкладывается из файла.
+    """Кадр зоны графика binodex (клип по боксу канваса: подложка #bino_bg + свечи/оси/часы/ценник
+    + ярлык пары) + QR оверлеем, и цена графика (медиана чтений window.chartData.price вокруг
+    кадра). chartData.price — то значение, что движок рисует на ярлыке; точнее WS-тика, который
+    опережает график на ~150 мс (см. docs/BINODEX_PRICE.md). Если chartData недоступен — фолбэк на
+    WS-цену по моменту кадра. Подложку рисует браузер нашим слоем (apply_bg_layer), штатный фон
+    binodex выключен за аккаунтом.
     :return: (success, price|error_text, screenshot_path|'')."""
     symbol = symbol_key(asset)
     last_error = 'нет цены графика OTC'
@@ -729,30 +761,27 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                     'width': round(box['width']), 'height': round(box['height'])}
             # Защита от пустого канваса: после переключения пары канвас ~1-3с пустой (свечи не
             # дорисованы) — не постим голый кадр. Ждём отрисовку до CANVAS_READY_SECONDS (wall-clock
-            # по time.monotonic — каждый _canvas_alpha это _eval до EVAL_TIMEOUT). Кадр канваса
-            # СНИМАЕМ ОДИН раз за итерацию и им же проверяем непустоту — убрали двойной toDataURL
-            # (было probe+захват = 2 PNG-энкода/кадр в стационаре). Ценовой брекет (reads_before →
-            # t_shot → канвас → reads_after) держим ВНУТРИ итерации, чтобы медиана оставалась
-            # синхронной с кадром; пустой кадр НЕ постим (ждём/ретраим до бюджета).
+            # по time.monotonic — каждая проба это _eval до EVAL_TIMEOUT). Проба дешёвая (даунсэмпл
+            # 64×40 без PNG-энкода), поэтому она отдельно от кадра, а ценовой брекет (reads_before →
+            # t_shot → кадр → reads_after) идёт ПОСЛЕ готовности — так медиана синхронна с кадром.
             deadline = time.monotonic() + CANVAS_READY_SECONDS
-            canvas_img = None
-            reads: list[float] = []
-            t_shot = time.time()
+            ready = False
             while True:
-                reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
-                t_shot = time.time()
-                candidate = await _canvas_alpha(element)
-                reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
-                if sum(candidate.getchannel('A').histogram()[16:]) >= candidate.width * candidate.height * CANVAS_MIN_OPAQUE:
-                    canvas_img = candidate  # непустой кадр — используем его же как снимок
+                fill = await _eval(element, _CANVAS_FILL_JS)
+                if isinstance(fill, (int, float)) and fill >= CANVAS_MIN_OPAQUE:
+                    ready = True
                     break
                 if time.monotonic() >= deadline:
                     break  # свечи так и не появились за бюджет → ретрай попытки
                 await asyncio.sleep(0.4)
-            if canvas_img is None:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
+            if not ready:   # свечи так и не появились → ретрай попытки (редкий труло-стак)
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: канвас пуст "
                                f"{CANVAS_READY_SECONDS:.0f}с (свечи не отрисованы) для {asset}")
                 continue
+            reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
+            t_shot = time.time()
+            shot_buf = await _shot(page, clip=clip)
+            reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
             if reads:
                 price = statistics.median(reads)
             else:
@@ -764,15 +793,10 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены графика OTC для {asset}")
                 await asyncio.sleep(0.5)
                 continue
-            # Сэндвич: глобус(файл) → канвас(прозрачный) → ярлык пары(вырезка) → QR.
-            comp = Image.alpha_composite(_load_globe(canvas_img.size), canvas_img)
-            cut = await _label_cutout(page, asset, clip)
-            if cut:
-                comp.alpha_composite(cut[0], dest=(max(0, cut[1][0]), max(0, cut[1][1])))
-            comp = comp.convert('RGB')
+            frame = Image.open(BytesIO(shot_buf)).convert('RGB')
             if qr:
-                paste_overlay(comp, qr[0], otc_qr_x, otc_qr_y)  # на OTC один QR (qr110)
-            comp.save(screenshot_path)
+                paste_overlay(frame, qr[0], otc_qr_x, otc_qr_y)  # на OTC один QR (qr110)
+            frame.save(screenshot_path)
             return True, price, screenshot_path
         except (Exception,) as error:
             last_error = str(error)
@@ -825,9 +849,14 @@ async def _verify_otc_ready(page: Page) -> None:
     # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
     if not await _privy_authenticated(page):
         raise CookiesExpired('binodex OTC: UI поднялся, но privy:token очищен (Demo) — сессия протухла')
-    # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на каждом старте.
+    # Масштабы графика и индикатор сбрасываются/отсутствуют при каждом запуске браузера (новый
+    # контекст из storage_state) — выставляем на каждом старте, ДО off-zone: их модалки вне зоны
+    # канваса и под off-zone не кликаются.
     await apply_chart_scale(page)
-    # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
+    await apply_indicator(page)
+    # Подложка кадра своим слоем (штатный фон binodex выключен за аккаунтом ради CPU).
+    await apply_bg_layer(page)
+    # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык/подложка — в белом списке).
     await _apply_offzone(page)
     # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.
     tracker = get_price_tracker()
@@ -893,7 +922,6 @@ async def init_otc(manager: "BrowserManager") -> bool:
     логин в ЭТОМ ЖЕ браузере (apps/otc_login), без подпроцесса/двойной загрузки, и перепроверка. Не
     вышло → CookiesExpired наверх (main: счётчик RECOVER_ATTEMPTS → плановый выход)."""
     page = manager.pages['main']
-    _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
     url = await _otc_page_url()

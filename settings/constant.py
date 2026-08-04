@@ -4,10 +4,11 @@ qr110_path = f'{os.getcwd()}/pictures/qr-code_110.png'
 qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
 # OTC использует собственный QR (один на скрине) — остальное (позиция otc_qr_x/y и т.д.) без изменений
 otc_qr110_path = f'{os.getcwd()}/pictures/otc_qr-code_110.png'
-# Статичный глобус (фон графика OTC) для композита кадра: глобус на binodex ВЫКЛЕН за аккаунтом
-# (экономия CPU, docs/BINODEX_CPU.md), а в пост подкладывается из этого файла под прозрачный
-# канвас. Заготовлен разово офлайн (земля одна на все пары). Размер = бокс canvas (~1470x870).
-globe_otc_path = f'{os.getcwd()}/pictures/globe_otc.png'
+# Подложка кадра OTC. Её рисует БРАУЗЕР: otc_app.apply_bg_layer заливает этим цветом свой слой
+# #bino_bg по боксу канваса, кадр снимается element.screenshot (штатный фон binodex .wrap_bg
+# выключен за аккаунтом — docs/BINODEX_CPU.md). Сплошной цвет, а не картинка: у binodex свой фон
+# тёмно-синий, а постам нужен чистый чёрный. Вернуть картинку — см. docs/CHANGELOG.md 2026-08-04.
+bg_otc_color = '#000000'
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах

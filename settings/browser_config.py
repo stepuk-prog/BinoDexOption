@@ -104,3 +104,11 @@ otc_candle_scale = find_par(data=otc_setting, par='setup_candle_scale')
 otc_candle_scale_item = find_par(data=otc_setting, par='setup_candle_scale_item')
 otc_chart_scale = find_par(data=otc_setting, par='setup_chart_scale')
 otc_chart_scale_item = find_par(data=otc_setting, par='setup_chart_scale_item')
+# Индикатор графика. Набор индикаторов binodex держит в localStorage (`indicators/chart-<n>`), а
+# контекст поднимается из storage_state в БД, где его может не быть → включается в init_otc на
+# каждом старте (idempotent, см. otc_app.apply_indicator). Пункт модалки ищется ПО ТЕКСТУ
+# (indicator_name), как и пункты масштабов — порядок списков на binodex плавает.
+# next()+None: старая БД без этих строк не валит старт, индикатор просто не включится.
+otc_indicators_btn = next((i['par_value'] for i in otc_setting if i['par_name'] == 'setup_indicators'), None)
+otc_indicator_item = next((i['par_value'] for i in otc_setting if i['par_name'] == 'indicator_item'), None)
+otc_indicator_name = next((i['par_value'] for i in otc_setting if i['par_name'] == 'indicator_name'), None)
