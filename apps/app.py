@@ -118,6 +118,8 @@ async def exit_main(channel_mess: bool,
     :param check_cookies: если больше 2 - подозрение на отвал cookies - перезагрузка
     :return: result, plus - если окончился плюсом, fall - перезапуск
     """
+    # plus — ЧЕСТНЫЙ итог опциона (option_data.plus), а не «отработали без сбоя»: по нему FIN решает,
+    # можно ли закрывать неделю (main.py — выходим только на плюсовом опционе, минус → работаем дальше).
     plus = False
     # Штатная остановка (SIGTERM/SIGINT): ничего не шлём в канал и не трогаем счётчики —
     # просто чистим состояние и выходим. Иначе ошибочный выход на shutdown ушёл бы
@@ -134,7 +136,7 @@ async def exit_main(channel_mess: bool,
         except (Exception,) as error:
             logger.error(f'Ошибка отправки сообщения о сбое программы - {error}')
     else:
-        plus = True
+        plus = bool(option_data.plus)
         if option_data.plus:
             check = await check_plus()
             if not check[0]:

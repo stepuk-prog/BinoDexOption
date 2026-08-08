@@ -476,6 +476,11 @@ async def bot():
         if binary and not stop_event.is_set():
             if (datetime.now() + timedelta(hours=2)).weekday() >= 5:
                 if not res_option.plus:
+                    # Неделю закрываем ТОЛЬКО на плюсовом опционе: минус (res_option.plus=False при
+                    # result=True) или сбой опциона — не повод выходить, работаем дальше до плюса.
+                    # Пока не вышли, status в БД остаётся true, т.е. диспетчер видит нас живыми.
+                    logger.info('Выходные: последний опцион %s — не закрываюсь, работаю до плюсового',
+                                'в минус' if res_option.result else 'не завершился (сбой)')
                     # Прерываемый сон (как выше) — иначе SIGTERM завис бы тут на 100–150с
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=await time_sleep())
