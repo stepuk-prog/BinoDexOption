@@ -129,9 +129,13 @@ async def close_dom_popups(page: Page):
         pass
 
 
-# JavaScript для подавления всплывающих окон TradingView
+# JavaScript для подавления всплывающих окон TradingView.
+# ВАЖНО — IIFE, а не голая `() => {...}`: add_init_script в Python-биндинге отдаёт исходник КАК ЕСТЬ
+# (в отличие от evaluate, который сам вызывает функцию), поэтому стрелочная функция лишь вычислялась в
+# значение и НИКОГДА не выполнялась — скрипт инжектился, но не работал. Обёртка (…)() запускает тело и
+# держит свои const'ы в собственной области видимости (не течём в глобалы страницы).
 TV_POPUP_SUPPRESS_JS = """
-() => {
+(() => {
     const closeSelectors = [
         'button[class*="closeButton"]',
         'button[class*="close-button"]',
@@ -188,12 +192,14 @@ TV_POPUP_SUPPRESS_JS = """
             if (watchOverlap()) clearInterval(wait);
         }, 200);
     }
-}
+})();
 """
 
-# JavaScript для маскировки автоматизации (Firefox-совместимый)
+# JavaScript для маскировки автоматизации (Firefox-совместимый).
+# IIFE — по той же причине, что и у TV_POPUP_SUPPRESS_JS (см. комментарий выше): без вызова тело не
+# выполнялось, т.е. маскировка не применялась вообще (navigator.webdriver оставался true).
 STEALTH_JS = """
-() => {
+(() => {
     // Firefox: удаляем webdriver из прототипа Navigator
     try {
         delete Navigator.prototype.webdriver;
@@ -279,7 +285,7 @@ STEALTH_JS = """
             configurable: true
         });
     } catch (e) {}
-}
+})();
 """
 
 
