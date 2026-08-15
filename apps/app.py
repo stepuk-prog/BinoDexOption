@@ -63,6 +63,10 @@ def get_water():
 
 # Вехи серии плюсов: на каждой — пост-веха в канал (картинка pictures/pluses/{N}.png).
 # ОДИН источник (было два списка в этом же файле — легко разъезжались при правке).
+# Потолок на всё уведомление о сбое (bug-картинка): см. exit_main. Отдельно от
+# TG_SEND_TIMEOUT — тот на ОДНУ попытку, а здесь их несколько подряд.
+BUG_PHOTO_TOTAL_TIMEOUT = 60
+
 PLUS_MILESTONES = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
 # Из них те, что дополнительно пересылаются ботом-модератором в случайную тему форума
 # (forward_plus_milestone). Ниже 25 (5/10/15/20) — только пост в канал, без пересылки.
@@ -131,8 +135,18 @@ async def exit_main(channel_mess: bool,
         # повтора — при потерях SYN сообщение о сбое просто не доходило (в инциденте оно
         # таймаутило вместе с постами). Сбой отправки здесь по-прежнему НЕ фатален: только лог,
         # выход продолжается штатно.
-        ok, err = await send_photo_safe('pictures/bug.png', main_bug_message(),
-                                        mes_type='сообщение о сбое программы')
+        # Общий потолок (2026-08-15): внутри send_photo_safe до трёх последовательных
+        # ожиданий (отправка TG_SEND_TIMEOUT → проба истории → повтор TG_RECONNECT_TIMEOUT),
+        # а при не-таймаутном повторе добавляется ещё restart в lost_connection_photo — это
+        # больше двух минут. Для УВЕДОМЛЕНИЯ о сбое чересчур: прогноз уже потерян, держать
+        # из-за картинки выход незачем.
+        try:
+            ok, err = await asyncio.wait_for(
+                send_photo_safe('pictures/bug.png', main_bug_message(),
+                                mes_type='сообщение о сбое программы'),
+                timeout=BUG_PHOTO_TOTAL_TIMEOUT)
+        except (Exception,) as error:   # в т.ч. TimeoutError общего потолка
+            ok, err = False, repr(error)
         if not ok:
             logger.error(f'Ошибка отправки сообщения о сбое программы - {err}')
     else:
