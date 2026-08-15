@@ -96,6 +96,38 @@ def _close_session_later(session) -> None:
     _spawn_close(_stop())
 
 
+def _guard_restart(session) -> None:
+    """Схлопнуть конкурентные `Session.restart()` в один.
+
+    pyrofork лечит обрыв сам: и `ping_worker` (нет ответа на Ping), и `recv_worker` (сокет
+    закрылся), и ошибка отправки — каждый делает `create_task(self.restart())`, а защиты от
+    параллельного входа в `restart()` там нет. Пока сессия жила секунды (штатное поведение —
+    новая на каждый аплоад), накопить два рестарта было негде. Наша сессия живёт постоянно и
+    пингуется каждые 5с, поэтому под частыми обрывами задачи накладывались, и две корутины
+    лезли читать один сокет:
+        RuntimeError: read() called while another coroutine is already waiting for incoming data
+    Сессия оставалась в перманентном самолечении, аплоад висел и выбирал весь TG_SEND_TIMEOUT
+    (инцидент 2026-08-15 16:44, signals_fast: 4 гонки и 9 таймаутов отправки за час; до патча
+    в тот же день — ни одной).
+
+    Лечение оставляем (оно полезно), но делаем его ОДНОКРАТНЫМ: пока рестарт идёт, повторные
+    вызовы просто возвращаются — сессию всё равно уже поднимают. Подменяем атрибут ИНСТАНСА,
+    поэтому pyrofork не трогаем: внутренние `self.restart()` возьмут именно эту обёртку.
+    """
+    original = getattr(session, 'restart', None)
+    if original is None:      # версия pyrofork без restart — нечего оборачивать, не падаем
+        return
+    lock = asyncio.Lock()
+
+    async def _restart_once(*args, **kwargs):
+        if lock.locked():        # рестарт уже идёт — второй не нужен
+            return
+        async with lock:
+            return await original(*args, **kwargs)
+
+    session.restart = _restart_once
+
+
 class ReusableMediaSession:
     """Прокси над `Session`: одно media-соединение, переживающее аплоады.
 
@@ -143,6 +175,7 @@ class ReusableMediaSession:
                 self._session = None
                 _close_session_later(session)
                 raise
+            _guard_restart(session)   # см. _guard_restart: гонка самолечения при живой сессии
             self._session = session
             logger.info(f"Media-сессия аплоада поднята (DC{self._dc_id}) — переиспользуется")
 
