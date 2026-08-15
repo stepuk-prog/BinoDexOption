@@ -22,6 +22,12 @@ _transient_401_strikes = 0
 # повторяем ОДИН раз; окно выше потолка / повторный FloodWait → теряем пост (бот продолжает).
 _FLOODWAIT_MAX = 120
 
+# Маркер «файл долетел не целиком» в тексте ошибки Telegram: FILE_PARTS_INVALID,
+# FILE_PART_X_MISSING, FILE_PART_SIZE_CHANGED и пр. Ловим подстрокой, а не типом: pyrofork
+# отображает в классы лишь часть кодов (напр. FILE_PART_0_MISSING), остальные приходят общим
+# BadRequest с кодом в тексте.
+_FILE_PART_MARKER = 'FILE_PART'
+
 
 def _reset_transient_strikes() -> None:
     """Сброс цепочки транзиент-401: успешный пост доказал, что session жива и постит."""
@@ -186,6 +192,30 @@ async def lost_connection_photo(error, photo, text, mes_type, started_at: dateti
         except (Exception,) as err:
             logger.session(f'⚠️ Пост ({mes_type}) не доставлен: повтор после FloodWait не удался — {err}')
             return False, 'повтор после FloodWait не удался', None
+    # ПОРВАННЫЙ АПЛОАД (2026-08-15). Если media-соединение умирает ПОСРЕДИ загрузки файла,
+    # pyrofork это наверх не поднимает: воркер в save_file глотает ошибку invoke (log.exception),
+    # аплоад «завершается» с недостающими частями, и уже сама отправка отбивается сервером как
+    # FILE_PART_* (FILE_PARTS_INVALID / FILE_PART_X_MISSING). Это НЕ обрыв нашей сессии и НЕ смерть
+    # ключа — до правки такая ошибка падала в общую ветку внизу, то есть пост терялся и цикл уходил
+    # в рестарт юнита. Лечение — просто отправить заново: save_file возьмёт новый file_id, а
+    # media-сессия к этому моменту уже выброшена (её инвалидировал ReusableMediaSession.invoke на
+    # ошибке связи) и поднимется заново. Наблюдаемо на проде: соединение к media-DC рвётся раз в
+    # 1.5–2 мин, так что попасть серединой аплоада в разрыв — вопрос времени.
+    # Пробы доставки здесь НЕ нужно (как и у FloodWait): сервер ОТКЛОНИЛ отправку, сообщения в
+    # канале нет — дубля повтор не даст.
+    if _FILE_PART_MARKER in str(error).upper():
+        logger.warning(f'{mes_type}: аплоад порван ({error}) — отправляю файл заново')
+        try:
+            sent = await asyncio.wait_for(
+                bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
+                timeout=TG_RECONNECT_TIMEOUT)
+            logger.info('Пост (%s) ушёл с повтора после порванного аплоада (id=%s)', mes_type, sent.id)
+            _reset_transient_strikes()
+            return True, '', sent.id
+        except (Exception,) as err:
+            logger.session(f'⚠️ Пост ({mes_type}) не доставлен: повтор после порванного аплоада '
+                           f'не удался — {err}')
+            return False, 'повтор после порванного аплоада не удался', None
     # session_failed = тип Unauthorized ИЛИ строковый маркер (AUTH_KEY_* и пр.). Но голый
     # Unauthorized («Auth key not found») бывает транзиентом на медиа-DC при ЖИВОМ ключе —
     # хоронить бота тогда нельзя. Маркеры однозначно мёртвые; голый 401 различаем get_me().
