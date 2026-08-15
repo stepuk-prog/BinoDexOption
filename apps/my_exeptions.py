@@ -80,6 +80,12 @@ async def _find_posted(caption: str, since: datetime):
              повторяем: потерянный сигнал и рестарт юнита дороже редкого дубля).
     """
     async def _scan():
+        # Режим парсинга обязан совпадать с режимом ОТПРАВКИ. Здесь send_photo идёт БЕЗ
+        # parse_mode, то есть режимом клиента, и parse() без аргумента берёт тот же — совпадает.
+        # Появится в отправке явный parse_mode (как в BinodexAITrade, где шлют ParseMode.HTML) —
+        # его надо продублировать сюда: DEFAULT (Markdown+HTML) и HTML дают РАЗНЫЙ plain на
+        # парных разделителях (**жирный**, `код`, ~~зачёрк~~, __двойной__, ||спойлер||), и проба
+        # молча перестала бы находить пост.
         parsed = await get_app().parser.parse(caption)
         plain = (parsed or {}).get('message') or ''
         if not plain:  # распарсить не смогли — сверять не с чем, честнее не угадывать
