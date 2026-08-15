@@ -159,6 +159,8 @@ class ReusableMediaSession:
         Любая ошибка пробрасывается КАК ЕСТЬ: решение о судьбе юзербота (мёртвый ключ vs
         транзиент медиа-DC) принимает `my_exeptions`/`exit_app` по своей пробе `get_me()`,
         а не этот слой.
+
+        Отмена (`CancelledError`) выбрасывает соединение — см. ветку ниже.
         """
         session = self._session
         if session is None:
@@ -168,9 +170,35 @@ class ReusableMediaSession:
         except _CONNECTION_DEAD:
             await self._invalidate()
             raise
+        except Exception:
+            # RPC-ошибка при ЖИВОМ соединении (FILE_PART_*, FloodWait выше порога) —
+            # соединение исправно, рвать его ради чужой проблемы нельзя (см. docstring).
+            raise
+        except BaseException:
+            # Сюда попадает только не-Exception, то есть на практике CancelledError:
+            # внешний `wait_for(...)` в `my_exeptions.send_photo_safe` отменяет отправку, и отмена прилетает
+            # ровно в этот await. Раньше ветки не было → соединение оставалось в кэше, хотя
+            # аплоад на нём оборвали на полуслове, а `bot.restart()` его не чинит (прокси
+            # живёт здесь, а не в client.media_sessions, и его stop() — no-op). Гасим без
+            # await: в отменяемом контексте любой await словил бы отмену снова (та же
+            # логика, что в start()).
+            self._drop_session_nowait()
+            raise
 
     async def stop(self) -> None:
         """no-op: `save_file` зовёт `stop()` в `finally`, а нам нужно живое соединение."""
+
+    def _drop_session_nowait(self) -> None:
+        """Забыть соединение и погасить его в фоне — версия `_invalidate` для отменяемого
+        контекста (`except` после `CancelledError`), где ждать нельзя: и `async with
+        self._lock`, и `session.stop()` снова словили бы отмену, а сокет остался бы висеть.
+
+        Лок намеренно не берём. Гонка возможна только с `start()`, и её исход безопасен:
+        тот увидит `_session is None` и поднимет новое соединение — ровно то, что нужно.
+        """
+        session, self._session = self._session, None
+        if session is not None:
+            _close_session_later(session)
 
     async def _invalidate(self) -> None:
         """Закрыть и забыть текущее соединение — следующий аплоад поднимет новое."""
