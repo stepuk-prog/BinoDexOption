@@ -164,7 +164,17 @@ class ReusableMediaSession:
         """
         session = self._session
         if session is None:
-            raise ConnectionError("media-сессия аплоада не поднята")
+            # Соединение выбросила ПРЕДЫДУЩАЯ ошибка (обрыв/отмена), а `save_file` зовёт
+            # `start()` РОВНО ОДИН раз в начале аплоада — следующие части файла его сами не
+            # переподнимут. Без переподъёма здесь весь текущий аплоад падал на
+            # «media-сессия не поднята», а внешний `wait_for` срубал его по таймауту:
+            # инцидент 2026-08-15 15:15 на NODE-1 (signals_fast) — `OSError: Connection lost`
+            # на одной части, дальше `ConnectionError` на следующей и `TIMEOUT 60s` наверху.
+            # `start()` идемпотентен и берёт лок, так что повторный вход безопасен.
+            await self.start()
+            session = self._session
+            if session is None:      # start() отработал, а сессии нет — отдаём честную ошибку
+                raise ConnectionError("media-сессия аплоада не поднята")
         try:
             return await session.invoke(data, *args, **kwargs)
         except _CONNECTION_DEAD:
