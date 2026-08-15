@@ -27,12 +27,13 @@ EXIT_SETUP = 12
 EXIT_USERBOT = 13
 BROWSER_MAX_ATTEMPTS = 3    # подъёмов браузера подряд; больше биться смысла нет → exit(EXIT_BROWSER)
 
-# Таблицы таймфреймов (перенесены из Data_set.py)
-spr_timeframe = [{'timeframe': '1m', 'search_tf': '60', 'name_tf': '1 минута'},
-                 {'timeframe': '3m', 'search_tf': '300', 'name_tf': '3 минуты'},
-                 {'timeframe': '5m', 'search_tf': '300', 'name_tf': '5 минут'},
-                 {'timeframe': '10m', 'search_tf': '900', 'name_tf': '10 минут'},
-                 {'timeframe': '15m', 'search_tf': '900', 'name_tf': '15 минут'},
+# Таблицы таймфреймов (перенесены из Data_set.py). Ключ search_tf снят 2026-08-15 вместе с
+# одноимённым полем Option: его никто не читал (осталось от старого поиска котировки в TV).
+spr_timeframe = [{'timeframe': '1m', 'name_tf': '1 минута'},
+                 {'timeframe': '3m', 'name_tf': '3 минуты'},
+                 {'timeframe': '5m', 'name_tf': '5 минут'},
+                 {'timeframe': '10m', 'name_tf': '10 минут'},
+                 {'timeframe': '15m', 'name_tf': '15 минут'},
                  ]
 
 # Варианты времени экспирации (мин) для рандомизации (FIN и OTC одинаково): график

@@ -34,7 +34,9 @@ async def _fetch(db: str, sql: str, args, fetch_mode: str):
             return await conn.fetchval(sql, *args)
         return await conn.fetch(sql, *args)
     finally:
-        await conn.close()
+        # С потолком: закрытие идёт в finally на СТАРТЕ (логгера/сигналов ещё нет), и зависший
+        # close полумёртвого соединения подвесил бы процесс молча, до всякой диагностики.
+        await conn.close(timeout=5)
 
 
 def bootstrap_fetch(db: str, sql: str, *args, fetch_mode: str = 'all'):

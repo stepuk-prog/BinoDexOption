@@ -58,6 +58,9 @@ overlap_random = max(0, min(overlap_random, overlap))  # инвариант 0 <=
 # добавляет time_sleep). Тайминги retry/backoff остаются константами в коде.
 main_cycle_pause_min = opt_int("MAIN_CYCLE_PAUSE_MIN", 100)
 main_cycle_pause_max = opt_int("MAIN_CYCLE_PAUSE_MAX", 120)
+# Нормализуем порядок (как у translocation): перевёрнутая пара MIN>MAX уронила бы
+# random.randint в app.time_sleep — то есть падение процесса в ГЛАВНОМ цикле, вне try.
+main_cycle_pause_min, main_cycle_pause_max = sorted((main_cycle_pause_min, main_cycle_pause_max))
 if test:
     # Тест (§2): файловая session под files/ (TEST_SESSION_FILE), креды/канал — из .env.
     channel_id = req_int("TEST_CHANNEL")
@@ -151,7 +154,20 @@ bot_link = (os.getenv("BOT_LINK") or '').strip() or None
 partner_message_enabled = forum_forward_enabled and bool(bot_link)
 if forum_forward_enabled and not bot_link:
     logger.warning("Партнёрское сообщение на форуме выключено: не задан BOT_LINK (веха-форвард работает)")
-option_data = Option(tf=timeframe, dogon=option['dogon'])
+# dogon — массив длительностей перекрытий (мин) из jsonb БД. Проверяем ЯВНО, как translocation
+# ниже: NULL/не-список/мусор уронил бы len(option_data.dogon_par) в main_app уже В СЕРЕДИНЕ
+# опциона (после первого поста) — баг-картинка в канал + рестарт, и так на каждом опционе с
+# догоном. Лучше понятная ошибка на старте.
+# Числа принимаем и дробные (1.5 мин): dogon_settings считает секунды и подпись из них
+# штатно — сужать это валидацией нельзя, ловим ровно то, что реально ронял бы код (не-список,
+# пустой список, строки/None внутри, неположительные значения).
+_dogon = option['dogon']
+if (not isinstance(_dogon, (list, tuple)) or not _dogon
+        or not all(isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0
+                   for d in _dogon)):
+    raise ValueError(f"Некорректный option_setting.dogon={_dogon!r} — ожидается непустой "
+                     f"массив положительных чисел (минуты перекрытий)")
+option_data = Option(tf=timeframe, dogon=list(_dogon))
 # translocation — пара [start_random, end_random] из jsonb БД. Проверяем явно, иначе
 # NULL/короткий массив дал бы TypeError/IndexError на импорте (краш до подъёма логгера).
 translocation = option['translocation']

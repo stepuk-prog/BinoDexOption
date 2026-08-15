@@ -332,12 +332,16 @@ class Database:
         return await self.execute_query(sql, user_id, storage_state, fetch_mode='execute',
                                         func='save_otc_cookies', db='binodex')
 
-    async def close_program(self, program_id: int):
+    async def set_status_offline(self, program_id: int):
         """status=false в program.programdata (Program) — сигнал диспетчеру, что
-        программа штатно остановлена и не должна перезапускаться до вмешательства."""
+        программа штатно остановлена и не должна перезапускаться до вмешательства.
+
+        Имя НЕ close_program (2026-08-15): так звалась и функция завершения процесса
+        (apps/exit_app.close_program), и на вызове `database.close_program(...)` внутри
+        shutdown-кода это читалось как рекурсия/выход, а не как одна UPDATE-строка."""
         sql = "UPDATE program.programdata SET status = false WHERE program_id = $1"
         return await self.execute_query(sql, program_id, fetch_mode='execute',
-                                        func='close_program', db='program')
+                                        func='set_status_offline', db='program')
 
     # ── Прокси (settings.proxy_data в БД binodex; раздельный бан TV/binodex) ─────────
     # Пул общий на семейство ботов, живёт в БД binodex (пул 'binodex'). Схема-по-порту:

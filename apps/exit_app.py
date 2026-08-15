@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING
 from pyrogram.errors import Unauthorized
 
 from logs import init_logger
-from settings.timing import (LOGGER_FLUSH_DELAY, COOKIES_ERROR_DELAY, SHUTDOWN_STEP_TIMEOUT,
-                             STATUS_WRITE_TIMEOUT)
+from settings.timing import LOGGER_FLUSH_DELAY, SHUTDOWN_STEP_TIMEOUT, STATUS_WRITE_TIMEOUT
 from settings.constant import EXIT_USERBOT
 
 if TYPE_CHECKING:
@@ -52,7 +51,7 @@ async def write_status_offline(program_id: int):
     session/куки по кругу). Поэтому с явным таймаутом и логом ошибки."""
     from settings.config import database  # lazy — избегаем циклических импортов
     try:
-        if await asyncio.wait_for(database.close_program(program_id=program_id),
+        if await asyncio.wait_for(database.set_status_offline(program_id=program_id),
                                   timeout=STATUS_WRITE_TIMEOUT) is False:
             logger.error('Не удалось записать programdata.status=false — '
                          'диспетчер может перезапустить мёртвую session/куки')
@@ -61,7 +60,16 @@ async def write_status_offline(program_id: int):
 
 
 async def _close_userbot():
-    """Остановка Pyrogram-юзербота (idempotent — стоп только если ещё подключён)."""
+    """Остановка Pyrogram-юзербота (idempotent — стоп только если ещё подключён).
+
+    Переиспользуемую media-сессию аплоада гасим ПЕРВОЙ: её `stop()` намеренно no-op,
+    поэтому без явного закрытия соединение пережило бы остановку клиента.
+    """
+    try:
+        from classes import upload_session  # lazy — избегаем циклических импортов
+        await asyncio.wait_for(upload_session.close_all(), timeout=SHUTDOWN_STEP_TIMEOUT)
+    except (Exception,) as e:
+        logger.warning(f"Ошибка закрытия media-сессии аплоада: {e}")
     try:
         from settings.config import get_app  # lazy — избегаем циклических импортов
         app = get_app()
@@ -99,14 +107,13 @@ async def _close_telegram_logger():
         print(f"Ошибка закрытия aiogram-бота: {e}")  # logger уже могут быть погашены
 
 
-async def close_program(manager: "BrowserManager | None", status: int, text: str, cookies: bool = False):
+async def close_program(manager: "BrowserManager | None", status: int, text: str):
     """
     Полное закрытие программы: браузер → юзербот → БД (пулы+соединения) → aiogram.
     :param manager: BrowserManager — для отключения браузера (None на ранних выходах)
     :param status: код выхода (sys.exit) — его читает диспетчер. 0 — штатно, 1 — краш/перезагрузка,
                    10/11/12/13 — browser/cookies/setup/userbot (таксономия в settings/constant.py)
     :param text: текст, отправляемый с завершением/ошибкой
-    :param cookies: ошибка от падения cookies (легаси-флаг; пауза перед рестартом при status=1)
     """
     # 1. Браузер (на ранних выходах manager может отсутствовать)
     if manager is not None:
@@ -115,13 +122,11 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
         except (Exception,) as e:
             logger.warning(f"Ошибка закрытия браузера: {e}")
 
-    # 2. Причина выхода в лог
+    # 2. Причина выхода в лог. Легаси-ветка cookies=True (лог в cookies-канал + 120с пауза)
+    # снята 2026-08-15: флаг не передавался НИ ОДНИМ из вызовов, то есть ветка была мертва, а
+    # пауза только удлиняла бы shutdown. Отвал кук живёт своей веткой в main (§4.3).
     if status == 1:
-        if cookies:
-            logger.cookies("Отвалился COOKIES")
-            await asyncio.sleep(COOKIES_ERROR_DELAY)
-        else:
-            logger.error(f'‼️Аварийный выход‼️Ошибка - {text}. Перегружаюсь...')
+        logger.error(f'‼️Аварийный выход‼️Ошибка - {text}. Перегружаюсь...')
     else:
         logger.report(text)
 

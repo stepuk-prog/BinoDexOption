@@ -29,10 +29,12 @@ from classes.result_types import OperationResult
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.exit_app import close_program
 from apps.otc_login import otc_inline_login
+from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
-from settings.config import screenshot_path, database, prog_key, cookies_pocket_id
+from settings.config import screenshot_path, database, cookies_pocket_id
 from settings.constant import globe_otc_path
-from settings.timing import TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG, MAX_SCREENSHOT_ATTEMPTS
+from settings.timing import (EVAL_TIMEOUT, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
+                             MAX_SCREENSHOT_ATTEMPTS)
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
@@ -76,8 +78,6 @@ RELOAD_RETRY_PAUSE = 2.0  # сек между ретраями reload
 
 logger = init_logger(__name__)
 
-EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate/screenshot (у Playwright нет встроенного таймаута)
-
 
 async def _eval(target, js, *args):
     """page/element.evaluate с верхней границей по времени (зависший рендер иначе вешает await навсегда)."""
@@ -88,11 +88,6 @@ async def _shot(page, **kwargs):
     """page.screenshot с верхней границей по времени (как _eval — встроенного таймаута нет)."""
     return await asyncio.wait_for(page.screenshot(**kwargs), timeout=EVAL_TIMEOUT)
 
-
-def on_trade(url: str) -> bool:
-    """binodex: авторизация активна, если остались на …/trade (Privy редиректит
-    неавторизованных). Детерминированный детект отвала cookies (§4.1) — основной сигнал."""
-    return url.rstrip('/').endswith('/trade')
 
 # Глобальный трекер цен (один на процесс; страница регистрирует WS-перехват в init_otc)
 _price_tracker: WebSocketPriceTracker | None = None
@@ -136,10 +131,30 @@ def setup_websocket_tracker(page: Page):
     page.on("websocket", on_websocket)
 
 
-async def _otc_page_url() -> str | None:
-    """URL OTC-страницы — единый источник binodex_settings.trade_url
-    (через browser_config.otc_trade_url), меняется в одном месте."""
-    return otc_trade_url
+PAIR_SWITCH_WAIT = 2.0   # сек-потолок ожидания, пока chartData переключится на выбранную пару
+
+
+async def _wait_chart_symbol(page: Page, symbol: str | None, timeout: float) -> bool:
+    """Дождаться, пока движок binodex переключит график на `symbol` (window.chartData.symbol).
+    Ранний выход, как только символ совпал; по истечении потолка — False (не критично: вызывающий
+    дальше ждёт WS-котировку этой пары). Заменяет прежнюю слепую паузу после клика по паре."""
+    if not symbol:
+        return False
+    deadline = time.monotonic() + timeout
+    while True:
+        # Потолок на ОДНО чтение — остаток бюджета, а не общий EVAL_TIMEOUT (10с): иначе
+        # подвисший evaluate растянул бы «ожидание на 2с» до десяти.
+        left = deadline - time.monotonic()
+        try:
+            data = await asyncio.wait_for(page.evaluate(CHART_DATA_JS), timeout=max(0.2, left))
+        except (Exception,):
+            data = None
+        if isinstance(data, dict) and data.get('symbol') == symbol:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+
 
 async def _pair_modal_open(page: Page) -> bool:
     """Модалка выбора открыта, если видна кнопка категории."""
@@ -299,7 +314,10 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
             return False
         await target_item.click(timeout=TIMEOUT_SHORT)
 
-        await asyncio.sleep(1.0)            # дать сайту переключить график (WS теперь стримит только выбранную пару)
+        # Ждём, пока движок переключит график на выбранную пару, — по факту (chartData.symbol),
+        # а не слепой секундной паузой: в норме выходим за ~0.1–0.3с, потолок PAIR_SWITCH_WAIT.
+        # Не дождались — не беда: ниже всё равно ждём WS-котировку пары до 8с.
+        await _wait_chart_symbol(page, symbol_key(pair), PAIR_SWITCH_WAIT)
         await _close_pair_modal(page)        # закрыть модалку (иначе перекрывает график и блокирует прогрузку)
 
         # Дождаться, пока сайт прогрузит новую пару и WS отдаст её котировку (до 8с —
@@ -481,7 +499,7 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     # бесполезен) → SetupError(mounted=False): прокси-фолбэк + переподъём. Токена нет → сессия
     # реально протухла → CookiesExpired. authed — безопасный дефолт True (грабли 2026-07: boot-recovery).
     authed = await _authed_safe(page)
-    if not page.url.rstrip('/').endswith('/trade'):
+    if not on_trade(page.url):
         if authed:
             raise SetupError(f'binodex OTC: {detail} + редирект с /trade на {page.url} при живой '
                              f'авторизации — аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)
@@ -568,15 +586,24 @@ _LABEL_BOX_JS = r"""
 """
 
 _globe_asset: Image.Image | None = None        # глобус-файл (RGBA), грузится один раз
+_globe_resized: Image.Image | None = None      # он же под размер канваса (ресайз кэшируем)
 _label_cutout_cache: dict = {}                  # {asset: (cutout RGBA, (dx, dy))} — вырезка ярлыка на пару
 
 
 def _load_globe(size) -> Image.Image:
-    """Глобус-файл (RGBA) под размер канваса; кэш в памяти (файл читаем один раз)."""
-    global _globe_asset
+    """Глобус-файл (RGBA) под размер канваса; кэш в памяти (файл читаем один раз).
+
+    Ресайз тоже кэшируем ПО РАЗМЕРУ (2026-08-15): при несовпадении размеров LANCZOS гонялся
+    по ~1470×870 RGBA на КАЖДЫЙ кадр, хотя канвас между кадрами не меняется."""
+    global _globe_asset, _globe_resized
     if _globe_asset is None:
         _globe_asset = Image.open(globe_otc_path).convert('RGBA')
-    return _globe_asset if _globe_asset.size == tuple(size) else _globe_asset.resize(size, Image.Resampling.LANCZOS)
+    size = tuple(size)
+    if _globe_asset.size == size:
+        return _globe_asset
+    if _globe_resized is None or _globe_resized.size != size:
+        _globe_resized = _globe_asset.resize(size, Image.Resampling.LANCZOS)
+    return _globe_resized
 
 
 async def _canvas_alpha(element) -> Image.Image:
@@ -864,27 +891,11 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     return True
 
 
-GOTO_RETRIES = 3          # попыток goto при транзиентном NS_BINDING_ABORTED
-GOTO_RETRY_PAUSE = 1.5    # сек между ретраями goto
-
-
 async def _goto_otc(page: Page, url: str, timeout: int = TIMEOUT_LONG) -> None:
-    """page.goto с ретраями ТОЛЬКО на транзиентном NS_BINDING_ABORTED — binodex/Privy во время
-    загрузки сам инициирует редирект → Firefox обрывает навигацию (гонка, не реальный сбой).
-    Прочие ошибки goto пробрасываем сразу; исчерпали попытки — пробрасываем последнюю."""
-    last_error = None
-    for attempt in range(1, GOTO_RETRIES + 1):
-        try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
-            return
-        except (Exception,) as error:
-            if 'NS_BINDING_ABORTED' not in str(error):
-                raise
-            last_error = error
-            logger.warning(f'OTC: goto {url} → NS_BINDING_ABORTED (попытка {attempt}/{GOTO_RETRIES}), повтор')
-            if attempt < GOTO_RETRIES:
-                await asyncio.sleep(GOTO_RETRY_PAUSE)
-    raise last_error
+    """Навигация на binodex — общий `page_nav.goto_retry` (единый список транзиентных сбоев
+    с inline-релогином: раньше здесь ретраился ТОЛЬКО NS_BINDING_ABORTED, и сетевой блип до
+    binodex ронял init, хотя в релогине переживался)."""
+    await goto_retry(page, url, timeout=timeout, label='OTC')
 
 
 async def init_otc(manager: "BrowserManager") -> bool:
@@ -896,10 +907,10 @@ async def init_otc(manager: "BrowserManager") -> bool:
     _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
-    url = await _otc_page_url()
-    if not url:
-        await close_program(manager=manager, status=1, text="Нет OTC-страницы в binodex.cookies.pages")
-        return False
+    # URL — из binodex_settings.trade_url (browser_config.otc_trade_url) с дефолтом на уровне
+    # чтения настроек, поэтому пустым быть не может: прежняя async-обёртка _otc_page_url() и
+    # ветка «нет OTC-страницы» (недостижимый close_program) сняты 2026-08-15.
+    url = otc_trade_url
 
     try:
         await _goto_otc(page, url)

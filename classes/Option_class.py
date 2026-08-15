@@ -11,7 +11,6 @@ class Option:  # Класс структуры хранения данных в 
     # параметры программы
     binary: bool = False  # True - стандартные опционы, False - опционы OTC
     timeframe: str = ''  # рабочий таймфрейм
-    search_tf: str = ''  # обозначение таймфрейма для поиска
     name_tf: str = ''  # обозначение таймфрейма для постов
     link_val: str = ''  # ссылка на валютную пару в TradingView
     start_random: int = 0  # стартовая позиция рандома для поиска параметров уровней ПС
@@ -21,7 +20,6 @@ class Option:  # Класс структуры хранения данных в 
     name: str = ''  # название валюты
     id_val: int = 0  # id валюты
     exchange: str = 'OANDA'  # биржа/провайдер котировок TV (assets.binary_assets.exchange); FIN-скрин
-    browser_name: str = ''  # название валюты для поиска в браузере
     name_emoji: str = ''  # название валюты с эмодзи
     round: int = 0  # параметры округления
     # параметры индикаторов (рендерятся в постах)
@@ -30,7 +28,6 @@ class Option:  # Класс структуры хранения данных в 
     paritet: str = ''  # параметр Паритет объёмного баланса
     direction_force: str = ''  # параметр Сила направления движения
     itog_stat: str = ''  # параметр Итоговая статистика успешного исхода сделки
-    dogon: str = ''  # параметр Вероятность использования перекрытий
     # параметры опциона
     resume: str = ''  # направление опциона
 
@@ -48,8 +45,6 @@ class Option:  # Класс структуры хранения данных в 
 
     dgn_time: int = 0  # Время догона в секундах
     dgn_time_str: str = ''  # Время догона строкой
-    start_message_id: int = 0  # Id стартового сообщения для пересылки и записи в БД
-    itog_message_id: int = 0  # Id итогового сообщения для пересылки и записи в БД
     message_forecast: str = ''  # строка с направлением опциона для второго сообщения
     message_emoji_quotation: str = ''  # эмодзи для котировки для второго сообщения
 
@@ -59,7 +54,6 @@ class Option:  # Класс структуры хранения данных в 
         result = [item for item in spr_timeframe if item["timeframe"] == tf]
         if not result:
             raise ValueError(f"Неизвестный таймфрейм '{tf}' — нет строки в spr_timeframe")
-        self.search_tf = result[0]['search_tf']
         self.name_tf = result[0]['name_tf']
         self.option_time = int(tf.replace('m', '')) * 60 + 2
         self.dogon_par = dogon
@@ -67,7 +61,6 @@ class Option:  # Класс структуры хранения данных в 
     def clear_data(self):
         self.name = ''  # название валюты
         self.exchange = 'OANDA'  # биржа котировок TV (перезаписывается fill_binary; для OTC не нужна)
-        self.browser_name = ''  # название валюты для поиска в браузере
         self.name_emoji = ''  # название валюты с эмодзи
         self.round = 0  # параметры округления
         # параметры индикаторов
@@ -76,7 +69,6 @@ class Option:  # Класс структуры хранения данных в 
         self.paritet = ''  # параметр Паритет объёмного баланса
         self.direction_force = ''  # параметр Сила направления движения
         self.itog_stat = ''  # параметр Итоговая статистика успешного исхода сделки
-        self.dogon = ''  # параметр Вероятность использования перекрытий
         # параметры опциона
         self.resume = ''  # направление опциона
         self.buy = False  # если опцион на покупку
@@ -91,8 +83,6 @@ class Option:  # Класс структуры хранения данных в 
         self.dgn = False  # True, если нужен догон
         self.dgn_time = 0  # Время догона в секундах
         self.dgn_time_str = ''  # Время догона строкой
-        self.start_message_id = 0  # Id стартового сообщения для пересылки и записи в БД
-        self.itog_message_id = 0  # Id итогового сообщения для пересылки и записи в БД
         self.message_forecast = ''  # строка с направлением опциона для второго сообщения
         self.message_emoji_quotation = ''  # эмодзи для котировки для второго сообщения
         self.trade_emoji = ''  # эмодзи для отражения направления опциона
@@ -130,7 +120,6 @@ class Option:  # Класс структуры хранения данных в 
         self.exchange = data.get('exchange') or 'OANDA'
         valname = self.name.split('/')
         self.link_val = link1 + valname[0] + valname[1] + link2 + valname[0] + valname[1]
-        self.browser_name = self.name.replace('/', '')
         self.name_emoji = f"<b><i>{self.name} {data['base_emoji']}/{data['second_emoji']}</i></b>"
         buy = "ПОКУПКУ" in data['resume']
         self.resume = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
@@ -159,7 +148,6 @@ class Option:  # Класс структуры хранения данных в 
         self.name = data['name_val']
         self.round = data['round']
         self.id_val = data['val_id']
-        self.browser_name = self.name.replace('/', '')
         self.name_emoji = f"<b><i>{self.name} {data['base_emoji']}/{data['second_emoji']}</i></b>"
         buy = bool(data['buy'])
         self.resume = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
@@ -256,13 +244,10 @@ class Option:  # Класс структуры хранения данных в 
                 return '<emoji id="5271811599785534382">📉</emoji>'
 
     @staticmethod
-    def different_price(start_price, itog_price, rnd) -> dict:  # расчет итоговой разницы
-        result = {}
-        dif_price = abs(start_price - itog_price)
-        dif_point = round(dif_price * 10 ** rnd, 0)
-        dif_price_str = f"{dif_price:.{rnd}f}"
-        result.update(point=dif_point, dif_price=dif_price_str)
-        return result
+    def different_price(start_price, itog_price, rnd) -> dict:
+        """Итоговая разница котировок строкой (для постов). Ключ `point` (та же разница в
+        пунктах) снят 2026-08-15 — его не брал ни один шаблон сообщений."""
+        return {'dif_price': f"{abs(start_price - itog_price):.{rnd}f}"}
 
     @staticmethod
     def minuts(kol: int):

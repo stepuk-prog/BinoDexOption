@@ -19,14 +19,12 @@ from settings.config import (cookies, database, binary, browser_engine, prog_key
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
-    POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY,
+    POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY, EVAL_TIMEOUT,
     TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG
 )
 from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
-
-EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate (у Playwright нет встроенного таймаута)
 
 # Грабли 2026-08-02 (node-6, лёг BinoStoch): Playwright ≥1.5x перепроверяет host-requirements,
 # если маркеру <build>/DEPENDENCIES_VALIDATED больше 30 дней (kMaximumReValidationPeriod).
@@ -63,7 +61,7 @@ async def launch_healing_stale_lock(launcher, **launch_kwargs):
     Не наш случай → исключение пробрасывается как было."""
     try:
         return await launcher.launch(**launch_kwargs)
-    except Exception as error:
+    except (Exception,) as error:
         if not _heal_stale_pw_lock(str(error)):
             raise
         return await launcher.launch(**launch_kwargs)
@@ -427,6 +425,12 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
             context = await browser.new_context(storage_state=state, **ctx_options)
         else:
             context = await browser.new_context(**ctx_options)
+        # Потолки по умолчанию на весь контекст: вызовы БЕЗ явного timeout= (fill/click/
+        # bounding_box в TV-флоу, ввод кода в otc_login) иначе полагаются на встроенные 30с
+        # Playwright — вдвое-втрое больше, чем любой наш явный потолок. Навигации оставляем
+        # 30с (goto/reload по факту всюду передают TIMEOUT_LONG/EXTRA_LONG явно).
+        context.set_default_timeout(TIMEOUT_MEDIUM)
+        context.set_default_navigation_timeout(TIMEOUT_EXTRA_LONG)
         await _bust_binodex_cdn(context)   # обойти протухший CDN-кэш binodex app.js (иначе пустая страница)
 
         # Добавляем stealth скрипт на уровне контекста (для всех страниц)

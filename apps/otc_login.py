@@ -19,6 +19,7 @@ from email.header import decode_header, make_header
 
 from playwright.async_api import Page, BrowserContext, TimeoutError as PWTimeout
 
+from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 
 logger = init_logger(__name__)
@@ -149,42 +150,14 @@ async def _enter_code(page: Page, sel: str, code: str) -> None:
             await cells.nth(i).fill(ch)
 
 
-# Транзиентные сбои навигации Firefox, лечащиеся повтором goto: гонка редиректа Privy
-# (NS_BINDING_ABORTED) ИЛИ короткий блип сети/CDN до binodex.app (NS_ERROR_* / таймаут goto).
-# НЕ путать с реально протухшей сессией — та проявляется уже ПОСЛЕ успешной навигации (нет кнопки
-# пары / privy:token), а не ошибкой goto. Принцип «сбой binodex → переждать/повторить, а не выходить»:
-# единичный NS_ERROR_FAILURE не должен мгновенно сжигать цикл восстановления сессии (Recover-3→Exit).
-_RETRYABLE_GOTO_ERRORS = (
-    'NS_BINDING_ABORTED',                # Privy сам инициирует редирект при загрузке → Firefox рвёт навигацию
-    'NS_ERROR_FAILURE',                  # generic network failure (наблюдался блип до binodex.app/Cloudflare)
-    'NS_ERROR_NET_RESET',
-    'NS_ERROR_NET_TIMEOUT',
-    'NS_ERROR_NET_INTERRUPT',
-    'NS_ERROR_CONNECTION_REFUSED',
-    'NS_ERROR_PROXY_CONNECTION_REFUSED',
-    'NS_ERROR_UNKNOWN_HOST',             # транзиентный сбой DNS
-    'Timeout',                           # PWTimeout самого goto (домен не ответил за timeout)
-)
+# Навигация с ретраями — общая с otc_app (apps/page_nav): список транзиентных сбоев и логика
+# повтора одни на весь binodex-флоу, чтобы init и релогин не расходились в трактовке блипа.
+LOGIN_GOTO_TIMEOUT = 30000   # мс на одну навигацию в логин-флоу (страница Privy грузится дольше торговой)
 
 
-async def _goto_retry(page: Page, url: str, attempts: int = 3, pause: float = 1.5) -> None:
-    """page.goto с ретраями на транзиентные сбои навигации (гонка редиректа Privy или блип
-    сети/CDN — см. _RETRYABLE_GOTO_ERRORS). Прочие ошибки — сразу наверх; исчерпали попытки —
-    пробрасываем последнюю."""
-    last = None
-    for i in range(1, attempts + 1):
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            return
-        except (Exception,) as err:
-            if not any(m in str(err) for m in _RETRYABLE_GOTO_ERRORS):
-                raise
-            last = err
-            logger.warning(f'OTC inline-логин: goto {url} → транзиентный сбой ({i}/{attempts}), '
-                           f'повтор: {str(err).splitlines()[0]}')
-            if i < attempts:
-                await asyncio.sleep(pause)
-    raise last
+async def _goto_retry(page: Page, url: str) -> None:
+    """page.goto логин-флоу с общими ретраями (см. apps/page_nav.goto_retry)."""
+    await goto_retry(page, url, timeout=LOGIN_GOTO_TIMEOUT, label='OTC inline-логин')
 
 
 async def otc_inline_login(page: Page, context: BrowserContext,
@@ -223,7 +196,7 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         await page.wait_for_function(
             "() => !!window.localStorage.getItem('privy:token')", timeout=30000)
         await _goto_retry(page, trade)
-        if not page.url.rstrip("/").endswith("/trade"):
+        if not on_trade(page.url):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
             return False
         await _imap_thread(_purge_privy, imap)

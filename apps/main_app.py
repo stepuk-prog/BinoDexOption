@@ -10,7 +10,7 @@ from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
 from settings.config import option_data, binary, overlap, overlap_random, screenshot_path
-from settings.timing import BETWEEN_MESSAGES_DELAY, POST_SCREENSHOT_DELAY
+from settings.timing import BETWEEN_MESSAGES_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT
 from settings.image_paths import DOGON_IMAGES, NEW_FORECAST_IMAGES
 
 if TYPE_CHECKING:
@@ -43,9 +43,12 @@ NO_PAIRS_RELOAD_PAUSE = 5      # сек между быстрыми reload
 HEALTH_LEAD = 15              # сек до фиксации результата — упреждающая проверка/восстановление UI
 
 
-async def _try_send(photo, caption, mes_type: str, timeout: float = 30.0) -> tuple[bool, str]:
+async def _try_send(photo, caption, mes_type: str, timeout: float = TG_SEND_TIMEOUT) -> tuple[bool, str]:
     """Отправка поста с обработкой обрыва связи и таймаутом — тонкая обёртка над единым
-    send_photo_safe (клиент берётся из get_app()-синглтона внутри send_photo_safe). Возврат (ok, err)."""
+    send_photo_safe (клиент берётся из get_app()-синглтона внутри send_photo_safe). Возврат (ok, err).
+
+    Дефолт — из settings.timing, а не число: свой литерал здесь переопределял бы общий потолок
+    (посты основного цикла шли бы мимо правки TG_SEND_TIMEOUT — так и было до 2026-08-15)."""
     return await send_photo_safe(photo, caption, mes_type, timeout)
 
 
@@ -149,7 +152,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
 
 
 async def _run_option(manager: "BrowserManager", qr, stop_event):
-    global used_val, prev_price, count_price, _posted
+    global prev_price, count_price, _posted   # used_val только мутируем (append/del) — global не нужен
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
 
@@ -193,7 +196,7 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
 
     message_text = first_message()
     new_prognoz_img = random.choice(NEW_FORECAST_IMAGES)  # рандомно из 3 в pictures/new_prognoz/
-    ok, err = await _try_send(new_prognoz_img, message_text, 'первое сообщение', timeout=30.0)
+    ok, err = await _try_send(new_prognoz_img, message_text, 'первое сообщение')
     if not ok:
         return await exit_main(channel_mess=False, result=False, bug_text=err, check_cookies=count_price)
     _posted = True   # первое сообщение ушло → «середина опциона»: непредвиденный сбой ниже = баг-картинка

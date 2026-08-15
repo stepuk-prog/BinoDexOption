@@ -10,12 +10,13 @@ from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import binodex_ready, wait_for_feed
+from classes import upload_session
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
-from settings.timing import (USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, TG_SEND_TIMEOUT,
-                             USERBOT_CONNECT_TIMEOUT)
+from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS,
+                             TG_SEND_TIMEOUT, USERBOT_CONNECT_TIMEOUT)
 from settings.constant import EXIT_BROWSER, EXIT_COOKIES, EXIT_SETUP, BROWSER_MAX_ATTEMPTS
 
 logger = init_logger(__name__)
@@ -289,7 +290,7 @@ async def _recreate_browser(manager):
     :return: новый BrowserManager либо None (остановлены сигналом)."""
     try:
         # Верхняя граница: зависший Firefox-close не должен подвесить пересоздание браузера.
-        await asyncio.wait_for(manager.close(), timeout=50)
+        await asyncio.wait_for(manager.close(), timeout=BROWSER_CLOSE_TIMEOUT)
     except (Exception,) as error:
         logger.warning(f'Ошибка закрытия браузера при пересоздании: {error}')  # утечка Firefox не должна быть незаметной
     return await _init_with_retry()
@@ -320,6 +321,11 @@ async def bot():
 
     # Создаём Pyrogram Client внутри event loop
     app = get_app()
+
+    # Аплоад фото — на ОДНОМ переиспользуемом media-соединении вместо нового на каждый
+    # пост (иначе каждый send_photo заново проходит установление TCP; при SYN-фильтре
+    # Telegram это стоило рестартов юнита — см. classes/upload_session).
+    upload_session.install()
 
     # Запуск юзербота — две ветки (§3.2). A: ключ доказано мёртв (session_failed) →
     # сразу штатный стоп с записью status=false и session-алертом, без ретраев (каждая
@@ -432,7 +438,7 @@ async def bot():
         if not binary and not res_option.result and not await binodex_ready():
             try:
                 # Верхняя граница: зависший Firefox-close не должен подвесить аварийную выгрузку.
-                await asyncio.wait_for(manager.close(), timeout=50)
+                await asyncio.wait_for(manager.close(), timeout=BROWSER_CLOSE_TIMEOUT)
             except (Exception,) as error:
                 logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):

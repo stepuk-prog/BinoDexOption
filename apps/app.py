@@ -17,19 +17,17 @@ from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.browser_config import move_field, price_field, pop_up, screen_zone
-from settings.config import (channel_id, option_data, get_app, binary, program_id,
+from settings.config import (option_data, binary, program_id,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
 from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
-from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TG_SEND_TIMEOUT, TIMEOUT_MEDIUM
+from settings.timing import CHECK_PLUS_DELAY, EVAL_TIMEOUT, POST_SCREENSHOT_DELAY, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
 logger = init_logger(__name__)
-
-EVAL_TIMEOUT = 10.0  # сек: верхняя граница на evaluate/screenshot (у Playwright нет встроенного таймаута)
 
 # Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
 _shutdown_requested = False
@@ -63,9 +61,13 @@ def get_water():
         return False, None
 
 
-# Вехи, на которых веха-пост дополнительно пересылается ботом-модератором в случайную тему
-# форума (forward_plus_milestone). Ниже 25 (5/10/15/20) — только пост в канал, без пересылки.
-FORWARD_MILESTONES = frozenset({25, 30, 35, 40, 45, 50})
+# Вехи серии плюсов: на каждой — пост-веха в канал (картинка pictures/pluses/{N}.png).
+# ОДИН источник (было два списка в этом же файле — легко разъезжались при правке).
+PLUS_MILESTONES = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
+# Из них те, что дополнительно пересылаются ботом-модератором в случайную тему форума
+# (forward_plus_milestone). Ниже 25 (5/10/15/20) — только пост в канал, без пересылки.
+FORWARD_FROM = 25
+FORWARD_MILESTONES = frozenset(m for m in PLUS_MILESTONES if m >= FORWARD_FROM)
 
 
 async def check_plus():
@@ -73,12 +75,11 @@ async def check_plus():
     kol_plus = await database.plus_counter(program_id=program_id)
     if not kol_plus:  # False/None — ошибка пула или нет строки счётчика
         return True, ''
-    plus_milestones = (5, 10, 15, 20, 25, 30, 35, 40, 45, 50)
     count = kol_plus.get('plus')  # asyncpg.Record.get — None, если колонки нет (вместо KeyError)
     if count is None:
         return True, ''
 
-    if count in plus_milestones:
+    if count in PLUS_MILESTONES:
         await asyncio.sleep(CHECK_PLUS_DELAY)  # пауза перед постом-вехой (не в каждом плюсовом цикле)
         caption = plus_message(count)
         photo = f'{PLUS_IMAGE_DIR}/{count}.png'
@@ -126,13 +127,14 @@ async def exit_main(channel_mess: bool,
         option_data.clear_data()
         return MainResult(result, plus, fall, bug_text, check_cookies)
     if channel_mess:
-        try:
-            await asyncio.wait_for(
-                get_app().send_photo(chat_id=channel_id, photo='pictures/bug.png',
-                                     caption=main_bug_message()),
-                timeout=TG_SEND_TIMEOUT)
-        except (Exception,) as error:
-            logger.error(f'Ошибка отправки сообщения о сбое программы - {error}')
+        # Через send_photo_safe (2026-08-15): прямой send_photo шёл мимо пробы доставки и
+        # повтора — при потерях SYN сообщение о сбое просто не доходило (в инциденте оно
+        # таймаутило вместе с постами). Сбой отправки здесь по-прежнему НЕ фатален: только лог,
+        # выход продолжается штатно.
+        ok, err = await send_photo_safe('pictures/bug.png', main_bug_message(),
+                                        mes_type='сообщение о сбое программы')
+        if not ok:
+            logger.error(f'Ошибка отправки сообщения о сбое программы - {err}')
     else:
         plus = True
         if option_data.plus:
@@ -156,7 +158,13 @@ def check_cookies_price(old_price: float, new_price: float, round_par: int, coun
     :param count: счетчик повторов
     :return:
     """
-    EPS = 10 ** (-round_par)
+    # Порог — ПОЛТИКА последнего знака, а не целый тик (2026-08-15). С EPS = 10**-round_par
+    # минимальное реальное движение (1.13933 → 1.13934) попадало в «не изменилась» всякий раз,
+    # когда float-разница оказывалась чуть меньше тика: перебор 4866 пар соседних котировок
+    # (round=5/3/2) дал 1938 ложных срабатываний — 40%. Они копились в count_price и дёргали
+    # вторичный детект отвала кук (main.py: check_cookies > 2 → пересоздание браузера) на ровном
+    # месте. Полтика ловит только настоящий ноль: тем же перебором 0 ложных и 0 пропущенных.
+    EPS = 0.5 * 10 ** (-round_par)
     if abs(new_price - old_price) <= EPS:
         new_count = count + 1
     else:

@@ -122,8 +122,7 @@ async def _delete_previous(topic: int) -> None:
 
 async def close_moderator_bot() -> None:
     """Закрыть aiohttp-сессию бота-модератора (если создавался). Без падений на выходе."""
-    global _moderator_bot
-    if _moderator_bot is not None:
+    if _moderator_bot is not None:   # только читаем — global не нужен
         try:
             await _moderator_bot.session.close()
         except (Exception,) as error:

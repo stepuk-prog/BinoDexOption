@@ -59,7 +59,7 @@ async def load_proxies_from_db(database) -> bool:
 
 def get_unused_proxy() -> Optional[ProxyData]:
     """Случайный ещё не опробованный прокси (по кругу). Выставляет current_proxy. None — пул пуст."""
-    global used_proxies, current_proxy
+    global current_proxy   # used_proxies только мутируем (add/clear) — global не нужен
     if not proxy_list:
         logger.error(f"Прокси({PROXY_SCOPE}): список пуст — вызовите load_proxies_from_db() сначала")
         current_proxy = None

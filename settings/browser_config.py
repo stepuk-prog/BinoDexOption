@@ -5,21 +5,17 @@ from settings._bootstrap import bootstrap_fetch
 # TV/FIN-селекторы нужны только в FIN-режиме (BINARY=1). Для OTC (BINARY=0) не дёргаем
 # settings.tv_settings (лишний синхронный запрос к БД на старте каждого OTC-инстанса) — имена
 # определяем как None, чтобы импорт FIN-модулей не падал (их код в OTC-режиме не исполняется).
+#
+# ЧИТАЕМ ТОЛЬКО ТО, ЧТО РЕАЛЬНО ИСПОЛЬЗУЕТСЯ (2026-08-15). find_par при отсутствии строки делает
+# sys.exit(1), поэтому каждый лишний параметр здесь — жёсткая стартовая зависимость от строки в
+# БД: удаление НИКЕМ не используемого селектора роняло бы бот на импорте. Снято отсюда как
+# мёртвое: vib_kat, close_tool_win, fxcm, search_kat, find_kat, find_val (старый флоу выбора
+# котировки через окно категорий; сейчас символ ставится через #symbol + data-symbol-name).
 if binary:
     vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
 
-    vib_kat = find_par(data=vib_all_kat, par='vib_kat')
-    # Закрытие окна выбора котировок
-    close_tool_win = find_par(data=vib_all_kat, par='close_tool_win')
-    fxcm = find_par(data=vib_all_kat, par='fxcm')
-    # поиск поля ввода котировок
-    search_kat = find_par(data=vib_all_kat, par='search_kat')
-    # Включение котировки
-    find_kat = find_par(data=vib_all_kat, par='find_kat')
     # поиск поля ввода валют
     search_val = find_par(data=vib_all_kat, par='search_val')
-    # включение выбранной валюты
-    find_val = find_par(data=vib_all_kat, par='find_val')
     # Меню выбора таймфрейма
     tf_menu = find_par(data=vib_all_kat, par='tf_menu')
     # Поле для получения цены
@@ -58,9 +54,9 @@ if binary:
 else:
     # OTC: FIN/TV-селекторы не используются — заглушки, чтобы импорт не падал.
     vib_all_kat = None
-    vib_kat = close_tool_win = fxcm = search_kat = find_kat = search_val = find_val = tf_menu = \
-        price_field = move_field = pop_up = pop_up2 = pop_up3 = screen_zone = symbol = scope_chip = \
-        tf_link_price = tf_link = panel_toggle = panel_wrap = None
+    search_val = tf_menu = price_field = move_field = pop_up = pop_up2 = pop_up3 = \
+        screen_zone = symbol = scope_chip = tf_link_price = tf_link = panel_toggle = \
+        panel_wrap = None
 
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
 # Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).
@@ -71,7 +67,8 @@ otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_setting
 # меняется в одном месте. next()+дефолт, а НЕ find_par (тот sys.exit при отсутствии) — чтобы
 # старая БД без этих строк не валила старт.
 otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://binodex.app/trade')
-otc_landing_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'landing_url'), 'https://binodex.app/')
+# NB: landing_url отсюда не читаем — логин-флоу берёт его из своего sel-словаря
+# (apps/otc_login: sel.get('landing_url')), а константа никем не использовалась.
 otc_ws_origin = next((i['par_value'] for i in otc_setting if i['par_name'] == 'ws_origin'), 'https://binodex.app')
 # База auth/config API binodex (Privy-логин, /config) — для браузер-фри health-чека backend-аутэйджа
 # (apps/binodex_feed.api_alive). Отдельный сервис от market-WS; при его 502 app-shell не монтируется.
@@ -84,8 +81,8 @@ otc_category_valute = find_par(data=otc_setting, par='category_valute')
 otc_input_pair = find_par(data=otc_setting, par='input_pair')
 # Элемент пары в списке модалки (текст: '<pair> OTC <payout>%')
 otc_modal_pair_item = find_par(data=otc_setting, par='modal_pair_item')
-# Текущая выбранная пара в сайдбаре (проверка на 'OTC')
-otc_tek_val = find_par(data=otc_setting, par='tek_val')
+# NB: tek_val (текущая пара в сайдбаре) отсюда снят (2026-08-15) — не используется нигде, а
+# через find_par (sys.exit(1) при отсутствии строки) держал бот заложником лишней строки в БД.
 # Зона графика для скриншота (canvas)
 screen_zone_otc = find_par(data=otc_setting, par='screen_zone')
 # Кнопка настроек аккаунта (тулбар) — есть ТОЛЬКО при полностью прогруженном UI; на сплеше
