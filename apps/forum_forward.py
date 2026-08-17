@@ -9,6 +9,11 @@
 Требования к боту-модератору (настраивает владелец):
   • админ/участник канала-источника (channel_id) — иначе не сможет форвардить ИЗ него;
   • админ форума с правом писать в темы.
+
+Уровни логов здесь: рутинные шаги (переслал / отправил партнёрку / подчистил прошлые) — `info`,
+то есть только в файл. В Telegram уходят ERROR/REPORT, а исправная пересылка вехи — не событие
+для оператора: на каждую веху это три сообщения в канал логов от КАЖДОГО инстанса. Заметной
+должна быть поломка, и она остаётся видимой (`warning` в файл, реальные сбои — через ERROR).
 """
 import asyncio
 import random
@@ -66,7 +71,7 @@ async def forward_plus_milestone(message_id: int, count: int) -> None:
                 chat_id=forum_id, message_thread_id=topic,
                 from_chat_id=channel_id, message_id=message_id),
             timeout=TG_SEND_TIMEOUT)
-        logger.report(f'Отправлено сообщение о плюсах на форум, в тему {topic}')
+        logger.info(f'Отправлено сообщение о плюсах на форум, в тему {topic}')
         # ПОСЛЕ вехи-форварда — партнёрское сообщение (фото+кнопка) в ту же тему (send_photo, НЕ
         # форвард). id запоминаем как extra, чтобы удалить его вместе с вехой в следующий раз.
         extra_id = await _send_partner_message(topic)
@@ -89,7 +94,7 @@ async def _send_partner_message(topic: int) -> int | None:
                 photo=FSInputFile(PARTNER_IMAGE), caption=partner_message(),
                 parse_mode=ParseMode.HTML, reply_markup=_kb_partner()),
             timeout=TG_SEND_TIMEOUT)
-        logger.report(f'Партнёрское сообщение отправлено в тему {topic}')
+        logger.info(f'Партнёрское сообщение отправлено в тему {topic}')
         return sent.message_id
     except (Exception,) as error:
         logger.warning(f'Не удалось отправить партнёрское сообщение в тему {topic}: {error}')
@@ -115,7 +120,7 @@ async def _delete_previous(topic: int) -> None:
                     timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
                 logger.warning(f'Не смог ❌ удалить сообщение {mid} в теме {topic}: {error}')
-        logger.report(f'Предыдущие сообщения в теме {topic} удалены ✅')
+        logger.info(f'Предыдущие сообщения в теме {topic} удалены ✅')
     except (Exception,) as error:
         logger.warning(f'Не смог ❌ удалить предыдущие сообщения в теме {topic}: {error}')
 
