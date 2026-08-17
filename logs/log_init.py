@@ -4,8 +4,8 @@ import os
 from logging import Handler, LogRecord, handlers
 
 from aiogram import Bot
-from settings.logger_config import (error_channel, token, frame, message_channel,
-                                    cookies_channel, session_channel, file_suffix)
+from settings.logger_config import (token, frame, file_suffix,
+                                    error_dest, session_dest, message_dest, cookies_dest)
 
 # Единый формат файловых/консольных хендлеров (раньше дублировался в двух местах).
 LOG_FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
@@ -91,18 +91,21 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             '#%(levelname)-8s [%(asctime)s] %(message)s')
         self.msg_fmt = logging.Formatter(f'📫{frame}\n\n %(message)s')
 
-    async def _send_message(self, chat_id: int, text: str):
-        """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно)."""
+    async def _send_message(self, chat_id: int, text: str, thread_id: int | None = None):
+        """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно).
+        thread_id — id темы форума; None для обычного канала (aiogram опустит параметр)."""
         try:
             await asyncio.wait_for(
-                self.bot.send_message(chat_id=chat_id, text=text),
+                self.bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id),
                 timeout=_TG_LOG_SEND_TIMEOUT)
         except (Exception,) as error:
             print(f'Сбой отправки сообщения в Telegram — {error}')
 
-    def _spawn_send(self, loop, chat_id: int, text: str):
-        """Создать задачу отправки и удержать ссылку (GC не отменит недоделанную)."""
-        task = loop.create_task(self._send_message(chat_id, text))
+    def _spawn_send(self, loop, dest: tuple, text: str):
+        """Создать задачу отправки и удержать ссылку (GC не отменит недоделанную).
+        dest — (chat_id, message_thread_id) из logger_config: канал либо тема форума."""
+        chat_id, thread_id = dest
+        task = loop.create_task(self._send_message(chat_id, text, thread_id))
         _pending_sends.add(task)
         task.add_done_callback(_pending_sends.discard)
 
@@ -116,17 +119,17 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
         try:
             if record.levelno >= ERROR_LEVEL:
                 self.setFormatter(self.err_fmt)
-                self._spawn_send(loop, error_channel, self.format(record=record))
+                self._spawn_send(loop, error_dest, self.format(record=record))
             elif record.levelno == SESSION_LEVEL:
                 # Критичный отвал session — в выделенный канал, форматом-алертом.
                 self.setFormatter(self.err_fmt)
-                self._spawn_send(loop, session_channel, self.format(record=record))
+                self._spawn_send(loop, session_dest, self.format(record=record))
             elif record.levelno == REPORT_LEVEL:
                 self.setFormatter(self.msg_fmt)
-                self._spawn_send(loop, message_channel, self.format(record=record))
+                self._spawn_send(loop, message_dest, self.format(record=record))
             elif record.levelno == COOKIES_LEVEL:
                 self.setFormatter(self.msg_fmt)
-                self._spawn_send(loop, cookies_channel, self.format(record=record))
+                self._spawn_send(loop, cookies_dest, self.format(record=record))
         except (Exception,) as error:
             print(f'Сбой отправки сообщения в Telegram — {error}')
 
