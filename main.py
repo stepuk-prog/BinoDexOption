@@ -9,7 +9,7 @@ from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            session_recoverable, write_status_offline)
 from apps.main_app import main
 from apps.otc_app import otc_session_dead
-from apps.binodex_feed import binodex_ready, wait_for_feed
+from apps.binodex_feed import binodex_ready, wait_for_feed, FEED_CONFIRM_WINDOW
 from classes import upload_session
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
@@ -307,7 +307,8 @@ async def _await_binodex_feed(at_start: bool) -> bool:
         logger.report('🕓 binodex стал недоступен (фид/бэкенд) — выгрузил браузер, посты на паузе, жду восстановления')
     if not await wait_for_feed(_stop_event):
         return False  # SIGTERM во время ожидания
-    logger.report('✅ binodex снова доступен (фид+API) — поднимаю браузер, продолжаю работу')
+    logger.report(f'✅ binodex снова доступен (фид+API) и держится {int(FEED_CONFIRM_WINDOW)}с '
+                  f'без срывов — поднимаю браузер, продолжаю работу')
     return True
 
 
@@ -328,8 +329,9 @@ async def bot():
     upload_session.install()
 
     # Запуск юзербота — две ветки (§3.2). A: ключ доказано мёртв (session_failed) →
-    # сразу штатный стоп с записью status=false и session-алертом, без ретраев (каждая
-    # попытка пойдёт с тем же отозванным ключом). B: transient-обрыв (сеть/таймаут) ИЛИ
+    # сразу штатный стоп с session-алертом и кодом EXIT_USERBOT, без ретраев (каждая
+    # попытка пойдёт с тем же отозванным ключом). status НЕ трогаем — судьбу программы
+    # решает диспетчер по коду выхода (13 = account-уровень → ALARM, релокация бесполезна). B: transient-обрыв (сеть/таймаут) ИЛИ
     # AUTH_KEY_DUPLICATED (session_recoverable — ключ занят другой нодой при failover,
     # отпустится сам) → до USERBOT_CONNECT_ATTEMPTS попыток; не переподключились → тот же
     # плановый выход (отвал session, код EXIT_USERBOT).
@@ -425,7 +427,8 @@ async def bot():
         res_option = await main(manager=manager, qr=qr, stop_event=stop_event)
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —
-        # это штатный стоп, не сбой; уходим в graceful-ветку ниже (status=false).
+        # это штатный стоп, не сбой; уходим в graceful-ветку ниже (выход с кодом 0;
+        # programdata.status НЕ трогаем — стоп инициировал диспетчер, см. хвост функции).
         if stop_event.is_set():
             break
 
