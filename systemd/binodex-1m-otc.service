@@ -9,6 +9,12 @@ WorkingDirectory=/home/vova/Binodex/BinoOptions
 Environment="TIMEFRAME=1m" "BINARY=false" "TEST=false"
 ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
 Restart=no
+# 30 (дефолт systemd) → 90 (2026-08-17): внутренние сторожа graceful-выхода ждут дольше
+# внешнего бюджета (BROWSER_CLOSE_TIMEOUT=50 + шаги shutdown), поэтому сработать не могли — systemd приходил с SIGKILL первым.
+# За неделю 46 убийств по таймауту на флоте: браузер не закрывался штатно и оставлял висячий
+# lock в общем кэше Playwright, а диспетчер получал 9/KILL вместо честного кода выхода.
+# Окно verify у диспетчера для этих программ — 150 с, так что 90 в него укладывается.
+TimeoutStopSec=90
 RestartSec=10
 
 [Install]
