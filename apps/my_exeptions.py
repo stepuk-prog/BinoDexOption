@@ -260,7 +260,12 @@ async def lost_connection_photo(error, photo, text, mes_type, started_at: dateti
                 if _transient_401_strikes >= TRANSIENT_401_MAX_STRIKES:
                     # N транзиент-401 ПОДРЯД не вылечились → вероятно session реально мертва,
                     # а get_me-проба её не уличила (таймаут/сеть на пробе). Эскалация в штатный
-                    # стоп: 🔒 в session-канал + status=false + graceful-выход (без рестарта).
+                    # стоп: 🔒 в session-канал + graceful-выход с кодом EXIT_USERBOT.
+                    # status НЕ трогаем (инвариант §4.3: краш ≠ self-disable). Именно код выхода
+                    # 13 говорит диспетчеру, что это account-уровень: GD сразу ALARM и ручная
+                    # реавторизация, БЕЗ релокаций — мёртвая session одинаково мертва на любой
+                    # ноде. Запишем status=false — сломаем этот контракт: программа выключит себя
+                    # сама, GD перестанет считать её must-run, и отвал юзербота станет тихим.
                     await session_dead_shutdown(
                         error, reason=f'{_transient_401_strikes} транзиент-401 подряд не вылечились')
                     return False, 'Сессия юзербота недействительна (эскалация транзиент-401)', None

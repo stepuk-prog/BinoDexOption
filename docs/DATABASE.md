@@ -70,7 +70,18 @@ OTC `storage_state` (Privy). Чтение — `get_otc_cookies`, запись (�
 - Колонки: `api_id`, `api_hash`, `session_string`; `name` (имя владельца — в текстах cookies-алертов, §4.2); `mail` + **`mail_app_pass`** (16-символьный Gmail app-password для IMAP; читает `database.get_mail_creds` → воркер `apps/binodex_session.py`). Обычный пароль для IMAP не годится — нужен app-password (требует 2FA).
 
 ### `program.programdata`
-Статус программы (для диспетчера). `close_program`: `UPDATE program.programdata SET status = false WHERE program_id = $1`.
+Статус программы (для диспетчера) — «программа ДОЛЖНА работать» (desired-state).
+
+**Пишет его ровно один вызов — `exit_app.write_status_offline` (`UPDATE program.programdata SET
+status = false WHERE program_id = $1`), и только из планового выходного завершения FIN** (`main`,
+ветка weekend). `close_program` статус НЕ трогает, каким бы кодом ни завершались.
+
+**Инвариант (§4.3):** краш ≠ self-disable. При отвале куки/сессии/сайта/браузера бот выходит
+типизированным КОДОМ (10/11/12/13, `settings/constant.py`), оставляя `status=true`. Так диспетчер
+видит программу как must-run и сам решает судьбу: релокация провайдер-диверсно (10/11/12) либо
+сразу ALARM и ручная реавторизация (13 — мёртвая Pyrogram-session одинаково мертва на любой ноде).
+Запись `status=false` на краше сломала бы контракт: программа выключила бы себя сама, GD перестал
+бы считать её must-run, и авария стала бы тихой.
 
 - Колонки (используемые ботом в рантайме): `program_id`, `status`.
 - Прочие (вне рантайма бота): `cookies_binodex` (bigint, UNIQUE, FK → `telegram.telegram(id_telegram)`); `phone_topup` (numeric(10,2)) / `phone_topup_date` (date) — учёт пополнения телефона аккаунта.
