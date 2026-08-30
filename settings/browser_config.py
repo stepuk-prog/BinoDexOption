@@ -35,9 +35,6 @@ if binary:
     panel_wrap = find_par(data=vib_all_kat, par='panel_wrap')
     # включение выбора валюты
     symbol = find_par(data=vib_all_kat, par='symbol')
-    # вторичный чип биржи (FXCM-scope) в диалоге поиска — снимаем перед вводом, иначе
-    # TV отсеивает поиск по формату EXCHANGE:SYMBOL
-    scope_chip = find_par(data=vib_all_kat, par='scope_chip')
     # установка таймфрейма в 1 минуту для страницы с ценой
     tf_link_price = find_par(data=vib_all_kat, par='tf_link_1')
     # установка таймфрейма графика (только FIN/TV; OTC tf_link не использует). Чарт показываем по
@@ -55,7 +52,7 @@ else:
     # OTC: FIN/TV-селекторы не используются — заглушки, чтобы импорт не падал.
     vib_all_kat = None
     search_val = tf_menu = price_field = move_field = pop_up = pop_up2 = pop_up3 = \
-        screen_zone = symbol = scope_chip = tf_link_price = tf_link = panel_toggle = \
+        screen_zone = symbol = tf_link_price = tf_link = panel_toggle = \
         panel_wrap = None
 
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------

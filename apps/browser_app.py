@@ -14,7 +14,7 @@ from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
-    tf_link_price, pop_up2, pop_up3, scope_chip, panel_toggle, panel_wrap
+    tf_link_price, pop_up2, pop_up3, panel_toggle, panel_wrap
 from settings.config import (cookies, database, binary, browser_engine, prog_key, cookies_tv_id,
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
@@ -604,22 +604,6 @@ async def _reset_search_category(page) -> None:
         logger.warning(f"Не удалось сбросить категорию поиска TV: {e}")
 
 
-async def _remove_exchange_chip(page) -> None:
-    """Снятие вторичного чипа биржи (exchange-scope) в диалоге поиска. TV запоминает scope
-    после выбора символа с биржей и иначе отсеивает поиск по формату EXCHANGE:SYMBOL.
-    Без падений (если чипа нет — просто выходим)."""
-    chip = page.locator(scope_chip).first
-    try:
-        if await chip.count() > 0 and await chip.is_visible():
-            # Сначала крестик × внутри чипа, иначе повторный клик по чипу снимает фильтр
-            try:
-                await chip.locator("button").first.click(timeout=TIMEOUT_SHORT)
-            except (Exception,):
-                await chip.click(timeout=TIMEOUT_SHORT)
-    except (Exception,) as e:
-        logger.warning(f"Не удалось снять exchange-чип поиска TV: {e}")
-
-
 async def _click_exchange_pair(page, pair: str, exchange: str) -> bool:
     """Клик по строке нужной биржи в диалоге поиска по data-symbol-name="<exchange>:<pair>"
     + фолбэки. exchange — TV-код биржи из БД (assets.binary_assets.exchange), напр. 'OANDA'.
@@ -688,8 +672,6 @@ async def init_valute_browser(manager: BrowserManager, valute: str, exchange: st
             # Сброс категории на «Все» (sticky-фильтр TV иначе ломает поиск).
             # Диалог дождётся через wait_for внутри — фиксированный sleep не нужен.
             await _reset_search_category(page)
-            # И снятие exchange-чипа: иначе scope от прошлого выбора отсеивает EXCHANGE:SYMBOL.
-            await _remove_exchange_chip(page)
 
             # Ввод символа в формате <exchange>:<pair>: exchange-префикс поднимает
             # нужный фид наверх вместо строк всех провайдеров.
