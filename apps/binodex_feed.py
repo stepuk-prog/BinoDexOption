@@ -169,7 +169,11 @@ async def confirm_stable(pair: str = FEED_PROBE_PAIR, stop_event=None,
     abort = asyncio.Event()
     feed_task = asyncio.create_task(_watch(pair, window, FEED_CONFIRM_GAP, abort))
     api_task = asyncio.create_task(_api_watch(window, FEED_CONFIRM_API_EVERY, abort))
-    tasks = {feed_task, api_task}
+    # Аннотация обязательна: наблюдатели возвращают bool, а relay ниже — None, и без неё
+    # множество выводится как set[Task[bool]], куда relay не кладётся по типу. Смешение
+    # безопасно: результат читается только у наблюдателей (они и попадают в pending), а relay
+    # сюда добавляется исключительно ради общего gather в finally.
+    tasks: set[asyncio.Task] = {feed_task, api_task}
     if stop_event is not None:
         async def _relay() -> None:
             await stop_event.wait()
