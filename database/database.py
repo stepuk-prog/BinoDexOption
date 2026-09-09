@@ -286,6 +286,21 @@ class Database:
         return await self.execute_query(sql, forum_id, topic_id, message_id, extra_message_id,
                                         fetch_mode='execute', func='save_forum_message', db='binodex')
 
+    async def forum_quiet_topics(self, forum_id: int):
+        """Открытые СЕЙЧАС окна тишины по темам форума (settings.forum_quiet, БД Program).
+
+        Окно ставится на время усиленной рассылки о видео: пока оно идёт, флот не пишет в
+        перечисленные темы, иначе пост тонет среди наших же сообщений. Строк может быть
+        несколько (окна разных задач) — отдаём все, вызывающий объединит.
+
+        Возвращает список строк с колонкой `topics` (NULL = весь форум), [] — окна нет,
+        False — сбой БД (контракт execute_query)."""
+        sql = ("SELECT topics FROM settings.forum_quiet "
+               "WHERE forum_id = $1 AND now() >= quiet_from "
+               "AND now() < quiet_from + (quiet_hours * interval '1 hour')")
+        return await self.execute_query(sql, forum_id, fetch_mode='all',
+                                        func='forum_quiet_topics')
+
     async def pages(self, program: str, mode: str):
         """Страницы браузера из общей binodex.cookies.pages по (program, mode),
         ORDER BY order_idx (description='main' — первой, idx 0)."""

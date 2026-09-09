@@ -56,6 +56,27 @@ def _get_moderator_bot() -> Bot:
     return _moderator_bot
 
 
+async def _quiet_topics() -> set | None:
+    """Темы форума, в которые СЕЙЧАС писать нельзя (окно тишины из БД).
+
+    None — окно накрывает форум целиком; пустое множество — окон нет.
+    Недоступная БД трактуется как «окон нет»: тишина — вторичная функция, и глушить
+    из-за сбоя БД нельзя, иначе разовая проблема с базой молча остановит пересылку."""
+    try:
+        rows = await database.forum_quiet_topics(forum_id)
+    except (Exception,) as error:
+        logger.warning(f'Окно тишины форума не прочитано ({error}) — пересылаю как обычно')
+        return set()
+    if not rows:  # [] — окон нет; False — сбой БД (контракт execute_query)
+        return set()
+    quiet = set()
+    for row in rows:
+        if row['topics'] is None:  # окно на весь форум
+            return None
+        quiet.update(row['topics'])
+    return quiet
+
+
 async def forward_plus_milestone(message_id: int, count: int) -> None:
     """Переслать веху серии плюсов (message_id в channel_id) в СЛУЧАЙНУЮ тему форума.
     Перед пересылкой удаляет прошлую веху В ЭТОЙ ТЕМЕ (любой программы) — держим только
@@ -64,7 +85,15 @@ async def forward_plus_milestone(message_id: int, count: int) -> None:
         return
     # Всё тело — под try: пересылка вторичная, любой сбой лишь логируем и НЕ рвём цикл плюсов.
     try:
-        topic = random.choice(forum_topics)
+        # Окно тишины (settings.forum_quiet): на время усиленной рассылки о видео в эти темы
+        # не пишем — иначе пост тонет среди вех. Молчим ТОЧЕЧНО: если закрыта часть тем,
+        # веха уходит в оставшиеся, а не пропадает целиком.
+        quiet = await _quiet_topics()
+        allowed = [] if quiet is None else [t for t in forum_topics if t not in quiet]
+        if not allowed:
+            logger.info('Окно тишины форума — веху в темы не пересылаю')
+            return
+        topic = random.choice(allowed)
         await _delete_previous(topic)
         sent = await asyncio.wait_for(
             _get_moderator_bot().forward_message(
