@@ -25,9 +25,14 @@ _IMAGE_CACHE: dict = {}
 def configure(logger=None, warn_template: str = None) -> None:
     """Подключить логгер программы и, при необходимости, свой текст предупреждения.
 
-    Зовётся один раз на старте (обычно из settings/screenshot_set.py программы). Без вызова
-    пакет пишет в стандартный logging.getLogger('binocore.images') — ничего не падает,
-    просто запись не попадёт в файлы/Telegram программы."""
+    Зовётся один раз на старте — из `apps/app.py` программы, и ТОЛЬКО оттуда. Из
+    `settings/screenshot_set.py` (где лежит реэкспорт имён пакета) звать НЕЛЬЗЯ: settings
+    импортируется раньше logs, получился бы круг импортов. В apps/app.py логгер к этому
+    моменту уже создан, и это происходит до сборки первого кадра.
+
+    Без вызова пакет пишет в стандартный logging.getLogger('binocore.images') — ничего не
+    падает, но запись не попадёт в файлы и Telegram программы: init_logger семьи вешает
+    хендлеры на именованный логгер с propagate=False, до корневого ничего не доходит."""
     global _logger, _warn_template
     if logger is not None:
         _logger = logger
