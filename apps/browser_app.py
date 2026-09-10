@@ -748,7 +748,10 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
         await close_dom_popups(page)
         await _collapse_right_panel(page)
 
-    logger.report("✅ open_tv_browser завершён, страницы: %s", list(manager.pages.keys()))
+    # info, НЕ report: report уходит в служебную TG-тему, а это рутинная строка успеха —
+    # она повторяется на каждом подъёме браузера (старт, fall, ротация прокси) и в канале
+    # только зашумляет настоящие события. В файле info.log остаётся.
+    logger.info("✅ open_tv_browser завершён, страницы: %s", list(manager.pages.keys()))
     return OperationResult(success=True)
 
 
