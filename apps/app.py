@@ -16,6 +16,7 @@ from classes.Option_class import Option
 from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
+from settings.screenshot_set import _configure
 from settings.browser_config import move_field, price_field, screen_zone
 from settings.config import (option_data, binary, program_id,
                             shot_path, screenshot_path, database,
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
 
 logger = init_logger(__name__)
+
+# Логгер семьи для общего пакета (свои уровни, файлы по уровням, отправка в Telegram):
+# binocore о нём не знает и без этого писал бы в стандартный logging мимо наших файлов.
+_configure(logger=logger)
 
 # Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
 _shutdown_requested = False
