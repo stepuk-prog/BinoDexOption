@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
 from apps.my_exeptions import send_photo_safe
 from apps.otc_app import (parce_otc, screenshot_otc, reload_otc_page, select_otc_pair,
-                          _ui_loaded, UI_DEAD_CONFIRM)
+                          ensure_chart_setup, _ui_loaded, UI_DEAD_CONFIRM)
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -83,6 +83,10 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     bare = option_data.name[:-4] if option_data.name.endswith(' OTC') else option_data.name
     if not await select_otc_pair(page, bare):
         logger.warning(f'OTC: не вернул пару {bare} после reload в течение опциона — результат под вопросом')
+        return
+    # Аварийный reload сбрасывает и оформление графика (масштабы/индикаторы) — возвращаем, иначе
+    # остаток опциона снимался бы чужим таймфреймом и без индикаторов.
+    await ensure_chart_setup(manager)
 
 
 async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
@@ -182,6 +186,10 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
             return await exit_main(channel_mess=False, result=False, fall=False,
                                    bug_text='На binodex нет торговых пар (тест-режим) — жду, не рестартю',
                                    check_cookies=count_price)
+        # Оформление графика (масштабы свеча/график + индикаторы) binodex периодически сбрасывает
+        # сам — проверяем и возвращаем ПЕРЕД каждым опционом, до первого кадра. В норме read-only и
+        # мгновенно; UI трогаем только при реальном сбросе. См. otc_app.ensure_chart_setup.
+        await ensure_chart_setup(manager)
         page = manager.pages['main']
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 

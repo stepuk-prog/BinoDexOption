@@ -39,7 +39,7 @@ from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, pa
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
-                                     otc_chart_scale, otc_chart_scale_item)
+                                     otc_chart_scale, otc_chart_scale_item, otc_indicators)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -525,14 +525,55 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
                      f'(висящий сплеш — front-end аутэйдж binodex)', mounted=False)
 
 
+# Модалка binodex (онбординг/промо) поверх страницы: её бэкдроп ест pointer events, и клик по
+# кнопке масштаба 5 секунд ретраится впустую. Локатор при этом РЕЗОЛВИТСЯ — по логу не видно, что
+# мешает именно оверлей. Класс MUI (`MuiBackdrop-root`) стабилен: это имя компонента, а не хеш
+# сборки, в отличие от соседнего суффикса `css-3j5o61`.
+MODAL_BACKDROP = '.MuiBackdrop-root'
+
+
+async def dismiss_modal_backdrop(page: Page) -> None:
+    """Погасить модалку binodex, если она открыта.
+
+    ЗАЩИТА, а не исправление живого дефекта: у текущего аккаунта модалка уже погашена и лежит в
+    storage_state. Но стоит обновить куки с чистого логина — и она вернётся, а сломает молча: клик
+    по кнопке масштаба будет ретраиться впустую, локатор при этом резолвится, и в логе не видно,
+    что мешает оверлей (ровно так 20-08-2026 масштаб перестал применяться у английских
+    OTC-программ семьи). Проверка дешёвая: нет бэкдропа — выходим сразу.
+
+    Сначала Escape — штатный путь MUI. Если модалка ставит disableEscapeKeyDown, кликаем по самому
+    бэкдропу. Не закрылась — не падаем: пункты всё равно кликаются через dispatch_event, который
+    проверку перекрытия пропускает."""
+    backdrop = page.locator(MODAL_BACKDROP).first
+    try:
+        if not await backdrop.count() or not await backdrop.is_visible():
+            return
+        await page.keyboard.press('Escape')
+        await backdrop.wait_for(state='hidden', timeout=2000)
+        logger.info('OTC: модалка binodex закрыта (Escape) перед настройкой графика')
+        return
+    except (Exception,):
+        pass
+    try:
+        await backdrop.click(timeout=1500)
+        await backdrop.wait_for(state='hidden', timeout=2000)
+        logger.info('OTC: модалка binodex закрыта кликом по бэкдропу')
+    except (Exception,) as error:
+        logger.warning(f'OTC: модалка binodex не закрылась ({error}) — '
+                       f'настройки графика выставляем через DOM-события')
+
+
 async def apply_chart_scale(page: Page) -> None:
     """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
     при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
     значение держит — проверено), а раньше штатный setup шёл только на холодном
-    релогине. Поэтому применяем здесь, в init_otc, на каждом старте браузера. Порядок важен: смена
+    релогине. Поэтому применяем здесь, в init_otc, на каждом старте браузера — и вдобавок перед
+    каждым опционом через ensure_chart_setup (сброс случается и в течение суток, без нашего
+    рестарта: новая версия фронта / переинициализация чарта). Порядок важен: смена
     масштаба свечи сбрасывает масштаб графика, поэтому график (H1) ставим ПОСЛЕДНИМ. Пункты —
     по тексту (порядок списков binodex плавает). Ошибки не критичны для запуска (масштаб — оформление
     кадра, не данные) — логируем и продолжаем."""
+    await dismiss_modal_backdrop(page)
     for opener, item, name in ((otc_candle_scale, otc_candle_scale_item, 'свеча 30S'),
                                (otc_chart_scale, otc_chart_scale_item, 'график H1')):
         try:
@@ -547,6 +588,192 @@ async def apply_chart_scale(page: Page) -> None:
             await page.wait_for_timeout(500)  # дать дропдауну закрыться перед следующим шагом
         except (Exception,) as error:
             logger.warning(f"OTC: не удалось выставить масштаб ({name}): {error}")
+
+
+# ── Оформление графика: индикаторы + проверка, что масштаб/индикаторы не сбились ──────────────────
+# Индикаторы графика для OTC-кадра: (пункт меню #setup_indicators, текст чипа-легенды на графике).
+# Whale Absorption — оверлей (профиль объёма по правому краю поверх свечей), своей панели снизу не
+# заводит, поэтому идёт первым и на расклад панелей не влияет. Чип легенды — 'Whale' (рядом binodex
+# рисует параметры '150, 28, 2'). Дальше порядок = порядок панелей: Volume включаем ПОСЛЕДНИМ,
+# чтобы его панель осела НИЖНЕЙ (под Stochastic).
+OTC_CHART_INDICATORS = (('Whale Absorption', 'Whale'), ('Stochastic', 'Stoch'), ('Volume', 'VOL'))
+
+
+async def _indicators_menu_open(page: Page) -> bool:
+    """Открыто ли меню индикаторов (видимы пункты button.chart_indicator)."""
+    try:
+        return await _eval(page,
+            "() => [...document.querySelectorAll('button.chart_indicator')].some(b => b.offsetParent !== null)")
+    except (Exception,):
+        return False
+
+
+async def _missing_indicators(page: Page) -> list[tuple[str, str]] | None:
+    """Какие индикаторы сейчас ВЫКЛЮЧЕНЫ — по чипам-легендам на графике (элемент с ТОЧНЫМ текстом,
+    напр. 'VOL'). Детект по тексту, а не по классу: CSS-хэши binodex (_badge_XXXX) плавают между
+    сборками. Один обход DOM на все чипы сразу.
+
+    `None` — прочитать НЕ удалось (страница моргнула/evaluate бросил): «не знаю» НЕЛЬЗЯ трактовать
+    как «выключено всё» — клик по пункту меню ТОГГЛИТ, и одно неудачное чтение ВЫКЛЮЧИЛО бы уже
+    включённые индикаторы. Вызывающий на None просто ничего не трогает (следующий опцион
+    перечитает), и состояние не может стать хуже."""
+    badges = [badge for _, badge in OTC_CHART_INDICATORS]
+    try:
+        present = await _eval(page,
+            "(badges) => { const found = [];"
+            " for (const el of document.querySelectorAll('div,span')) {"
+            "   const t = (el.textContent || '').trim();"
+            "   if (badges.includes(t) && !found.includes(t)) found.push(t); }"
+            " return found; }", badges)
+    except (Exception,) as err:
+        logger.debug(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
+        return None
+    if not isinstance(present, list):
+        return None
+    present = set(present)
+    return [(name, badge) for name, badge in OTC_CHART_INDICATORS if badge not in present]
+
+
+async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | None = None) -> None:
+    """Включить индикаторы графика (OTC_CHART_INDICATORS) для OTC-кадра — рисуются binodex на том же
+    канвасе, что и свечи, поэтому попадают в toDataURL-кадр (screenshot_otc) без отдельного слоя.
+    Меню #setup_indicators, пункты button.chart_indicator выбираются ПО ТЕКСТУ (порядок списка
+    binodex плавает). Клик по пункту ТОГГЛИТ индикатор и закрывает модалку, поэтому: (1) меню
+    переоткрываем перед каждым; (2) идемпотентность — включаем только ОТСУТСТВУЮЩИЕ (иначе
+    повторный клик выключил бы индикатор). binodex сбрасывает индикаторы на дефолт (выкл) при новом
+    контексте, как и масштаб (в сохранённом storage_state ключей `indicators/*` нет) → на холодном
+    старте (_verify_otc_ready) включаем с нуля. Порядок важен: Volume ПОСЛЕДНИМ (нижняя панель);
+    Whale Absorption — оверлей, панели не заводит. Ошибки не критичны (индикатор — оформление кадра,
+    не данные) — лог.
+
+    `missing` — что именно включать, список (name, badge) от вызывающего (ensure_chart_setup).
+    `None` означает ХОЛОДНЫЙ СТАРТ: индикаторы заведомо выключены, включаем все. Никогда не
+    вычисляем список сами: «не смог прочитать» и «выключено всё» — разные вещи, развести их может
+    только вызывающий (см. _missing_indicators).
+
+    После кликов ОДИН раз перечитываем чипы и добираем не появившиеся: клик мог не дойти (модалка
+    не открылась / пункт перерисовался), а без проверки индикатор оставался бы выключенным до
+    следующего опциона."""
+    if not otc_indicators:  # старая БД без строки setup_indicators — тихо пропускаем
+        return
+    if missing is None:
+        missing = list(OTC_CHART_INDICATORS)
+    await _click_indicators(page, missing)
+    left = await _missing_indicators(page)
+    retry = [item for item in missing if left is not None and item in left]
+    if retry:
+        logger.warning(f"OTC: индикаторы не включились с первого раза "
+                       f"({', '.join(n for n, _ in retry)}) — повторяю")
+        await _click_indicators(page, retry)
+        left = await _missing_indicators(page)
+        still = [item for item in retry if left is not None and item in left]
+        if still:
+            logger.warning(f"OTC: индикаторы так и не включились "
+                           f"({', '.join(n for n, _ in still)}) — кадр уйдёт без них")
+
+
+async def _click_indicators(page: Page, missing: list[tuple[str, str]]) -> None:
+    """Один проход кликов по пунктам меню индикаторов."""
+    await dismiss_modal_backdrop(page)
+    for menu_name, _badge in missing:
+        try:
+            if not await _indicators_menu_open(page):
+                await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
+                await page.wait_for_timeout(500)
+            clicked = await _eval(page,
+                "(name) => { const b = [...document.querySelectorAll('button.chart_indicator')]"
+                ".find(x => (x.innerText || '').trim() === name); if (!b) return false; b.click(); return true; }",
+                menu_name)
+            if not clicked:
+                logger.warning(f"OTC: индикатор '{menu_name}' не найден в меню")
+            await page.wait_for_timeout(700)
+        except (Exception,) as error:
+            logger.warning(f"OTC: не удалось включить индикатор '{menu_name}': {error}")
+    # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
+    try:
+        if await _indicators_menu_open(page):
+            await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
+    except (Exception,):
+        pass
+
+
+def _scale_label(selector: str | None) -> str:
+    """Ожидаемое значение масштаба из селектора пункта в БД (`… >> text="30S"` → `30S`). Значение
+    живёт в ОДНОМ месте (строка binodex_settings) — своей константы в коде не заводим, иначе правка
+    селектора в БД молча разъезжалась бы с проверкой. Не распарсили → '' (проверка вырождается в
+    «перевыставить вслепую», см. _scale_drifted)."""
+    match = re.search(r'text=[\'"]([^\'"]+)[\'"]', selector or '')
+    return match.group(1) if match else ''
+
+
+CANDLE_SCALE_LABEL = _scale_label(otc_candle_scale_item)   # '30S'
+CHART_SCALE_LABEL = _scale_label(otc_chart_scale_item)     # 'H1'
+
+# Текст кнопки-открывашки (#setup_candle_scale/#setup_chart_scale) = выбранное сейчас значение.
+# textContent, а НЕ innerText: под off-zone (visibility:hidden) innerText отдаёт пусто, и проверка
+# всегда считала бы масштаб сбитым.
+_SCALE_TEXT_JS = ("(sel) => { const el = document.querySelector(sel);"
+                  " return el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : null; }")
+
+
+async def _scale_drifted(page: Page) -> bool:
+    """Сбились ли масштабы графика (свеча/график) — read-only: читаем текст открывашек, ничего не
+    кликая и не открывая. Прочитать не удалось (нет кнопки / БД без значения / кнопка без текста) →
+    True: перевыставим вслепую, это безопасно (выбор уже выбранного значения ничего не меняет)."""
+    for opener, want, name in ((otc_candle_scale, CANDLE_SCALE_LABEL, 'свеча'),
+                               (otc_chart_scale, CHART_SCALE_LABEL, 'график')):
+        if not want:
+            return True
+        try:
+            current = await _eval(page, _SCALE_TEXT_JS, opener)
+        except (Exception,):
+            return True
+        if not current:
+            logger.debug(f'OTC: масштаб ({name}) не прочитать с кнопки — перевыставляю вслепую')
+            return True
+        if want.lower() not in current.lower():
+            logger.warning(f"OTC: масштаб ({name}) сбился: '{current}' вместо '{want}' — возвращаю")
+            return True
+    return False
+
+
+async def ensure_chart_setup(manager: "BrowserManager") -> None:
+    """Проверить оформление графика и вернуть сбитое: масштабы (свеча 30S / график H1) + индикаторы.
+
+    binodex сбрасывает их не только при новом контексте браузера, но и сам по себе в течение суток —
+    новая версия фронта, переинициализация чарта после reload/смены пары. Кадр опциона уходил тогда
+    с чужим таймфреймом и без индикаторов. Поэтому зовём перед КАЖДЫМ опционом (main_app, после
+    выбора пары и ДО первого кадра) и после аварийного reload в течение опциона (_ensure_otc_alive).
+
+    В норме дёшево: обе проверки read-only (текст кнопки масштаба + чипы легенды индикаторов), UI
+    трогаем ТОЛЬКО при реальном сбросе. На время кликов снимаем off-zone — под ним
+    (visibility:hidden) кнопки настроек не кликаются; возвращаем в finally на любом исходе.
+    Ошибки не критичны (оформление кадра, не данные) — внутри логируются."""
+    page = manager.pages.get('main')
+    if page is None:
+        return
+    scale_drifted = await _scale_drifted(page)
+    missing = await _missing_indicators(page)   # None — прочитать не удалось: НЕ трогаем
+    if missing:
+        logger.warning(f"OTC: индикаторы графика сбились ({', '.join(n for n, _ in missing)}) — "
+                       f"включаю заново")
+    if not scale_drifted and not missing:
+        return
+    await _clear_offzone(page)
+    try:
+        if scale_drifted:
+            await apply_chart_scale(page)
+        if missing:
+            if scale_drifted:
+                # Масштаб перерисовал чарт — замер ДО кликов мог устареть. Перечитываем; не
+                # прочиталось (None) — идём по прежнему замеру, это лучшее, что у нас есть.
+                refreshed = await _missing_indicators(page)
+                if refreshed is not None:
+                    missing = refreshed
+            if missing:
+                await apply_chart_indicators(page, missing)
+    finally:
+        await _apply_offzone(page)
 
 
 # ── Композит кадра OTC (глобус-файл + прозрачный канвас + ярлык пары + QR) ────────────────────────────
@@ -852,8 +1079,10 @@ async def _verify_otc_ready(page: Page) -> None:
     # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
     if not await _privy_authenticated(page):
         raise CookiesExpired('binodex OTC: UI поднялся, но privy:token очищен (Demo) — сессия протухла')
-    # Масштабы графика сбрасываются на дефолт при каждом запуске браузера — выставляем на каждом старте.
+    # Масштабы графика и индикаторы сбрасываются на дефолт при каждом запуске браузера (новый
+    # контекст из storage_state) — выставляем на каждом старте, ДО off-zone (под ним кнопки не кликаются).
     await apply_chart_scale(page)
+    await apply_chart_indicators(page)
     # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
     await _apply_offzone(page)
     # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.

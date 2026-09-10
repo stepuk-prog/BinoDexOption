@@ -93,7 +93,10 @@ otc_settings_btn = find_par(data=otc_setting, par='setup_settings_open')
 otc_login_email = next((i['par_value'] for i in otc_setting if i['par_name'] == 'login_email'), None)
 # Масштабы графика. binodex сбрасывает их на дефолт (свеча/график) при КАЖДОМ запуске браузера
 # (новый контекст из storage_state → дефолт; reload в рамках сессии значение держит). Поэтому
-# выставляются в init_otc на каждом старте, а не только на релогине.
+# выставляются в init_otc на каждом старте, а не только на релогине. Сброс случается и в
+# течение суток БЕЗ нашего рестарта (новая версия фронта / переинициализация чарта), поэтому
+# перед каждым опционом масштабы проверяются и при сбросе возвращаются (otc_app.ensure_chart_setup);
+# ожидаемые значения ('30S'/'H1') проверка читает из ЭТИХ ЖЕ строк БД — второй копии в коде нет.
 # Пункты выбираются ПО ТЕКСТУ (порядок списков на binodex плавает): свеча '30S', график 'H1'.
 # ВАЖНО: пункты (`*_item`) на #id переводить НЕЛЬЗЯ — binodex вешает id `setup_candle_scale_item`/
 # `setup_chart_scale_item` на АКТИВНЫЙ пункт списка, а не на значение: клик выбирал бы уже
@@ -104,3 +107,10 @@ otc_candle_scale = find_par(data=otc_setting, par='setup_candle_scale')
 otc_candle_scale_item = find_par(data=otc_setting, par='setup_candle_scale_item')
 otc_chart_scale = find_par(data=otc_setting, par='setup_chart_scale')
 otc_chart_scale_item = find_par(data=otc_setting, par='setup_chart_scale_item')
+# Кнопка меню индикаторов графика (#setup_indicators). Пункты меню — button.chart_indicator,
+# выбираются ПО ТЕКСТУ (Whale Absorption/Stochastic/Volume): порядок списка binodex плавает, а id
+# висит на активном пункте. Клик по пункту ТОГГЛИТ индикатор. binodex сбрасывает индикаторы на
+# дефолт (выкл) при новом контексте, как и масштаб → включаются в init_otc на каждом старте и
+# проверяются перед каждым опционом (otc_app.ensure_chart_setup).
+# next()+None: старая БД без строки не валит старт (индикаторы просто не включатся).
+otc_indicators = next((i['par_value'] for i in otc_setting if i['par_name'] == 'setup_indicators'), None)
