@@ -308,45 +308,6 @@ async def close_dom_popups(page: Page, target: str = None):
     for _ in range(3):
         if not await _close_overlay(page, goal):
             return
-async def _proxy_launch_options(base: dict, chromium: bool = False) -> dict:
-    """base (launch-опции Firefox) + :50100-HTTP-прокси из binodex.settings.proxy_data через
-    локальный релей (settings/local_proxy — Firefox+Playwright НЕ умеет socks5-auth и ненадёжно
-    жуёт http-auth напрямую). Выбранный прокси запоминается в settings.proxy.current_proxy — main
-    по нему ведёт stats/ban. Сбой подбора/релея → базовые опции (без прокси): init упадёт штатно,
-    main забанит/повернёт."""
-    from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list, PROXY_SCOPE
-    if not proxy_list:
-        await load_proxies_from_db(database_binodex)
-    proxy = get_unused_proxy()
-    if not proxy:
-        logger.error(f'Прокси({PROXY_SCOPE}): нет активных :50100 (settings.proxy_data) — поднимаю напрямую')
-        return base
-    opts = base.copy()
-    if chromium:
-        # Chromium умеет http-proxy с auth НАТИВНО — local-relay не нужен.
-        opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
-        if proxy.login and proxy.password:
-            opts['proxy']['username'] = proxy.login
-            opts['proxy']['password'] = proxy.password
-        logger.report(f'Прокси({PROXY_SCOPE}): Chromium через {proxy.ip}:{proxy.port} (нативный auth)')
-        return opts
-    from settings.local_proxy import start_local_proxy
-    if proxy.login and proxy.password:
-        # start_local_proxy синхронный (time.sleep + socket.connect до ~3.3с) → в тред, иначе
-        # блокировал бы event loop (WS-колбэки, обработчик SIGTERM) на всё окно старта релея.
-        host, port = await asyncio.to_thread(
-            start_local_proxy, proxy.ip, proxy.port, proxy.login, proxy.password)
-        if not host:
-            logger.error(f'Прокси({PROXY_SCOPE}): локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
-            return base
-        opts['proxy'] = {'server': f'http://{host}:{port}'}
-        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port} (релей {host}:{port})')
-    else:
-        opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
-        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port}')
-    return opts
-
-
 # Static-именованные entry-файлы binodex (app.js/app.css) на любом поддомене binodex.app.
 _BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/app\.(?:js|css)")
 
