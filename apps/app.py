@@ -23,6 +23,7 @@ from settings.config import (option_data, binary, program_id,
 from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
 from settings.timing import CHECK_PLUS_DELAY, EVAL_TIMEOUT, POST_SCREENSHOT_DELAY, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
+from settings.screenshot_set import load_rgba
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -55,13 +56,12 @@ async def _close_popup(page):
 def get_water():
     """Загрузка QR-оверлеев. FIN — qr110+qr85; OTC — собственный otc_qr110 (на скрине один QR,
     используется только qr[0]). Позиция (otc_qr_x/y) и прочее без изменений."""
-    try:
-        qr110 = Image.open(otc_qr110_path if not binary else qr110_path)
-        qr85 = Image.open(qr85_path) if binary else None  # OTC использует только qr[0]
-        return True, (qr110, qr85)
-    except (Exception,) as error:
-        logger.error(f'Не могу загрузить QR - {error}')
+    # Кэш и лог сбоя — в общем settings.screenshot_set.load_rgba.
+    qr110 = load_rgba(otc_qr110_path if not binary else qr110_path)
+    qr85 = load_rgba(qr85_path) if binary else None  # OTC использует только qr[0]
+    if qr110 is None or (binary and qr85 is None):
         return False, None
+    return True, (qr110, qr85)
 
 
 # Вехи серии плюсов: на каждой — пост-веха в канал (картинка pictures/pluses/{N}.png).

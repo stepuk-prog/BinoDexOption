@@ -35,7 +35,7 @@ from settings.config import screenshot_path, database, cookies_pocket_id
 from settings.constant import globe_otc_path
 from settings.timing import (EVAL_TIMEOUT, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
                              MAX_SCREENSHOT_ATTEMPTS)
-from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, paste_overlay
+from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, load_rgba, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
@@ -812,25 +812,13 @@ _LABEL_BOX_JS = r"""
 }
 """
 
-_globe_asset: Image.Image | None = None        # глобус-файл (RGBA), грузится один раз
-_globe_resized: Image.Image | None = None      # он же под размер канваса (ресайз кэшируем)
 _label_cutout_cache: dict = {}                  # {asset: (cutout RGBA, (dx, dy))} — вырезка ярлыка на пару
 
 
-def _load_globe(size) -> Image.Image:
-    """Глобус-файл (RGBA) под размер канваса; кэш в памяти (файл читаем один раз).
-
-    Ресайз тоже кэшируем ПО РАЗМЕРУ (2026-08-15): при несовпадении размеров LANCZOS гонялся
-    по ~1470×870 RGBA на КАЖДЫЙ кадр, хотя канвас между кадрами не меняется."""
-    global _globe_asset, _globe_resized
-    if _globe_asset is None:
-        _globe_asset = Image.open(globe_otc_path).convert('RGBA')
-    size = tuple(size)
-    if _globe_asset.size == size:
-        return _globe_asset
-    if _globe_resized is None or _globe_resized.size != size:
-        _globe_resized = _globe_asset.resize(size, Image.Resampling.LANCZOS)
-    return _globe_resized
+def _load_globe(size) -> Image.Image | None:
+    """Глобус-файл (RGBA) под размер канваса. И файл, и ресайз кэширует общий load_rgba —
+    своего кэша здесь не нужно. None — файла нет (кадр соберётся без подложки)."""
+    return load_rgba(globe_otc_path, size=size)
 
 
 async def _canvas_alpha(element) -> Image.Image:
