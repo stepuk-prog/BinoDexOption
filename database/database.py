@@ -51,7 +51,7 @@ class Database:
             'program': asyncio.Lock(), 'binodex': asyncio.Lock(),
         }
         # Антиспам: error «не удалось восстановить серию» логируем один раз до успеха.
-        self._last_series_logged = False
+        self._recovery_error_logged = False
 
     async def _connect_pool(self, name: str, retries: int = 5, delay: float = 2.0):
         db_name = DB_NAMES[name]
@@ -171,12 +171,12 @@ class Database:
                         res = await conn.fetch(sql, *args)
                     elif fetch_mode == "execute":
                         await conn.execute(sql, *args)
-                        self._last_series_logged = False
+                        self._recovery_error_logged = False
                         return True
                     else:
                         logger.error(f"Некорректный fetch_mode: {fetch_mode}")
                         return False
-                    self._last_series_logged = False
+                    self._recovery_error_logged = False
                     return res
             except (InterfaceError, CannotConnectNowError, ConnectionDoesNotExistError,
                     ReadOnlySQLTransactionError,
@@ -208,9 +208,9 @@ class Database:
                 await self._recreate_pool(db)
             except (Exception,) as pool_error:
                 logger.error(f"Не удалось пересоздать пул '{db}': {pool_error}")
-            if not self._last_series_logged:
+            if not self._recovery_error_logged:
                 logger.error(f"Не удалось восстановить соединение пула '{db}' после всех попыток")
-                self._last_series_logged = True
+                self._recovery_error_logged = True
             return False
         return False
 
