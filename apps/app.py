@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from PIL import Image
 from playwright.async_api import Page
 
-from apps.browser_app import init_valute_browser
+from apps.browser_app import close_dom_popups, init_valute_browser
 from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
@@ -16,7 +16,7 @@ from classes.Option_class import Option
 from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
-from settings.browser_config import move_field, price_field, pop_up, screen_zone
+from settings.browser_config import move_field, price_field, screen_zone
 from settings.config import (option_data, binary, program_id,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
@@ -40,11 +40,14 @@ def request_shutdown():
 
 
 async def _close_popup(page):
-    """Best-effort закрытие popup по селектору pop_up (общий код для find_price/screenshot)."""
+    """Best-effort снятие оверлея, накрывшего тулбар (общий код для find_price/screenshot).
+
+    10-09-2026: раньше жали `.{pop_up}` — конкретный класс из БД, который протух при
+    выкатке фронта TV и не находил ничего. Теперь зовём общую гасилку: она смотрит, что
+    реально лежит в точке клика, и снимает помеху без привязки к именам классов.
+    """
     try:
-        popup = page.locator(f".{pop_up}")
-        if await popup.count() > 0:
-            await popup.first.click(timeout=3000)
+        await close_dom_popups(page)
     except (Exception,) as error:
         logger.debug(f'Popup не закрылся (best-effort): {error}')
 

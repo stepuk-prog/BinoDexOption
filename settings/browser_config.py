@@ -15,6 +15,10 @@ if binary:
     vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
 
     # поиск поля ввода валют
+    # Записи `pop-up`, `pop_up2`, `pop_up3` больше не читаем (10-09-2026): их значения —
+    # конкретные имена классов TV, которые протухают при каждой выкатке фронта. Оверлеи
+    # снимает close_dom_popups по факту перекрытия точки клика. Строки в БД НЕ удалять,
+    # пока не выкачены ВСЕ программы семьи: find_par на отсутствие делает sys.exit(1).
     search_val = find_par(data=vib_all_kat, par='search_val')
     # Меню выбора таймфрейма
     tf_menu = find_par(data=vib_all_kat, par='tf_menu')
@@ -23,9 +27,6 @@ if binary:
     # поле для перемещения при имитации движения мыши
     move_field = find_par(data=vib_all_kat, par='move_field')
     # всплывающие окна
-    pop_up = find_par(data=vib_all_kat, par='pop-up')
-    pop_up2 = find_par(data=vib_all_kat, par='pop_up2')
-    pop_up3 = find_par(data=vib_all_kat, par='pop_up3')
     # Зона скриншота
     screen_zone = find_par(data=vib_all_kat, par='screen_zone')
     # сворачивание правой widget-панели TV (в дефолте лэйаута раскрыта, сужает скрин;

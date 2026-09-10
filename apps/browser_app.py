@@ -14,7 +14,7 @@ from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
 from settings.browser_config import tf_menu, tf_link, search_val, symbol, \
-    tf_link_price, pop_up2, pop_up3, panel_toggle, panel_wrap
+    tf_link_price, panel_toggle, panel_wrap
 from settings.config import (cookies, database, binary, browser_engine, prog_key, cookies_tv_id,
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
@@ -98,34 +98,257 @@ def setup_popup_blocker(context: BrowserContext, manager: 'BrowserManager'):
     context.on('page', handle_popup)
 
 
-async def close_dom_popups(page: Page):
-    """Закрытие всплывающих окон TradingView по селекторам из БД и конкретным селекторам"""
-    # Попапы из БД (pop_up2, pop_up3) — значения из БД это частичные имена классов
-    for selector in [pop_up2, pop_up3]:
+# Чужой оверлей ловим ПО ФАКТУ, а не по имени класса. Грабли 10-09-2026: TV показал окно
+# в своей универсальной модальной оболочке (`container-<хеш>` — прозрачный контейнер во весь
+# экран с вертикальным центрированием), клик по тулбару весь прогон отбивался «intercepts
+# pointer events», а прежняя чистка искала закрывашку по префиксам `navButton-` и
+# `toast-group-close-button` и не находила ничего — обе программы отдали за день НОЛЬ записей.
+# Спрашиваем у браузера, что РЕАЛЬНО лежит в точке, куда мы целимся: так ловится любой оверлей,
+# включая те, которых ещё нет, и на любой площадке (TV, binodex) — узел помехи ищется и в
+# #overlap-manager-root, и напрямую в body.
+_AT_POINT_JS = """
+(selector) => {
+  const target = document.querySelector(selector);
+  if (!target) return {state: 'no-target'};
+  const r = target.getBoundingClientRect();
+  if (!r.width || !r.height) return {state: 'no-target'};
+  const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+  if (!hit) return {state: 'no-hit'};
+  if (hit === target || target.contains(hit) || hit.contains(target)) return {state: 'free'};
+  const root = document.getElementById('overlap-manager-root');
+  let top = hit;
+  while (top.parentElement && top.parentElement !== document.body && top.parentElement !== root) {
+    top = top.parentElement;
+  }
+  const tr = top.getBoundingClientRect();
+  return {state: 'blocked', cls: (top.className || '').toString(),
+          x: tr.x, y: tr.y, w: tr.width, h: tr.height,
+          html: top.outerHTML.slice(0, 1200)};
+}
+"""
+
+# Закрывашку ищем обобщённо: data-name / aria-label / title / класс / подпись кнопки. Хеши TV
+# проворачивает при каждой выкатке фронта, а эти признаки — нет. Жмём через el.click() прямо в
+# DOM: сама кнопка закрытия может быть накрыта соседним оверлеем, и обычный клик до неё не дойдёт.
+_DISMISS_JS = """
+(selector) => {
+  const target = document.querySelector(selector);
+  if (!target) return {state: 'no-target'};
+  const r = target.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+  if (!hit || hit === target || target.contains(hit) || hit.contains(target)) return {state: 'free'};
+  const root = document.getElementById('overlap-manager-root');
+  let top = hit;
+  while (top.parentElement && top.parentElement !== document.body && top.parentElement !== root) {
+    top = top.parentElement;
+  }
+  const visible = (el) => !!(el.offsetWidth || el.offsetHeight);
+  const BY_ATTR = ['[data-name*="close" i]',
+                   'button[aria-label*="\u0417\u0430\u043a\u0440" i]', 'button[aria-label*="close" i]',
+                   'button[title*="\u0417\u0430\u043a\u0440" i]', 'button[title*="close" i]',
+                   'button[class*="close" i]', 'button[class*="navButton-"]'];
+  for (const sel of BY_ATTR) {
+    for (const btn of top.querySelectorAll(sel)) {
+      if (!visible(btn)) continue;
+      try { btn.click(); return {state: 'closed', by: sel}; } catch (e) {}
+    }
+  }
+  const WORDS = ['\u0437\u0430\u043a\u0440\u044b\u0442\u044c', 'close', '\u043d\u0435 \u0441\u0435\u0439\u0447\u0430\u0441',
+                 '\u043f\u043e\u0437\u0436\u0435', '\u043e\u0442\u043c\u0435\u043d\u0430', '\u043f\u043e\u043d\u044f\u0442\u043d\u043e', 'ok', '\u043e\u043a'];
+  for (const btn of top.querySelectorAll('button,[role="button"]')) {
+    if (!visible(btn)) continue;
+    if (WORDS.includes((btn.innerText || '').trim().toLowerCase())) {
+      try { btn.click(); return {state: 'closed', by: '\u043f\u043e\u0434\u043f\u0438\u0441\u044c'}; } catch (e) {}
+    }
+  }
+  return {state: 'no-button', cls: (top.className || '').toString(),
+          x: top.getBoundingClientRect().x, y: top.getBoundingClientRect().y,
+          html: top.outerHTML.slice(0, 1200)};
+}
+"""
+
+# DOM помехи пишем в лог ОДИН раз за прогон: следующий такой случай надо разбирать по логу, а не
+# поднимать разведку заново (10-09-2026 на это ушло полдня). Тем же флагом глушим и рассказ об
+# успешном закрытии: оверлей лезет на КАЖДОЙ валюте (21 валюта × 3 страницы), а logger.report
+# уходит в Telegram — без глушилки это 63 сообщения за цикл. Первый случай — в канал, остальные
+# тем же текстом в info-лог.
+_overlay_reported = False
+
+
+def _overlay_log(text: str) -> None:
+    """Первый оверлей за прогон — в канал, дальше только в файл."""
+    global _overlay_reported
+    if _overlay_reported:
+        logger.info(text)
+    else:
+        _overlay_reported = True
+        logger.report(text)
+
+
+async def _probe_point(page: Page, selector: str) -> dict:
+    """Что лежит в точке, куда целится клик. Пустой dict — спросить не вышло."""
+    try:
+        return await page.evaluate(_AT_POINT_JS, selector) or {}
+    except (Exception,):
+        return {}
+
+
+async def _close_overlay(page: Page, selector: str) -> bool:
+    """Снять чужой оверлей, накрывший точку клика по `selector`.
+
+    Лесенка от дешёвого к грубому, каждый шаг проверяется тем же замером точки:
+      1. кнопка закрытия внутри самого оверлея (обобщённо, без привязки к хешам);
+      2. Escape — берёт диалоги, у которых закрывашки нет вовсе;
+      3. клик в угол оверлея — «мимо окна», штатный способ закрыть модалку с backdrop.
+    :return: True — точка освободилась, клик имеет смысл повторить.
+    """
+    info = await _probe_point(page, selector)
+    if info.get('state') != 'blocked':
+        return False
+
+    if not _overlay_reported:
+        # DOM пишем в warning.log (в Telegram уровень WARNING не уходит) — по нему и опознаем
+        # окно в следующий раз, без разведки.
+        logger.warning(f'Клик по {selector} перекрыт оверлеем '
+                       f'{info.get("cls") or "(без класса)"} '
+                       f'{round(info.get("w", 0))}x{round(info.get("h", 0))}; '
+                       f'DOM: {info.get("html", "")}')
+
+    try:
+        result = await page.evaluate(_DISMISS_JS, selector) or {}
+    except (Exception,):
+        result = {}
+    if result.get('state') == 'closed':
+        await page.wait_for_timeout(300)
+        if (await _probe_point(page, selector)).get('state') != 'blocked':
+            _overlay_log(f'Оверлей закрыт кнопкой ({result.get("by")}) — повторяю клик')
+            return True
+
+    try:
+        await page.keyboard.press('Escape')
+        await page.wait_for_timeout(300)
+    except (Exception,):
+        pass
+    if (await _probe_point(page, selector)).get('state') != 'blocked':
+        _overlay_log('Оверлей закрыт по Escape — повторяю клик')
+        return True
+
+    # Угол оверлея: у модалки с backdrop сама коробка стоит по центру, край — «мимо окна».
+    # Координаты берём свежие: после Escape оверлей мог перерисоваться.
+    info = await _probe_point(page, selector)
+    if info.get('state') == 'blocked' and info.get('w', 0) > 0:
         try:
-            await page.locator(f"[class*='{selector}']").first.click(timeout=2000)
-            logger.debug(f"🔕 Закрыт попап: {selector}")
+            await page.mouse.click(info['x'] + 4, info['y'] + 4)
+            await page.wait_for_timeout(300)
         except (Exception,):
             pass
+        if (await _probe_point(page, selector)).get('state') != 'blocked':
+            _overlay_log('Оверлей закрыт кликом мимо окна — повторяю клик')
+            return True
 
-    # Модальное окно "Easter sale" — ждём кнопку закрытия до 5 сек
+    _overlay_log(f'Оверлей {info.get("cls") or "(без класса)"} не закрылся ни кнопкой, '
+                 f'ни Escape, ни кликом мимо — иду в обход hit-testing')
+    return False
+
+
+async def click_guarded(page: Page, selector: str, timeout: int = 10000) -> None:
+    """Клик, который доводит дело до конца, даже если сверху лёг чужой оверлей.
+
+    Обычный клик → снять оверлей → повтор → и, как последний довод, dispatch_event: он
+    отдаёт событие самому элементу, минуя проверку «кто лежит сверху». Обработчик React
+    отработает независимо от того, что нарисовано поверх. Исключение наружу пробрасываем
+    только если не помогло вообще ничего.
+    """
     try:
-        close_btn = page.locator("button[class*='closeButton']")
-        await close_btn.first.wait_for(state='visible', timeout=5000)
-        await close_btn.first.click()
-        logger.debug("🔕 Закрыто модальное окно")
-    except (Exception,):
-        pass
+        await page.locator(selector).first.click(timeout=timeout)
+        return
+    except (Exception,) as first_error:
+        if await _close_overlay(page, selector):
+            await page.locator(selector).first.click(timeout=timeout)
+            return
+        try:
+            await page.locator(selector).first.dispatch_event('click')
+            await page.wait_for_timeout(300)
+        except (Exception,):
+            raise first_error
 
-    # Тост-уведомление "Easter sale ждёт"
-    try:
-        toast_close = page.locator("[class*='toastCommonBase'] [class*='closeButton']")
-        await toast_close.first.wait_for(state='visible', timeout=2000)
-        await toast_close.first.click()
-        logger.debug("🔕 Закрыт тост")
-    except (Exception,):
-        pass
 
+async def _sweep_close_buttons(page: Page) -> None:
+    """Best-effort крестик на страницах БЕЗ точки-ориентира (вкладка binodex и т.п.).
+    Прежнее поведение close_dom_popups: жмём видимый крестик, ошибку глотаем."""
+    for css in ('button[class*="closeButton" i]', '[data-name*="close" i]',
+                'button[aria-label*="\u0417\u0430\u043a\u0440" i]'):
+        try:
+            item = page.locator(css).first
+            if await item.is_visible():
+                await item.click(timeout=1500)
+                return
+        except (Exception,):
+            continue
+
+
+async def close_dom_popups(page: Page, target: str = None):
+    """Снять оверлеи, накрывшие точку клика (по умолчанию — кнопка поиска символа).
+
+    Переписано 10-09-2026. Прежняя версия жала по списку известных классов
+    (`pop_up2`/`pop_up3` из БД, `closeButton`, `toastCommonBase`) — то есть закрывала
+    только те окна, чьи имена мы знали заранее. TV проворачивает хеши при каждой
+    выкатке фронта, и в это утро обе программы Quiz отдали НОЛЬ записей: окно висело
+    в универсальной модальной оболочке TV, под известные имена не подходило, и клик
+    по тулбару весь прогон отбивался «intercepts pointer events».
+
+    Теперь ориентир — сама точка клика: спрашиваем у браузера, что в ней лежит, и
+    снимаем помеху, какой бы она ни была. На страницах, где точки-ориентира нет
+    (вкладка binodex), остаётся прежний best-effort по видимому крестику.
+    """
+    goal = target or f"#{symbol}"
+    if (await _probe_point(page, goal)).get('state') == 'no-target':
+        await _sweep_close_buttons(page)
+        return
+    for _ in range(3):
+        if not await _close_overlay(page, goal):
+            return
+async def _proxy_launch_options(base: dict, chromium: bool = False) -> dict:
+    """base (launch-опции Firefox) + :50100-HTTP-прокси из binodex.settings.proxy_data через
+    локальный релей (settings/local_proxy — Firefox+Playwright НЕ умеет socks5-auth и ненадёжно
+    жуёт http-auth напрямую). Выбранный прокси запоминается в settings.proxy.current_proxy — main
+    по нему ведёт stats/ban. Сбой подбора/релея → базовые опции (без прокси): init упадёт штатно,
+    main забанит/повернёт."""
+    from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list, PROXY_SCOPE
+    if not proxy_list:
+        await load_proxies_from_db(database_binodex)
+    proxy = get_unused_proxy()
+    if not proxy:
+        logger.error(f'Прокси({PROXY_SCOPE}): нет активных :50100 (settings.proxy_data) — поднимаю напрямую')
+        return base
+    opts = base.copy()
+    if chromium:
+        # Chromium умеет http-proxy с auth НАТИВНО — local-relay не нужен.
+        opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
+        if proxy.login and proxy.password:
+            opts['proxy']['username'] = proxy.login
+            opts['proxy']['password'] = proxy.password
+        logger.report(f'Прокси({PROXY_SCOPE}): Chromium через {proxy.ip}:{proxy.port} (нативный auth)')
+        return opts
+    from settings.local_proxy import start_local_proxy
+    if proxy.login and proxy.password:
+        # start_local_proxy синхронный (time.sleep + socket.connect до ~3.3с) → в тред, иначе
+        # блокировал бы event loop (WS-колбэки, обработчик SIGTERM) на всё окно старта релея.
+        host, port = await asyncio.to_thread(
+            start_local_proxy, proxy.ip, proxy.port, proxy.login, proxy.password)
+        if not host:
+            logger.error(f'Прокси({PROXY_SCOPE}): локальный релей для {proxy.ip} не поднялся — поднимаю напрямую')
+            return base
+        opts['proxy'] = {'server': f'http://{host}:{port}'}
+        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port} (релей {host}:{port})')
+    else:
+        opts['proxy'] = {'server': f'http://{proxy.ip}:{proxy.port}'}
+        logger.report(f'Прокси({PROXY_SCOPE}): браузер через {proxy.ip}:{proxy.port}')
+    return opts
+
+
+# Static-именованные entry-файлы binodex (app.js/app.css) на любом поддомене binodex.app.
+_BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/app\.(?:js|css)")
 
 # JavaScript для подавления всплывающих окон TradingView.
 # ВАЖНО — IIFE, а не голая `() => {...}`: add_init_script в Python-биндинге отдаёт исходник КАК ЕСТЬ
@@ -655,19 +878,14 @@ async def init_valute_browser(manager: BrowserManager, valute: str, exchange: st
             await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_MEDIUM)
             await close_dom_popups(page)
 
-            # Открыть поиск символа (force-фолбэк на случай перехвата клика оверлеем)
-            symbol_btn = page.locator(f"#{symbol}").first
-            for attempt in range(3):
-                try:
-                    await symbol_btn.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
-                    await symbol_btn.click(timeout=TIMEOUT_MEDIUM)
-                    break
-                except (Exception,) as e:
-                    logger.warning(f"Попытка {attempt + 1}/3 клика по symbol: {e}")
-                    await close_dom_popups(page)
-                    await asyncio.sleep(ELEMENT_RETRY_DELAY)
-            else:
-                await symbol_btn.click(force=True, timeout=TIMEOUT_MEDIUM)
+            # Открыть поиск символа (устойчиво к перехвату клика оверлеем)
+            # 10-09-2026: три попытки с фолбэком click(force=True) заменены на
+            # click_guarded. force от оверлея НЕ спасает — проверено замером: он лишь
+            # снимает проверку кликабельности, а событие всё равно уходит по координатам,
+            # то есть в оверлей. Исключения при этом нет, и программа шла дальше, считая
+            # что нажала кнопку. click_guarded снимает помеху, а если не вышло — отдаёт
+            # событие самому элементу мимо hit-testing.
+            await click_guarded(page, f"#{symbol}", timeout=TIMEOUT_MEDIUM)
 
             # Сброс категории на «Все» (sticky-фильтр TV иначе ломает поиск).
             # Диалог дождётся через wait_for внутри — фиксированный sleep не нужен.
