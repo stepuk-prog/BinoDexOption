@@ -12,8 +12,6 @@
 таблица восстановимых ошибок PgBouncer — и расходилось оно ровно так, как расходится любой
 скопированный код: правку приходилось вносить в каждую программу отдельно.
 """
-import asyncpg
-
 from binocore.db import BaseDatabase, configure as _configure_db
 
 from logs import init_logger

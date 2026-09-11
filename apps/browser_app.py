@@ -19,7 +19,7 @@ from settings.config import (cookies, database, binary, browser_engine, prog_key
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
-    POPUP_SETTLE_DELAY, ELEMENT_RETRY_DELAY, EVAL_TIMEOUT,
+    POPUP_SETTLE_DELAY, EVAL_TIMEOUT,
     TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG
 )
 from classes.result_types import BrowserInitResult, OperationResult
@@ -185,18 +185,11 @@ def _overlay_log(text: str) -> None:
         logger.report(text)
 
 
-# Потолок на evaluate() ЗДЕСЬ: у Playwright встроенного таймаута у evaluate нет, а эти два
-# зова сидят на горячем пути (click_guarded → init_valute_browser: на каждую пару × страницы).
-# Зависший рендерер TV иначе вешал бы процесс насмерть — диспетчер видит живой юнит, а помочь
-# можно только kill -USR1. Тот же приём уже стоит в otc_app._eval.
-_EVAL_TIMEOUT = 15   # сек
-
-
 async def _probe_point(page: Page, selector: str) -> dict:
     """Что лежит в точке, куда целится клик. Пустой dict — спросить не вышло."""
     try:
         return await asyncio.wait_for(page.evaluate(_AT_POINT_JS, selector),
-                                      timeout=_EVAL_TIMEOUT) or {}
+                                      timeout=EVAL_TIMEOUT) or {}
     except (Exception,):
         return {}
 
@@ -224,7 +217,7 @@ async def _close_overlay(page: Page, selector: str) -> bool:
 
     try:
         result = await asyncio.wait_for(page.evaluate(_DISMISS_JS, selector),
-                                        timeout=_EVAL_TIMEOUT) or {}
+                                        timeout=EVAL_TIMEOUT) or {}
     except (Exception,):
         result = {}
     if result.get('state') == 'closed':
@@ -390,7 +383,7 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
     for _ in range(attempts):
         try:
             res = await asyncio.wait_for(page.evaluate(_ZONE_CLEAR_JS, zone_selector),
-                                         timeout=_EVAL_TIMEOUT) or {}
+                                         timeout=EVAL_TIMEOUT) or {}
         except (Exception,) as error:
             _overlay_log(f'Проба зоны кадра не выполнилась: {type(error).__name__}: {error}')
             return
@@ -638,7 +631,6 @@ async def _proxy_launch_options(chromium: bool = False) -> dict:
 
 
 # Static-именованные entry-файлы binodex (app.js/app.css) на любом поддомене binodex.app.
-_BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/app\.(?:js|css)")
 
 # Навигации-перезагрузки cache-buster'а самого binodex: ?boot-recovery=<ts> / ?chunk-recovery=<ts>.
 _BINODEX_RECOVERY_RE = re.compile(

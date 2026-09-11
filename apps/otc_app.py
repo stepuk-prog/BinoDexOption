@@ -447,28 +447,25 @@ async def _app_shell_mounted(page: Page) -> bool:
         return False
 
 
-async def _privy_authenticated(page: Page) -> bool:
-    """privy:token присутствует в localStorage = сессия Privy жива. Privy на буте САМ удаляет
-    privy:token, если access-JWT протух, а обновить по privy:refresh_token не вышло → апп тихо
-    уходит в Demo (без формы логина). Проверять ПОСЛЕ оседания UI: ранний гейт видит токен, только
-    что восстановленный из storage_state, ещё до того как Privy его провалидирует и очистит."""
+async def _privy_token_alive(page: Page, *, on_error: bool) -> bool:
+    """privy:token присутствует в localStorage = сессия Privy жива.
+
+    Privy на буте САМ удаляет privy:token, если access-JWT протух, а обновить по
+    privy:refresh_token не вышло → апп тихо уходит в Demo (без формы логина). Проверять ПОСЛЕ
+    оседания UI: ранний гейт видит токен, только что восстановленный из storage_state, ещё до
+    того как Privy его провалидирует и очистит.
+
+    `on_error` — что вернуть, когда прочитать не удалось (страница навигирует, eval бросает).
+    Это ЕДИНСТВЕННОЕ, чем различались две прежние функции:
+      * False — гейт готовности: не смогли подтвердить сессию, значит не пускаем дальше;
+      * True  — трактовка редиректа с /trade: сбой чтения ≠ «токена нет», и винить куки
+                (гнать релогин впустую) на нём нельзя.
+    """
     try:
         return bool(await asyncio.wait_for(
             page.evaluate("() => !!localStorage.getItem('privy:token')"), timeout=5))
     except (Exception,):
-        return False
-
-
-async def _authed_safe(page: Page) -> bool:
-    """privy:token жив? БЕЗОПАСНЫЙ дефолт True при сбое чтения (страница навигирует на boot-recovery/
-    лендинг — eval может бросить): не прочитали токен → НЕ винить куки (не гнать релогин впустую).
-    Отличается от _privy_authenticated (тот на любой сбой → False): здесь сбой чтения ≠ «токена нет».
-    Нужен для трактовки редиректа с /trade — куки виним ТОЛЬКО когда токена достоверно нет."""
-    try:
-        return bool(await asyncio.wait_for(
-            page.evaluate("() => !!localStorage.getItem('privy:token')"), timeout=5))
-    except (Exception,):
-        return True
+        return on_error
 
 
 async def _error_boundary_shown(page: Page) -> bool:
@@ -522,7 +519,7 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     # фронта, когда апп-шелл не поднялся). Токен ЖИВ → это аутэйдж их фронта, НЕ куки (релогин
     # бесполезен) → SetupError(mounted=False): прокси-фолбэк + переподъём. Токена нет → сессия
     # реально протухла → CookiesExpired. authed — безопасный дефолт True (грабли 2026-07: boot-recovery).
-    authed = await _authed_safe(page)
+    authed = await _privy_token_alive(page, on_error=True)
     if not on_trade(page.url):
         if authed:
             raise SetupError(f'binodex OTC: {detail} + редирект с /trade на {page.url} при живой '
@@ -916,11 +913,16 @@ _HIDE_OFFZONE_JS = r"""
   const keep = new Set();
   for (let e = cv; e; e = e.parentElement) keep.add(e);
   let n = 0;
+  // Запоминаем ИМЕННО те узлы, которым поставили visibility: снятие off-zone потом пройдёт по
+  // этому списку, а не обходом всего body ещё раз (обход идёт перед каждым опционом).
+  const touched = [];
   for (const el of document.querySelectorAll('body *')) {
     if (keep.has(el) || el === cv || el.contains(cv)) continue;
     el.style.setProperty('visibility', 'hidden', 'important');
+    touched.push(el);
     n++;
   }
+  window.__offzoneTouched = touched;
   const show = (el) => {                                   // вернуть видимость элементу + предкам + потомкам
     if (!el) return;
     for (let e = el; e; e = e.parentElement) e.style.setProperty('visibility', 'visible', 'important');
@@ -940,8 +942,14 @@ _HIDE_OFFZONE_JS = r"""
 """
 
 # Снять off-zone: убрать наши инлайновые visibility со всех элементов (binodex inline-visibility не использует).
-_CLEAR_OFFZONE_JS = ("() => { for (const el of document.querySelectorAll('body *'))"
-                     " if (el.style && el.style.visibility) el.style.removeProperty('visibility'); }")
+# Снятие off-zone: идём по списку узлов, которым сами же ставили visibility (его кладёт
+# _HIDE_OFFZONE_JS в window.__offzoneTouched). Фолбэк на полный обход body остаётся для случая,
+# когда списка нет — страница перезагружалась, а инлайновый стиль пережил навигацию.
+_CLEAR_OFFZONE_JS = ("() => { const t = window.__offzoneTouched;"
+                     " const nodes = (t && t.length) ? t : document.querySelectorAll('body *');"
+                     " for (const el of nodes)"
+                     "  if (el && el.style && el.style.visibility) el.style.removeProperty('visibility');"
+                     " window.__offzoneTouched = null; }")
 
 
 async def _apply_offzone(page: Page) -> None:
@@ -982,7 +990,9 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
     значение, что движок рисует на ярлыке; точнее WS-тика, который опережает график на ~150 мс
     (см. docs/BINODEX_PRICE.md). Если chartData недоступен — фолбэк на WS-цену по моменту кадра.
     Глобус НЕ рендерится браузером (выкл за аккаунтом, экономия CPU) — подкладывается из файла.
-    :return: (success, price|error_text, screenshot_path|'')."""
+    :return: (success, price|error_text) — как у FIN-варианта app.screenshot.
+    Третий элемент (путь кадра) убран: он всегда SCREENSHOT_PATH и никем не читался,
+    а разная арность одного контракта путала вызывающих."""
     symbol = symbol_key(asset)
     last_error = 'нет цены графика OTC'
     shot_deadline = time.monotonic() + SHOT_TOTAL_BUDGET
@@ -1059,11 +1069,11 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             if qr:
                 paste_overlay(comp, qr[0], otc_qr_x, otc_qr_y)  # на OTC один QR (qr110)
             comp.save(screenshot_path)
-            return True, price, screenshot_path
+            return True, price
         except (Exception,) as error:
             last_error = str(error)
             logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS} скриншота OTC: {error}")
-    return False, f'Ошибка записи скриншота OTC - {last_error}', ''
+    return False, f'Ошибка записи скриншота OTC - {last_error}'
 
 
 async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
@@ -1079,7 +1089,7 @@ async def _verify_otc_ready(page: Page) -> None:
     безусловно как отвал кук. WS-фид для BinoOptions НЕ критичен (цена из chartData, WS — фолбэк/
     liveness): не поднялся → лог деградации, БЕЗ raise."""
     # authed читаем ПЕРВОЙ — от неё зависит трактовка редиректа (куки vs аутэйдж фронта binodex).
-    authed = await _authed_safe(page)
+    authed = await _privy_token_alive(page, on_error=True)
     if not on_trade(page.url):
         # binodex увёл с /trade. Сперва — backend: auth-API 5xx браузер-фри → это НЕ куки и НЕ
         # front-end-аутэйдж, а падение бэкенда binodex (Privy-логин на 502); релогин/прокси не
@@ -1109,7 +1119,7 @@ async def _verify_otc_ready(page: Page) -> None:
         await _raise_ui_dead(page, 'нет кнопки настроек аккаунта (завис на сплеше)')
     # Авторитетная перепроверка ПОСЛЕ оседания UI: Privy за время загрузки мог очистить протухший
     # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
-    if not await _privy_authenticated(page):
+    if not await _privy_token_alive(page, on_error=False):
         raise CookiesExpired('binodex OTC: UI поднялся, но privy:token очищен (Demo) — сессия протухла')
     # Масштабы графика и индикаторы сбрасываются на дефолт при каждом запуске браузера (новый
     # контекст из storage_state) — выставляем на каждом старте, ДО off-zone (под ним кнопки не кликаются).

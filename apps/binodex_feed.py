@@ -11,6 +11,7 @@ market-WS напрямую и поднять браузер только ког�
 (проверено), только заголовок Origin. Один ценовой кадр = фид жив.
 """
 import asyncio
+import time
 
 import aiohttp
 
@@ -237,14 +238,32 @@ async def api_alive(timeout: float = API_ALIVE_TIMEOUT) -> bool:
         return False
 
 
+# Окно кэша «binodex готов» (см. binodex_ready). Короткое намеренно: фид может умереть в любой
+# момент, и держать устаревшее «жив» дольше одного цикла опциона нельзя.
+READY_CACHE_TTL = 30.0   # сек
+_ready_cached_at: float | None = None
+
+
 async def binodex_ready(pair: str = FEED_PROBE_PAIR) -> bool:
     """binodex готов к подъёму браузера: И auth-API (api.binodex.app) жив, И market-WS отдаёт кадр.
     Любой из двух мёртв → False (держим браузер-фри ожидание, НЕ молотим релогин/прокси/рестарт).
     API проверяем ПЕРВЫМ: при backend-аутэйдже фид часто ещё живой, но толку от него нет — app-shell
     без API не поднимется."""
+    # Короткий кэш ПОЛОЖИТЕЛЬНОГО ответа: две сетевые пробы стоят до ~18с в худшем случае, а
+    # зовётся это на каждом неуспешном опционе — при череде неудач подряд (кадр не снялся,
+    # пара не выбралась) мы перепроверяли живой фид снова и снова. Отрицательный ответ НЕ
+    # кэшируем: после него программа уходит в ожидание фида, и там нужна свежая правда.
+    global _ready_cached_at
+    if _ready_cached_at is not None and (time.monotonic() - _ready_cached_at) < READY_CACHE_TTL:
+        return True
     if not await api_alive():
+        _ready_cached_at = None
         return False
-    return await feed_alive(pair)
+    if not await feed_alive(pair):
+        _ready_cached_at = None
+        return False
+    _ready_cached_at = time.monotonic()
+    return True
 
 
 async def wait_for_feed(stop_event=None, pair: str = FEED_PROBE_PAIR) -> bool:
