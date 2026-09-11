@@ -296,6 +296,121 @@ async def _sweep_close_buttons(page: Page) -> None:
             continue
 
 
+# Оверлеи, попавшие В КАДР. Отличие от _AT_POINT_JS: там вопрос «что накрыло точку клика», а
+# кадру мешает окно, которое клику не мешает вовсе — TV-онбординг («Теперь можно перемещать
+# таблицы индикаторов…») висит над графиком, кнопка поиска символа свободна, и прежняя проверка
+# честно отвечала «free», пока модалка уезжала в канал (скрин 11-09-2026).
+#
+# Ищем не по именам классов (TV крутит хеши на каждой выкатке), а по геометрии: берём попапы из
+# `#overlap-manager-root` — штатный контейнер TV для модалок/тултипов — и жмём кнопку закрытия
+# у тех, чей прямоугольник пересекает зону кадра. Зона приходит XPath'ом (так она лежит в БД),
+# поэтому селектор резолвим и через document.evaluate.
+_ZONE_CLEAR_JS = """
+(selector) => {
+  const resolve = (sel) => {
+    if (sel.startsWith('/') || sel.startsWith('(')) {
+      const r = document.evaluate(sel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      return r.singleNodeValue;
+    }
+    return document.querySelector(sel);
+  };
+  const zone = resolve(selector);
+  if (!zone) return {state: 'no-zone'};
+  const z = zone.getBoundingClientRect();
+  if (!z.width || !z.height) return {state: 'no-zone'};
+  const visible = (el) => !!(el.offsetWidth || el.offsetHeight);
+  const hits = (r) => r.width && r.height &&
+      r.x < z.x + z.width && r.x + r.width > z.x &&
+      r.y < z.y + z.height && r.y + r.height > z.y;
+  const WORDS = ['\u043f\u043e\u043d\u044f\u0442\u043d\u043e', 'got it', 'ok', '\u043e\u043a',
+                 '\u0437\u0430\u043a\u0440\u044b\u0442\u044c', 'close',
+                 '\u043d\u0435 \u0441\u0435\u0439\u0447\u0430\u0441', '\u043f\u043e\u0437\u0436\u0435',
+                 '\u043e\u0442\u043c\u0435\u043d\u0430', '\u043f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c'];
+  const label = (el) => ((el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
+                         .trim().toLowerCase());
+
+  // 1) Прямой путь: видимая кнопка ВНУТРИ зоны кадра с подписью «Понятно»/«Got it»/крестиком.
+  // Контейнер при этом не важен — TV кладёт онбординг то в overlap-manager-root, то отдельным
+  // слоем, и привязка к контейнеру уже один раз промахнулась (11-09-2026).
+  for (const btn of document.querySelectorAll('button,[role="button"],[data-name*="close" i]')) {
+    if (!visible(btn) || !hits(btn.getBoundingClientRect())) continue;
+    const txt = label(btn);
+    const isClose = WORDS.includes(txt) ||
+        /close|\u0437\u0430\u043a\u0440/i.test(btn.getAttribute('data-name') || '') ||
+        /close|\u0437\u0430\u043a\u0440/i.test(btn.getAttribute('aria-label') || '');
+    if (!isClose) continue;
+    // Не жмём то, что лежит в самом графике (панель инструментов, легенда): берём только
+    // кнопки с плавающим предком. ВАЖНО: position:fixed засчитываем БЕЗ требования z-index —
+    // онбординг TV 11-09-2026 висел именно так (fixed + z-index:auto), и прежнее условие
+    // «z-index > 0» его отбрасывало. Для absolute z-index всё же требуем: абсолютных блоков
+    // внутри самого чарта много, и они не всплывают над ним.
+    let el = btn, floating = false;
+    for (let i = 0; el && i < 10; el = el.parentElement, i++) {
+      const cs = getComputedStyle(el);
+      if (cs.position === 'fixed' ||
+          (cs.position === 'absolute' && (parseInt(cs.zIndex) || 0) > 0)) {
+        floating = true; break;
+      }
+    }
+    if (!floating) continue;
+    try { btn.click(); return {state: 'closed', by: txt || 'close-attr'}; } catch (e) {}
+  }
+
+  // 2) Диагностика: чего не увидели. Верхние элементы в пяти точках зоны — по ним видно,
+  // что реально лежит поверх графика, без гадания по скриншоту.
+  const pts = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+  const seen = [];
+  for (const [fx, fy] of pts) {
+    const el = document.elementFromPoint(z.x + z.width * fx, z.y + z.height * fy);
+    if (!el) continue;
+    let top = el;
+    while (top.parentElement && top.parentElement !== document.body) top = top.parentElement;
+    const tag = (el.tagName || '').toLowerCase();
+    const cls = (el.className || '').toString().slice(0, 60);
+    const txt = (el.innerText || '').trim().slice(0, 40).replace(/\s+/g, ' ');
+    seen.push(`${fx},${fy}:${tag}.${cls}${txt ? '|' + txt : ''}`);
+  }
+  return {state: 'clean', probe: seen.join(' ;; ').slice(0, 700)};
+}
+"""
+
+
+async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3) -> None:
+    """Снять окна, накрывшие ЗОНУ КАДРА (для точки клика — close_dom_popups).
+
+    Ищем саму кнопку закрытия в границах кадра, а не контейнер: TV кладёт онбординг то в
+    `#overlap-manager-root`, то отдельным слоем, и привязка к контейнеру уже промахнулась
+    (11-09-2026 — «Теперь можно перемещать таблицы индикаторов…» уехало в канал). Кнопку жмём
+    только если у неё есть позиционированный предок с z-index > 0, иначе можно попасть по
+    кнопке самого графика.
+
+    Не нашли — пишем в лог, ЧТО лежит поверх зоны (проба в пяти точках): иначе следующий такой
+    случай снова придётся разбирать по скриншоту. Кадр снимаем в любом случае: лучше кадр с
+    модалкой, чем пропущенный опцион."""
+    for _ in range(attempts):
+        try:
+            res = await asyncio.wait_for(page.evaluate(_ZONE_CLEAR_JS, zone_selector),
+                                         timeout=_EVAL_TIMEOUT) or {}
+        except (Exception,) as error:
+            _overlay_log(f'Проба зоны кадра не выполнилась: {type(error).__name__}: {error}')
+            return
+        state = res.get('state')
+        if state == 'closed':
+            _overlay_log(f'Снято окно в зоне кадра (кнопка: {res.get("by")!r})')
+            await page.wait_for_timeout(200)
+            continue
+        if state == 'no-zone':
+            _overlay_log(f'Зона кадра не найдена по селектору {zone_selector!r} — пропускаю чистку')
+            return
+        # Кнопок нет — это НОРМА (чистый кадр), в канал такое слать незачем: чистка идёт на
+        # каждом кадре. Пробу точек пишем в файл и только когда поверх графика лежит что-то
+        # кроме самого холста — иначе строка бессмысленна.
+        probe = res.get('probe', '')
+        if probe and any(':canvas' not in part for part in probe.split(';;')):
+            logger.info(f'В зоне кадра кнопок закрытия нет, но поверх графика что-то есть: {probe}')
+        return
+
+
 async def close_dom_popups(page: Page, target: str = None):
     """Снять оверлеи, накрывшие точку клика (по умолчанию — кнопка поиска символа).
 

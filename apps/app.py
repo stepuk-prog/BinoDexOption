@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from PIL import Image
 from playwright.async_api import Page
 
-from apps.browser_app import close_dom_popups, init_valute_browser
+from apps.browser_app import clear_zone_overlays, close_dom_popups, init_valute_browser
 from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
@@ -295,6 +295,16 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
 
         if not await mouse_move(page, move_field, 0):
             return False, 'Ошибка имитации движения мыши'
+
+        # Окна, накрывшие ЗОНУ КАДРА, — ПОСЛЕДНИМ шагом перед съёмкой. close_dom_popups выше
+        # смотрит точку клика (кнопку поиска символа), а онбординг TV («Теперь можно перемещать
+        # таблицы индикаторов…») висит над графиком и клику не мешает; появляется он ПОСЛЕ
+        # загрузки индикаторов, поэтому чистка в начале функции успевала отработать раньше, чем
+        # окно возникнет. Проверено на живом TV 11-09-2026.
+        try:
+            await clear_zone_overlays(page, screen_zone)
+        except (Exception,):
+            pass
 
         element = page.locator(f"xpath={screen_zone}").first
         # У Playwright screenshot нет встроенного таймаута — ставим верхнюю границу (зависший рендер не вешает цикл).
