@@ -17,9 +17,8 @@ from classes import upload_session
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
-from settings.config import get_app, channel_id, binary, database, program_id, cook_name_otc
-from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS,
-                             TG_SEND_TIMEOUT, USERBOT_CONNECT_TIMEOUT)
+from settings.config import get_app, binary, database, program_id, cook_name_otc
+from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, USERBOT_CONNECT_TIMEOUT)
 from settings.constant import EXIT_BROWSER, EXIT_COOKIES, EXIT_SETUP, BROWSER_MAX_ATTEMPTS
 
 logger = init_logger(__name__)
@@ -180,10 +179,7 @@ async def _init_with_retry():
     # Счётчики МОДУЛЬНЫЕ (как _cookie_fails/_otc_recover_cycles). Локальными они обнулялись на
     # каждом входе, а _recreate_browser зовёт эту функцию заново — в цикле «браузер поднялся →
     # опцион упал → пересоздание» лимиты не накапливались, и предохранители не срабатывали
-    # никогда. Сбрасываются там же, где и раньше: при успешном подъёме/настройке.
-    setup_streak = _setup_streak
-    browser_fails = _browser_fails
-    outage_cycles = _outage_cycles
+    # никогда. Обнуляются ВСЕ разом при успешном подъёме (ветка `if manager:` ниже).
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
@@ -223,9 +219,8 @@ async def _init_with_retry():
                         # direct оживёт сам, БЕЗ рестарта процесса (фикс латча). §4.5.
                         _use_proxy = False
                         _proxy_outage_streak = 0
-                        outage_cycles += 1
-                        _outage_cycles = outage_cycles
-                        if outage_cycles >= SETUP_OUTAGE_MAX_CYCLES:
+                        _outage_cycles += 1
+                        if _outage_cycles >= SETUP_OUTAGE_MAX_CYCLES:
                             # Аутэйдж УСТОЙЧИВ с этой ноды (direct+прокси исчерпаны
                             # SETUP_OUTAGE_MAX_CYCLES раз) — не залипаем тут вечно. Отдаём ноду
                             # диспетчеру: exit(EXIT_SETUP) → GD провайдер-диверсный перенос (front-end
@@ -243,7 +238,7 @@ async def _init_with_retry():
                         logger.report(f'OTC: {PROXY_REPROBE_AFTER} прокси подряд не подняли front-end — '
                                       f'похоже на аутэйдж binodex, не битый эдж; возвращаюсь на прямой режим '
                                       f'(переотбивка), пауза {SETUP_OUTAGE_BACKOFF // 60} мин '
-                                      f'[цикл {outage_cycles}/{SETUP_OUTAGE_MAX_CYCLES}]')
+                                      f'[цикл {_outage_cycles}/{SETUP_OUTAGE_MAX_CYCLES}]')
                     else:
                         logger.warning(f'OTC: прокси не поднял front-end binodex — ротация '
                                        f'({_proxy_outage_streak}/{PROXY_REPROBE_AFTER}), пауза '
@@ -260,10 +255,9 @@ async def _init_with_retry():
             # OTC: апп смонтирован, но наш селектор не найден — сменились селекторы binodex.
             # Рефреш бесполезен. SETUP_ATTEMPTS повторов (временный сбой) → не помогло → плановый
             # выход (нужно вручную обновить селекторы; §4.5).
-            setup_streak += 1
-            _setup_streak = setup_streak
-            logger.warning(f'OTC: сайт не настроился ({setup_streak}/{SETUP_ATTEMPTS}): {error}')
-            if setup_streak >= SETUP_ATTEMPTS:
+            _setup_streak += 1
+            logger.warning(f'OTC: сайт не настроился ({_setup_streak}/{SETUP_ATTEMPTS}): {error}')
+            if _setup_streak >= SETUP_ATTEMPTS:
                 logger.cookies(f'OTC: сайт не настраивается за {SETUP_ATTEMPTS} попытки '
                                f'({cook_name_otc}) — нужно ручное вмешательство (селекторы binodex). Останавливаю')
                 await close_program(manager=None, status=EXIT_SETUP,
@@ -283,18 +277,21 @@ async def _init_with_retry():
         if manager:
             _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
             _proxy_outage_streak = 0  # init поднялся (direct или прокси) → стрик аутэйджей сброшен
-            browser_fails = 0         # браузер поднялся → сбрасываем счётчик провалов подъёма
+            # ВСЕ предохранители подъёма — на ноль: браузер поднялся и настроился, значит
+            # прежние провалы были транзиентными. Без этого сброса счётчики стали бы
+            # монотонными за жизнь процесса: три SetupError с сутками нормальной работы между
+            # ними дали бы ложный EXIT_SETUP «селекторы сломались».
+            _browser_fails = _setup_streak = _outage_cycles = 0
             if _use_proxy:
                 await _mark_proxy_success()  # прокси поднял рабочий init → плюс в статистику
             return manager
         if not binary and _use_proxy:
             # На прокси init провалился (вероятно прокси мёртв) → бан+ротация; это НЕ поломка
-            # браузера ноды, поэтому browser_fails не трогаем (иначе прокси-карусель ложно дала бы EXIT_BROWSER).
+            # браузера ноды, поэтому _browser_fails не трогаем (иначе прокси-карусель ложно дала бы EXIT_BROWSER).
             await _ban_current_proxy()
         else:
-            browser_fails += 1
-            _browser_fails = browser_fails
-            if browser_fails >= BROWSER_MAX_ATTEMPTS:
+            _browser_fails += 1
+            if _browser_fails >= BROWSER_MAX_ATTEMPTS:
                 # Браузер не поднялся подряд BROWSER_MAX_ATTEMPTS раз (не куки/селекторы/фид/прокси —
                 # те идут своими ветками): нода, вероятно, не может поднять Firefox → отдаём диспетчеру
                 # (failover на другую ноду), exit(EXIT_BROWSER). status НЕ трогаем (инвариант).

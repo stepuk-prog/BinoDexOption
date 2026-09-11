@@ -337,8 +337,10 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         target = pair + ' OTC'
         clicked_at = time.time()
         for _ in range(32):
-            if tracker.get_price_at(target, time.time(), back_ms=(time.time() - clicked_at) * 1000) \
-                    is not None and tracker.last_tick is not None:
+            # Именно НОВЫЙ тик по этому символу, пришедший ПОСЛЕ клика (см. has_tick_since):
+            # прежняя проверка через get_price_at(back_ms=...) смотрела в обратную сторону и
+            # подтверждалась ценой ДО клика, а tracker.last_tick — флаг по всему фиду, не по паре.
+            if tracker.has_tick_since(target, clicked_at):
                 await _build_label_cutout(page, target)   # запечь вырезку ярлыка, пока off-zone снят
                 return True
             await asyncio.sleep(0.25)
@@ -813,8 +815,8 @@ _CANVAS_ALPHA_JS = ("el => ({ url: el.toDataURL('image/png'), w: el.width, h: el
 # кладём отдельным слоем. Находим по содержимому+геометрии (у верх-левого угла бокса канваса,
 # текст с 'OTC' и '%') — устойчиво к ротации классов binodex; ставим маркер data-otc-lbl.
 _LABEL_BOX_JS = r"""
-({zone, settingsSel, pairSel}) => {
-  const cv = document.querySelector(zone);
+(sel) => {
+  const cv = document.querySelector(sel);
   if (!cv) return null;
   const b = cv.getBoundingClientRect();
   let best = null, area = 0;
@@ -907,8 +909,8 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
 # и ярлык пары (нужен для вырезки + это кнопка открытия модалки). Применяем после выбора пары и в
 # init_otc; СНИМАЕМ на время select_otc_pair (модалка выбора — вне зоны, под off-zone не кликается).
 _HIDE_OFFZONE_JS = r"""
-(sel) => {
-  const cv = document.querySelector(sel);
+({zone, settingsSel, pairSel}) => {
+  const cv = document.querySelector(zone);
   if (!cv) return -1;
   const keep = new Set();
   for (let e = cv; e; e = e.parentElement) keep.add(e);

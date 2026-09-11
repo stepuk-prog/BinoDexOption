@@ -87,7 +87,6 @@ class WebSocketPriceTracker:
         self.history.clear()
         self.ws_connected = False
         self.last_tick = None
-        self._last_symbol = None
 
     def get_price(self, asset: str = None) -> float | None:
         """Последняя цена по активу. asset вида 'EUR/USD' или 'EUR/USD OTC' → ключ 'EUR/USD-OTC'.
@@ -99,6 +98,19 @@ class WebSocketPriceTracker:
         if self.prices:
             return next(reversed(self.prices.values()))
         return None
+
+    def has_tick_since(self, asset: str, wall: float) -> bool:
+        """Пришёл ли по символу тик ПОЗЖЕ момента `wall` (time.time()).
+
+        Явный критерий вместо игр с get_price_at(back_ms=...): тот считает cutoff как
+        at_wall - back_ms и отдаёт последний тик НЕ ПОЗЖЕ cutoff, то есть ровно наоборот —
+        цену ДО момента. Плюс при непустой истории он почти никогда не отдаёт None (падает на
+        самый ранний тик), так что «нет свежего тика» по нему не отличить.
+
+        Нужен для подтверждения выбора пары: в пределах одной сессии пара возвращается каждые
+        несколько опционов, и старые тики подтверждали бы загрузку мгновенно."""
+        dq = self.history.get(symbol_key(asset))
+        return bool(dq) and dq[-1][0] >= wall
 
     def get_price_at(self, asset: str, at_wall: float, back_ms: float = 0.0) -> float | None:
         """Цена, отрисованная на графике на момент кадра at_wall (локальное time.time()):
