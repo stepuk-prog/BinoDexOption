@@ -404,7 +404,9 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     :param manager: менеджер браузера
     :param used_val: список последних использованных валютных пар
     :param log_data: класс с данными
-    :return: словарь с данными для опциона
+    :return: ничего. Данные пишутся в переданный log_data (Option), а на «пар нет»
+             функция сама уходит в close_program → sys.exit — поэтому вызывающему
+             нечего проверять. Прежний докстринг обещал словарь, которого нет.
     """
     active_binary_list = await database.option_data_tv(tf=log_data.find_timeframe, exclude_ids=used_val)
     if active_binary_list is False:  # сбой пула (контракт execute_query) — это отвал БД, НЕ «нет пар»

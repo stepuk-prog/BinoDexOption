@@ -9,6 +9,7 @@ from apps.browser_app import init_load
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            session_recoverable, write_status_offline)
 from apps.main_app import main
+from apps.my_exeptions import send_photo_safe
 from apps.premium_watch import check_premium
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import binodex_ready, wait_for_feed, FEED_CONFIRM_WINDOW
@@ -394,19 +395,21 @@ async def bot():
     if binary:
         now = datetime.now()  # один снимок времени — иначе возможен переход минуты/часа между вызовами
         if now.isoweekday() == 1 and now.hour == 3 and now.minute < 25:
-            try:
-                await asyncio.wait_for(
-                    app.send_photo(chat_id=channel_id, photo='pictures/start_week.png', caption=start_message()),
-                    timeout=TG_SEND_TIMEOUT)
-            except (Exception,) as error:
-                logger.error(f'Ошибка отправки стартового сообщения - {error}')
+            # Через send_photo_safe, а не голый send_photo: у транспорта есть проба доставки и
+            # повтор при обрыве — ровно тот сценарий (таймаут при потере SYN), ради которого он и
+            # написан. Прямой вызов означал, что пост молча терялся.
+            ok, err = await send_photo_safe('pictures/start_week.png', start_message(),
+                                            mes_type='стартовое сообщение')
+            if not ok:
+                logger.error(f'Ошибка отправки стартового сообщения - {err}')
         if (now + timedelta(hours=2)).weekday() >= 5:
-            try:
-                await asyncio.wait_for(
-                    app.send_photo(chat_id=channel_id, photo='pictures/end_week.png', caption=weekend_message()),
-                    timeout=TG_SEND_TIMEOUT)
-            except (Exception,) as error:
-                logger.error(f'Ошибка отправки сообщения о выходных - {error}')
+            # Через send_photo_safe (см. выше). Здесь потеря особенно заметна: следом идёт
+            # write_status_offline + выход, то есть подписчики остались бы без сообщения о
+            # закрытии недели, а программа при этом честно ушла в офлайн.
+            ok, err = await send_photo_safe('pictures/end_week.png', weekend_message(),
+                                            mes_type='сообщение о выходных')
+            if not ok:
+                logger.error(f'Ошибка отправки сообщения о выходных - {err}')
             await write_status_offline(program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
@@ -487,14 +490,16 @@ async def bot():
             continue
 
         # OTC: отвал cookies в рантайме (§4.1). ОСНОВНОЙ сигнал — otc_session_dead (редирект с
-        # /trade ИЛИ мёртвый WS-фид). ВТОРИЧНЫЙ — эвристика «цена не меняется N циклов» (на плоском
+        # /trade ИЛИ мёртвый WS-фид). ВТОРИЧНЫЙ — эвристика «цена не менялась N проверок подряд
+        # ВНУТРИ одного опциона» (prev_price/count_price обнуляются в начале каждого
+        # _run_option, межопционной памяти у неё нет) — на плоском
         # рынке даёт ложняки). Реакция — пересоздание браузера: если куки реально мертвы, init
         # упрётся в CookiesExpired → _init_with_retry запустит авто-восстановление рефрешером
         # (3 попытки → иначе выход). Если умер только WS (куки живы) — init поднимется без рефреша.
         if not binary:
             dead, reason = await otc_session_dead(manager)
             if not dead and res_option.check_cookies > 2:
-                dead, reason = True, 'цена не меняется N циклов подряд (вторичный сигнал)'
+                dead, reason = True, 'цена не менялась N проверок ВНУТРИ опциона (вторичный сигнал)'
             if dead:
                 # В лог, не в канал: «dead» часто транзиентный сплеш/WS-икота, а не отвал кук —
                 # пересоздание это переживёт без рефреша (init разведёт: CookiesExpired / FeedOutage / SetupError).
@@ -526,12 +531,13 @@ async def bot():
                     except asyncio.TimeoutError:
                         pass
                     continue
-                try:
-                    await asyncio.wait_for(
-                        app.send_photo(chat_id=channel_id, photo='pictures/end_week.png', caption=weekend_message()),
-                        timeout=TG_SEND_TIMEOUT)
-                except (Exception,) as error:
-                    logger.error(f'Ошибка отправки сообщения о выходных - {error}')
+                # Через send_photo_safe (проба доставки + повтор): голый send_photo терял пост
+                # на таймауте, а следом идёт write_status_offline и выход — подписчики остались
+                # бы без сообщения о закрытии недели.
+                ok, err = await send_photo_safe('pictures/end_week.png', weekend_message(),
+                                                mes_type='сообщение о выходных')
+                if not ok:
+                    logger.error(f'Ошибка отправки сообщения о выходных - {err}')
                 await write_status_offline(program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
                 return

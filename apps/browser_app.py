@@ -1029,6 +1029,11 @@ async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
 
     if not browser_result.success:
         logger.error(browser_result.error)
+        # Закрываем браузер, как и в ветке исключений выше: без этого Firefox остаётся
+        # осиротевшим и держит lock в общем кэше Playwright. Путь сейчас почти недостижим
+        # (всё уходит через close_program → sys.exit), но латентная утечка от этого не
+        # перестаёт быть утечкой — а стоит она одну строку.
+        await manager.close()
         return False
 
     return manager
