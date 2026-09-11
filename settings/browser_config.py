@@ -1,6 +1,30 @@
-from apps.setting_app import find_par
+import sys
+
 from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
+
+
+def find_par(data, par):
+    """Значение параметра `par` из выборки настроек; нет строки — падаем на старте с именем
+    параметра (§9 fail-fast: без селектора браузерный флоу всё равно не поедет, а криптичный
+    TypeError всплыл бы посреди опциона).
+
+    Живёт ЗДЕСЬ, а не в apps/: это единственный потребитель, а прежний дом
+    `apps/setting_app.py` разворачивал слои — нижний settings тянул верхний apps. Там, где
+    `apps/__init__.py` делает реэкспорт, это давало цикл: импорт settings.browser_config
+    ПЕРВЫМ падал «partially initialized module». В проде не стреляло только потому, что
+    main.py импортирует apps раньше; любой тул/диагностика, взявшие settings первыми,
+    получали невнятный ImportError."""
+    result = next((item['par_value'] for item in data if item['par_name'] == par), None)
+    if result is None:
+        # Логгер импортируем ЛЕНИВО: на import-time settings ещё не должен тянуть logs
+        # (тот сам читает settings.logger_config — получился бы новый цикл). К моменту
+        # реальной ошибки всё уже инициализировано.
+        from logs import init_logger
+        init_logger(__name__).error(f'Не найден параметр {par} для браузера')
+        sys.exit(1)
+    return result
+
 
 # TV/FIN-селекторы нужны только в FIN-режиме (BINARY=1). Для OTC (BINARY=0) не дёргаем
 # settings.tv_settings (лишний синхронный запрос к БД на старте каждого OTC-инстанса) — имена

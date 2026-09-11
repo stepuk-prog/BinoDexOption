@@ -90,6 +90,12 @@ async def close_telegram_bot():
         await _telegram_bot.session.close()
 
 
+# Потолок Telegram на sendMessage — 4096 символов. Берём с запасом: считает он в UTF-16 code
+# units, и эмодзи/кастом-эмодзи в наших шапках идут по два.
+TG_MESSAGE_LIMIT = 3900
+_TRUNCATED_MARK = '\n\n…[обрезано, полный текст — в error.log]'
+
+
 class TelegramBotHandler(Handler):  # Handler для логера, отправляющий сообщение в Telegram (async)
     def __init__(self):
         super().__init__()
@@ -103,6 +109,14 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
     async def _send_message(self, chat_id: int, text: str, thread_id: int | None = None):
         """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно).
         thread_id — id темы форума; None для обычного канала (aiogram опустит параметр)."""
+        # Режем до лимита sendMessage (4096): записи с exc_info=True тащат в тело полный
+        # трейсбек (main.py — непредвиденный сбой bot(), binocore/db — непредвиденная SQL-ошибка),
+        # а стек через Playwright/asyncpg/pyrofork с цепочкой «During handling…» легко перебирает
+        # лимит. Тогда Telegram отвечает MESSAGE_TOO_LONG, ошибку глотает except выше — и самый
+        # важный алерт теряется целиком. Лучше обрезанный, чем никакого: полный текст со стеком
+        # всё равно лежит в error.log.
+        if len(text) > TG_MESSAGE_LIMIT:
+            text = text[:TG_MESSAGE_LIMIT - len(_TRUNCATED_MARK)] + _TRUNCATED_MARK
         try:
             await asyncio.wait_for(
                 self.bot.send_message(chat_id=chat_id, text=text, message_thread_id=thread_id),
