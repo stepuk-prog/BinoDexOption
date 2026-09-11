@@ -546,26 +546,23 @@ async def bot():
     await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
 
 
-async def _emergency_shutdown(error: BaseException) -> None:
-    """Уборка после НЕПРЕДВИДЕННОГО исключения вне охраняемых зон.
+def _log_fatal(error: BaseException) -> None:
+    """Записать НЕПРЕДВИДЕННОЕ исключение, долетевшее до asyncio.run, и не обещать лишнего.
 
-    Голый asyncio.run(bot()) означал: traceback в stderr, код 1 — и ни алерта в Telegram, ни
-    закрытия браузера/юзербота/пулов. Осиротевший Firefox при этом переживает процесс и держит
-    lock в общем кэше Playwright, то есть мешает следующему запуску. Прилетать сюда есть откуда:
-    database.connect() на старте (БД недоступна), bring_to_front в open_tv_browser вне try,
-    любая ветка, которую _init_with_retry не ловит (он знает только CookiesExpired/FeedOutage/
-    SetupError).
+    Голый asyncio.run(bot()) отдавал только трейсбек в stderr: в error.log и journald не
+    попадало ничего осмысленного. Эта функция закрывает ровно это — и ничего больше.
 
-    status НЕ трогаем: судьбу процесса решает диспетчер по коду выхода (settings/constant.py).
-    """
+    Ресурсы здесь НЕ убираем, хотя первая версия пыталась (11-09-2026). Причины две. Первая:
+    уборка и так есть — close_program в штатных ветках и общий teardown. Вторая: делать это
+    отсюда НЕЛЬЗЯ — Playwright-, pyrogram- и asyncpg-объекты привязаны к УЖЕ ЗАКРЫТОМУ loop'у,
+    так что каждый вызов в новом asyncio.run отбился бы `RuntimeError: attached to a different
+    loop` и был молча проглочен. Телеграм-алерт отсюда тоже не уйдёт: emit кладёт отправку в
+    create_task, а дождаться её в этой точке уже некому — asyncio.run отменит задачу на выходе.
+    Поэтому функция синхронная: гарантирован файл и journald, а не видимость доставки.
+
+    status НЕ трогаем: судьбу процесса решает диспетчер по коду выхода."""
     logger.error(f'НЕПРЕДВИДЕННЫЙ сбой вне охраняемых зон: '
                  f'{type(error).__name__}: {error}', exc_info=error)
-    try:
-        await close_program(manager=_current_manager, status=1, text='Аварийное завершение ⚠️')
-    except SystemExit:
-        raise
-    except (Exception,) as cleanup_error:
-        logger.error(f'Аварийная уборка не завершилась штатно: {cleanup_error}')
 
 
 if __name__ == "__main__":
@@ -577,8 +574,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise                       # close_program уже отработал и выставил код выхода
     except BaseException as _error:
-        try:
-            asyncio.run(_emergency_shutdown(_error))
-        except SystemExit:
-            raise                   # код выхода выставил close_program внутри уборки
+        # Синхронно и без нового loop'а — см. _log_fatal: уборка оттуда невозможна в принципе.
+        _log_fatal(_error)
         sys.exit(1)
