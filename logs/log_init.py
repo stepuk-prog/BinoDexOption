@@ -173,7 +173,16 @@ class _ExactLevelFilter(logging.Filter):
 
 
 # Уровень → имя файла внутри папки экземпляра (в каждом файле — только свой уровень)
+# INFO пишем по умолчанию (11-09-2026); `LOG_INFO=0` (или false/no/off) возвращает прежний
+# порог REPORT. До этого уровень логгера был REPORT (25), а info.log не заводился вовсе — то
+# есть все logger.info и logger.debug молчали. Терялась ровно форензика горячего пути: цена
+# кадра взята из WS-фолбэка вместо ярлыка, вырезка ярлыка не удалась, чипы индикаторов не
+# прочитались, «на binodex нет торговых пар», ошибки разбора WS-фрейма. Образец — BinoStoch.
+_INFO_ON = os.getenv('LOG_INFO', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+_BASE_LEVEL = logging.INFO if _INFO_ON else REPORT_LEVEL
+
 _LEVEL_FILES = [
+    (logging.INFO, 'info.log'),
     (REPORT_LEVEL, 'report.log'),
     (logging.WARNING, 'warning.log'),
     (COOKIES_LEVEL, 'cookies.log'),
@@ -207,14 +216,14 @@ def init_logger(name):  # инициализация логера
     logger = logging.getLogger(name)
     if logger.handlers:  # уже сконфигурирован — не плодим хендлеры при повторном вызове
         return logger
-    logger.setLevel(REPORT_LEVEL)
+    logger.setLevel(_BASE_LEVEL)
     logger.propagate = False  # не дублировать записи в root-логгер
     logger.addHandler(TelegramBotHandler())
 
     # Stream handler (консоль)
     sh = logging.StreamHandler()
     sh.setFormatter(logging.Formatter(LOG_FORMAT))
-    sh.setLevel(REPORT_LEVEL)
+    sh.setLevel(_BASE_LEVEL)
     logger.addHandler(sh)
 
     # File handlers (синглтон): по одному файлу на уровень

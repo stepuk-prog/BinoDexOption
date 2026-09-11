@@ -85,10 +85,18 @@ FORWARD_MILESTONES = frozenset(m for m in PLUS_MILESTONES if m >= FORWARD_FROM)
 async def check_plus():
     """Проверка количества плюсов"""
     kol_plus = await database.plus_counter(program_id=program_id)
-    if not kol_plus:  # False/None — ошибка пула или нет строки счётчика
+    # Различаем ДВА исхода, которые раньше сливались в «молча продолжаем»: False — сбой пула
+    # (инкремент серии потерян, веха не сработает — об этом надо знать), None/пусто — строки
+    # счётчика ещё нет (нормально для первого плюса новой программы).
+    if kol_plus is False:
+        logger.warning('Счётчик плюсов не обновился (сбой БД) — серия и веха на этом цикле '
+                       'потеряны; пост-веха, если он выпадал на этот плюс, не выйдет')
+        return True, ''
+    if not kol_plus:
         return True, ''
     count = kol_plus.get('plus')  # asyncpg.Record.get — None, если колонки нет (вместо KeyError)
     if count is None:
+        logger.warning('Счётчик плюсов вернул строку без колонки plus — веха пропущена')
         return True, ''
 
     if count in PLUS_MILESTONES:
@@ -114,7 +122,12 @@ async def check_plus():
 
 async def check_minus():
     """Сброс серии плюсов при минусе — инкремент счётчика минусов в БД."""
-    await database.minus_counter(program_id=program_id)
+    # Результат ПРОВЕРЯЕМ: при сбое пула серия плюсов не обнулится, и следующий плюс догонит
+    # веху с неверного числа — пост «N в ряд» уйдёт с завышенным счётом. Цикл на этом не рвём
+    # (итог опциона уже опубликован), но в лог пишем.
+    if await database.minus_counter(program_id=program_id) is False:
+        logger.warning('Счётчик минусов не обновился (сбой БД) — серия плюсов НЕ обнулена, '
+                       'следующая веха может уйти с завышенным числом')
     return True, ''
 
 
@@ -158,7 +171,12 @@ async def exit_main(channel_mess: bool,
         if not ok:
             logger.error(f'Ошибка отправки сообщения о сбое программы - {err}')
     else:
-        plus = True
+        # plus — именно «опцион закончился ПЛЮСОМ», а не «цикл прошёл без баг-картинки». Раньше
+        # тут стояло plus = True, то есть флаг поднимался и на минусе; по нему FIN решает,
+        # закрывать ли неделю (main.py: «неделю закрываем только на плюсовом опционе»), и
+        # неделя закрывалась на первом же завершённом опционе, каким бы ни был итог.
+        # В английской версии это уже было исправлено — паритет восстановлен 11-09-2026.
+        plus = bool(option_data.plus)
         if option_data.plus:
             check = await check_plus()
             if not check[0]:

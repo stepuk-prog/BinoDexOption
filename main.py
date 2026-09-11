@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import sys
 
 from datetime import datetime, timedelta
 
@@ -61,6 +62,17 @@ _stop_event: asyncio.Event | None = None
 # settings.proxy_data через локальный релей. НЕ sticky навсегда: после PROXY_REPROBE_AFTER неудач
 # подряд прокси-режим сбрасывается обратно в direct (переотбивка — front-end мог восстановиться,
 # иначе нода залипает до рестарта). FIN/TradingView фолбэк не использует.
+# Текущий BrowserManager — для АВАРИЙНОЙ уборки в предохранителе внизу файла: там локальной
+# переменной bot() уже не достать, а осиротевший Firefox переживает процесс и держит lock
+# в общем кэше Playwright.
+_current_manager = None
+
+# Предохранители подъёма браузера: считаются МЕЖДУ вызовами _init_with_retry (её зовёт и
+# _recreate_browser), иначе лимит не накопится — см. комментарий внутри функции.
+_setup_streak = 0
+_browser_fails = 0
+_outage_cycles = 0
+
 _use_proxy = False
 # OTC: счётчик front-end-аутэйджей подряд в прокси-режиме (для переотбивки direct). Сбрасывается
 # при успешном init и при каждом новом заходе в прокси-режим.
@@ -163,10 +175,14 @@ async def _init_with_retry():
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
-    global _use_proxy, _proxy_outage_streak
-    setup_streak = 0  # подряд идущих SetupError (UI/селекторы) — до SETUP_ATTEMPTS, потом выход
-    browser_fails = 0  # подряд провалов подъёма браузера (НЕ куки/селекторы/прокси) → EXIT_BROWSER
-    outage_cycles = 0  # полных «direct→прокси-исчерпание» циклов front-end-аутэйджа → EXIT_SETUP (§4.5)
+    global _use_proxy, _proxy_outage_streak, _setup_streak, _browser_fails, _outage_cycles
+    # Счётчики МОДУЛЬНЫЕ (как _cookie_fails/_otc_recover_cycles). Локальными они обнулялись на
+    # каждом входе, а _recreate_browser зовёт эту функцию заново — в цикле «браузер поднялся →
+    # опцион упал → пересоздание» лимиты не накапливались, и предохранители не срабатывали
+    # никогда. Сбрасываются там же, где и раньше: при успешном подъёме/настройке.
+    setup_streak = _setup_streak
+    browser_fails = _browser_fails
+    outage_cycles = _outage_cycles
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
@@ -207,6 +223,7 @@ async def _init_with_retry():
                         _use_proxy = False
                         _proxy_outage_streak = 0
                         outage_cycles += 1
+                        _outage_cycles = outage_cycles
                         if outage_cycles >= SETUP_OUTAGE_MAX_CYCLES:
                             # Аутэйдж УСТОЙЧИВ с этой ноды (direct+прокси исчерпаны
                             # SETUP_OUTAGE_MAX_CYCLES раз) — не залипаем тут вечно. Отдаём ноду
@@ -243,6 +260,7 @@ async def _init_with_retry():
             # Рефреш бесполезен. SETUP_ATTEMPTS повторов (временный сбой) → не помогло → плановый
             # выход (нужно вручную обновить селекторы; §4.5).
             setup_streak += 1
+            _setup_streak = setup_streak
             logger.warning(f'OTC: сайт не настроился ({setup_streak}/{SETUP_ATTEMPTS}): {error}')
             if setup_streak >= SETUP_ATTEMPTS:
                 logger.cookies(f'OTC: сайт не настраивается за {SETUP_ATTEMPTS} попытки '
@@ -274,6 +292,7 @@ async def _init_with_retry():
             await _ban_current_proxy()
         else:
             browser_fails += 1
+            _browser_fails = browser_fails
             if browser_fails >= BROWSER_MAX_ATTEMPTS:
                 # Браузер не поднялся подряд BROWSER_MAX_ATTEMPTS раз (не куки/селекторы/фид/прокси —
                 # те идут своими ветками): нода, вероятно, не может поднять Firefox → отдаём диспетчеру
@@ -311,6 +330,13 @@ async def _await_binodex_feed(at_start: bool) -> bool:
     logger.report(f'✅ binodex снова доступен (фид+API) и держится {int(FEED_CONFIRM_WINDOW)}с '
                   f'без срывов — поднимаю браузер, продолжаю работу')
     return True
+
+
+def _remember_manager(manager):
+    """Запомнить текущий браузер для аварийной уборки (см. предохранитель в __main__)."""
+    global _current_manager
+    _current_manager = manager
+    return manager
 
 
 async def bot():
@@ -419,7 +445,7 @@ async def bot():
             return
 
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
-    manager = await _init_with_retry()
+    manager = _remember_manager(await _init_with_retry())
     if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
         await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
         return
@@ -455,7 +481,7 @@ async def bot():
                 logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):
                 break  # SIGTERM во время ожидания
-            manager = await _init_with_retry()
+            manager = _remember_manager(await _init_with_retry())
             if manager is None:  # остановлены сигналом во время повторного init
                 break
             continue
@@ -474,7 +500,7 @@ async def bot():
                 # пересоздание это переживёт без рефреша (init разведёт: CookiesExpired / FeedOutage / SetupError).
                 # Реальный отвал/невосстановление дойдёт до cookies-канала из _recover_otc_cookies.
                 logger.warning(f'OTC: сессия не отвечает в рантайме ({reason}) — пересоздаю браузер')
-                manager = await _recreate_browser(manager)
+                manager = _remember_manager(await _recreate_browser(manager))
                 if manager is None:  # остановлены сигналом во время пересоздания
                     break
                 continue
@@ -517,5 +543,39 @@ async def bot():
     await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
 
 
+async def _emergency_shutdown(error: BaseException) -> None:
+    """Уборка после НЕПРЕДВИДЕННОГО исключения вне охраняемых зон.
+
+    Голый asyncio.run(bot()) означал: traceback в stderr, код 1 — и ни алерта в Telegram, ни
+    закрытия браузера/юзербота/пулов. Осиротевший Firefox при этом переживает процесс и держит
+    lock в общем кэше Playwright, то есть мешает следующему запуску. Прилетать сюда есть откуда:
+    database.connect() на старте (БД недоступна), bring_to_front в open_tv_browser вне try,
+    любая ветка, которую _init_with_retry не ловит (он знает только CookiesExpired/FeedOutage/
+    SetupError).
+
+    status НЕ трогаем: судьбу процесса решает диспетчер по коду выхода (settings/constant.py).
+    """
+    logger.error(f'НЕПРЕДВИДЕННЫЙ сбой вне охраняемых зон: '
+                 f'{type(error).__name__}: {error}', exc_info=error)
+    try:
+        await close_program(manager=_current_manager, status=1, text='Аварийное завершение ⚠️')
+    except SystemExit:
+        raise
+    except (Exception,) as cleanup_error:
+        logger.error(f'Аварийная уборка не завершилась штатно: {cleanup_error}')
+
+
 if __name__ == "__main__":
-    asyncio.run(bot())
+    try:
+        asyncio.run(bot())
+    except KeyboardInterrupt:
+        # Ctrl-C вне обработчика сигналов (ранний старт/shutdown) — штатная остановка.
+        sys.exit(0)
+    except SystemExit:
+        raise                       # close_program уже отработал и выставил код выхода
+    except BaseException as _error:
+        try:
+            asyncio.run(_emergency_shutdown(_error))
+        except SystemExit:
+            raise                   # код выхода выставил close_program внутри уборки
+        sys.exit(1)

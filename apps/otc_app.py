@@ -63,6 +63,14 @@ CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
 # Порог доли непрозрачных пикселей: ниже = «пусто» → ждём отрисовку (норм. график проходит с запасом).
 CANVAS_MIN_OPAQUE = 0.005
 CANVAS_READY_SECONDS = 6.0   # сколько ждать отрисовки свечей внутри попытки (отдельно от MAX_SCREENSHOT_ATTEMPTS)
+
+# Потолок на ВСЁ снятие кадра (все попытки вместе). CANVAS_READY_SECONDS ограничивает только
+# ожидание отрисовки внутри одной итерации, а сама итерация — это семь _eval по EVAL_TIMEOUT
+# каждый (3 чтения цены + toDataURL + 3 чтения) плюс wait_for(TIMEOUT_LONG) и закрытие модалки;
+# при подвисшем рендерере три попытки складывались в минуты. Кадр, снятый после экспирации,
+# бесполезен — лучше честно вернуть ошибку и пропустить опцион.
+SHOT_TOTAL_BUDGET = 45.0   # сек
+
 # Кнопка настроек аккаунта (otc_settings_btn) есть в тулбаре ТОЛЬКО когда торговый UI полностью
 # прогрузился. На сплеше (зависший Privy-токен без редиректа) её нет — хотя кнопка выбора пары
 # присутствует, потому on_trade/UI-gate по ней и feed_dead (котировок-WS стримит все пары) сплеш
@@ -977,7 +985,12 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
     :return: (success, price|error_text, screenshot_path|'')."""
     symbol = symbol_key(asset)
     last_error = 'нет цены графика OTC'
+    shot_deadline = time.monotonic() + SHOT_TOTAL_BUDGET
     for attempt in range(1, MAX_SCREENSHOT_ATTEMPTS + 1):
+        if time.monotonic() >= shot_deadline:
+            logger.warning(f'OTC: бюджет снятия кадра {SHOT_TOTAL_BUDGET:.0f}с исчерпан на '
+                           f'попытке {attempt} — прекращаю (кадр после экспирации бесполезен)')
+            break
         try:
             element = page.locator(screen_zone_otc).first
             await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
@@ -999,7 +1012,9 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             # (было probe+захват = 2 PNG-энкода/кадр в стационаре). Ценовой брекет (reads_before →
             # t_shot → канвас → reads_after) держим ВНУТРИ итерации, чтобы медиана оставалась
             # синхронной с кадром; пустой кадр НЕ постим (ждём/ретраим до бюджета).
-            deadline = time.monotonic() + CANVAS_READY_SECONDS
+            # Ожидание отрисовки не может пережить общий бюджет: иначе последняя попытка
+            # растягивала снятие далеко за него.
+            deadline = min(time.monotonic() + CANVAS_READY_SECONDS, shot_deadline)
             canvas_img = None
             reads: list[float] = []
             t_shot = time.time()
