@@ -36,6 +36,13 @@ error_forum = opt_int("ERROR_FORUM", 0) or None
 error_topic = opt_int("ERROR_TOPIC_FIN" if binary else "ERROR_TOPIC_OTC", 0) or None
 error_dest = (error_forum, error_topic) if error_forum and error_topic else (error_channel, None)
 
+# Premium юзербота — ОТДЕЛЬНАЯ тема форума ошибок, ОДНА на все инстансы (2026-09-11,
+# стандарт §3.5): аккаунт у каждого инстанса свой, но алерт редкий и адресован оператору, а
+# не режиму. Своя тема нужна потому, что он повторяется каждые два часа, пока Premium не
+# продлят, — в общей теме режима он забил бы ленту. Не задана → адрес ошибок.
+premium_topic = opt_int("PREMIUM_TOPIC", 0) or None
+premium_dest = (error_forum, premium_topic) if error_forum and premium_topic else error_dest
+
 # REPORT-сообщения — свой форум, тоже с темой по режиму. Форум ОТДЕЛЬНЫЙ от форума ошибок:
 # смешивать рабочий поток с алертами нельзя, иначе алерт тонет. Флаг устроен так же.
 message_forum = opt_int("MESSAGE_FORUM", 0) or None

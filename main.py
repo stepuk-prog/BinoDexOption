@@ -8,6 +8,7 @@ from apps.browser_app import init_load
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            session_recoverable, write_status_offline)
 from apps.main_app import main
+from apps.premium_watch import check_premium
 from apps.otc_app import otc_session_dead
 from apps.binodex_feed import binodex_ready, wait_for_feed, FEED_CONFIRM_WINDOW
 from classes import upload_session
@@ -341,6 +342,9 @@ async def bot():
             # Таймаут: SIGTERM-хендлер ставится ниже (после init), поэтому зависший хендшейк
             # Pyrogram здесь нельзя прервать сигналом — оборачиваем wait_for (TimeoutError → ветка B).
             await asyncio.wait_for(app.start(), timeout=USERBOT_CONNECT_TIMEOUT)
+            # Premium спрашиваем сразу после подъёма клиента: отметка в БД выставится на старте,
+            # а не через два часа. Сбой проверки старт не валит — внутри всё поглощается.
+            await check_premium(force=True)
             break
         except (Exception,) as error:
             if session_failed(error) and not session_recoverable(error):  # ветка A — без ретраев
@@ -424,6 +428,11 @@ async def bot():
     logger.info("🔄 Переход в main loop...")
 
     while not stop_event.is_set():
+        # Premium аккаунта: сторож сам решает, подошёл ли срок (раз в 2 часа), поэтому вызов
+        # в цикле дешёвый — почти всегда это сравнение таймера. Кастом-эмодзи в постах шлёт
+        # только Premium-аккаунт, а истекает он посреди прогона.
+        await check_premium()
+
         res_option = await main(manager=manager, qr=qr, stop_event=stop_event)
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —

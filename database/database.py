@@ -1,20 +1,20 @@
-"""
-Единый асинхронный интерфейс к PostgreSQL через asyncpg.
+"""Доступ к PostgreSQL: свои SQL-запросы поверх общего ядра binocore.db.
 
-Два пула на одном PG-инстансе (общий PgBouncer, отличается только имя БД):
-  'program' (pg_name)      — program.programdata (статус диспетчеру).
-  'binodex' (pg_name_fin)  — данные опционов (option_data.*), счётчики,
-                             cookies.pages.
-Настройки/креды/cookies, нужные на старте, читает settings/_bootstrap.py
-(одноразовые коннекты ДО создания этих пулов).
-"""
-import asyncio
-import random
-from typing import Awaitable, cast
+Пулы, ретраи, самовосстановление и тексты логов живут в BaseDatabase — здесь только запросы
+этой программы. Два пула на одном объекте:
+  'program' (pg_name)      — program.programdata (статус диспетчеру), cookies.tv_cookies.
+  'binodex' (pg_name_fin)  — данные опционов (option_data.*), счётчики, cookies.pages,
+                             cookies.binodex_cookies, settings.proxy_data.
+Пул выбирается параметром db= у самого запроса. Настройки/креды/cookies, нужные на старте,
+читает settings/_bootstrap.py (одноразовые коннекты ДО создания этих пулов).
 
+Своё ядро пулов тут было точной копией общего: те же ретраи, тот же `_recreate_pool`, та же
+таблица восстановимых ошибок PgBouncer — и расходилось оно ровно так, как расходится любой
+скопированный код: правку приходилось вносить в каждую программу отдельно.
+"""
 import asyncpg
-from asyncpg.exceptions import (CannotConnectNowError, ConnectionDoesNotExistError,
-                                InterfaceError, ReadOnlySQLTransactionError)
+
+from binocore.db import BaseDatabase, configure as _configure_db
 
 from logs import init_logger
 from settings.database_config import (DB_NAMES, init_json_codec, pg_user,
@@ -22,197 +22,18 @@ from settings.database_config import (DB_NAMES, init_json_codec, pg_user,
 
 logger = init_logger(__name__)
 
-_PGBOUNCER_RECOVERABLE = (
-    "got result for unknown protocol state",
-    "client_login_timeout",
-    "server closed the connection unexpectedly",
-    "terminating connection due to administrator command",
-    "canceling statement due to",
-    # После Patroni failover старый лидер демотится в read-only standby; PgBouncer ещё
-    # раздаёт серверные соединения к нему → UPDATE падает «read-only transaction». Лечится
-    # ретраем (новая транзакция → writable-лидер) + пересозданием пула — поэтому recoverable.
-    "read-only transaction",
-    "только чтение",
-)
-
-# Таймаут ожидания свободного соединения из пула (правило: не зависать).
-_ACQUIRE_TIMEOUT = 30
+# Логгер семьи для общего ядра. Здесь, а не в settings/*: логгер к этому моменту создан,
+# а кругов импорта нет (settings импортируется раньше logs). Тексты — русские дефолтные.
+_configure_db(logger=logger)
 
 
-class Database:
-    """Асинхронный класс для работы с PostgreSQL через asyncpg с пулами соединений."""
+class Database(BaseDatabase):
+    """SQL-запросы программы. Пулы и политика ретраев — в BaseDatabase."""
 
     def __init__(self, min_size: int = 2, max_size: int = 10):
-        self.min_size = min_size
-        self.max_size = max_size
-        # Per-pool state. Ключи — 'program' / 'binodex'.
-        self._pools: dict[str, asyncpg.Pool | None] = {'program': None, 'binodex': None}
-        self._pool_locks: dict[str, asyncio.Lock] = {
-            'program': asyncio.Lock(), 'binodex': asyncio.Lock(),
-        }
-        # Антиспам: error «не удалось восстановить серию» логируем один раз до успеха.
-        self._recovery_error_logged = False
-
-    async def _connect_pool(self, name: str, retries: int = 5, delay: float = 2.0):
-        db_name = DB_NAMES[name]
-        for attempt in range(1, retries + 1):
-            try:
-                pool_factory = cast(Awaitable[asyncpg.Pool], asyncpg.create_pool(
-                    user=pg_user, password=pg_password, host=pg_host, port=pg_port,
-                    database=db_name,
-                    min_size=self.min_size, max_size=self.max_size,
-                    statement_cache_size=0,   # обязательно для PgBouncer transaction mode
-                    timeout=10,               # forwarded в connect(): таймаут установки коннекта (TCP/login) — не виснуть на полумёртвом PgBouncer
-                    command_timeout=30,       # не зависать на мёртвом соединении
-                    init=init_json_codec,
-                ))
-                self._pools[name] = await pool_factory
-                logger.info(f"✅ Пул '{name}' (→ {db_name}) создан "
-                            f"(min={self.min_size}, max={self.max_size})")
-                return
-            except (CannotConnectNowError, ConnectionRefusedError, OSError,
-                    TimeoutError, asyncio.TimeoutError) as error:
-                logger.warning(f"⚠️ Попытка {attempt}/{retries} пула '{name}': {error}")
-                if attempt < retries:
-                    await asyncio.sleep(delay * attempt)
-                else:
-                    logger.error(f"❌ Не удалось создать пул '{name}' после всех попыток")
-                    raise
-
-    async def connect(self, retries: int = 5, delay: float = 2.0):
-        """Поднимает оба пула. Идемпотентно (уже поднятый пул не пересоздаём — иначе
-        утечка). При частичном сбое (один пул поднялся, второй упал) закрываем всё
-        перед пробросом — не оставляем висящий пул/соединения к PgBouncer."""
-        try:
-            for name in ('program', 'binodex'):
-                if self._pools[name] is not None:
-                    continue
-                await self._connect_pool(name, retries=retries, delay=delay)
-        except (Exception,):
-            await self.close()
-            raise
-
-    async def close(self):
-        for name, pool in list(self._pools.items()):
-            if pool is not None:
-                try:
-                    await pool.close()
-                    logger.info(f"Пул '{name}' закрыт")
-                except (Exception,) as error:
-                    logger.warning(f"Ошибка закрытия пула '{name}': {error}")
-                self._pools[name] = None
-
-    async def _ensure_pool(self, name: str):
-        """Ленивая (пере)инициализация одного пула под локом. Нужна для авто-
-        восстановления: после неудачного `_recreate_pool` пул остаётся None, и без
-        этого следующий запрос вечно возвращал бы False (пути назад к connect нет).
-        Одна попытка — не виснуть на горячем пути; не вышло → запрос вернёт False,
-        следующий повторит. Ошибку коннекта пробрасываем (её ловит execute_query)."""
-        if self._pools.get(name) is None:
-            async with self._pool_locks[name]:
-                if self._pools.get(name) is None:
-                    await self._connect_pool(name, retries=1)
-
-    async def _recreate_pool(self, name: str):
-        async with self._pool_locks[name]:
-            pool = self._pools[name]
-            if pool is not None:
-                try:
-                    async with pool.acquire(timeout=_ACQUIRE_TIMEOUT) as conn:
-                        # RW-aware health-check: «SELECT 1» проходит и на RO-реплике, поэтому после
-                        # Patroni failover (старый лидер → standby) пул мог «пройти» проверку и НЕ
-                        # пересоздаться → залип бы на read-only-strand. Проверяем именно writable
-                        # (бэкенд НЕ в recovery); RO — не скипаем, идём пересоздавать.
-                        writable = await conn.fetchval("SELECT NOT pg_is_in_recovery()")
-                    if writable:
-                        return
-                except (Exception,):
-                    pass
-            try:
-                if pool is not None:
-                    await pool.close()
-            except (Exception,):
-                pass
-            self._pools[name] = None
-            logger.warning(f"Пересоздаю пул '{name}'")
-            # Одна попытка (не 5 дефолтных): recreate уже идёт ПОСЛЕ исчерпанных ретраев
-            # execute_query, и держит _pool_lock — длинный backoff здесь застопорил бы горячий
-            # путь до ~20с. Не вышло — запрос вернёт False, следующий запрос повторит recreate.
-            await self._connect_pool(name, retries=1)
-
-    async def execute_query(self, sql: str, *args, retries: int = 3, delay: float = 2.0,
-                            fetch_mode: str = "all", func: str = "",
-                            db: str = "program"):
-        """Контракт: при ОШИБКЕ → False (нет пула / retry exhaust / неизвестный
-        fetch_mode / непредвиденная). При успехе — результат: list ('all'),
-        Record|None ('row'), значение|None ('val'), True ('execute'). None из
-        'row'/'val' = «строки нет», False = «сбой» (их можно различать).
-        `db` выбирает пул: 'program' (по умолчанию) или 'binodex'.
-
-        Восстановимую ошибку сначала ретраим (та же мёртвая connection в PgBouncer
-        transaction-mode обычно лечится следующим acquire), и только после исчерпания
-        ретраев пересоздаём пул (health-checked) — не лавина close()+connect() на
-        каждой ошибке. `_ensure_pool` поднимает пул, если он None (в т.ч. после
-        проваленного recreate) — иначе запрос навсегда отдавал бы False."""
-        for attempt in range(1, retries + 1):
-            recoverable_err = None
-            try:
-                await self._ensure_pool(db)
-                pool = self._pools.get(db)
-                if pool is None:
-                    logger.error(f"Пул '{db}' не создан — {func} невозможен")
-                    return False
-                async with pool.acquire(timeout=_ACQUIRE_TIMEOUT) as conn:
-                    if fetch_mode == "row":
-                        res = await conn.fetchrow(sql, *args)
-                    elif fetch_mode == "val":
-                        res = await conn.fetchval(sql, *args)
-                    elif fetch_mode == "all":
-                        res = await conn.fetch(sql, *args)
-                    elif fetch_mode == "execute":
-                        await conn.execute(sql, *args)
-                        self._recovery_error_logged = False
-                        return True
-                    else:
-                        logger.error(f"Некорректный fetch_mode: {fetch_mode}")
-                        return False
-                    self._recovery_error_logged = False
-                    return res
-            except (InterfaceError, CannotConnectNowError, ConnectionDoesNotExistError,
-                    ReadOnlySQLTransactionError,
-                    ConnectionError, OSError, TimeoutError, asyncio.TimeoutError) as error:
-                # ConnectionError/OSError ловят встроенный ConnectionError('unexpected
-                # connection_lost() call') из asyncpg — без них он провалился бы в общий
-                # except и вернул False без восстановления (корневая причина
-                # 'bool object is not subscriptable' вверх по стеку).
-                recoverable_err = error
-            except (Exception,) as error:
-                msg = str(error)
-                if any(m in msg for m in _PGBOUNCER_RECOVERABLE):
-                    recoverable_err = error
-                else:
-                    # Непредвиденное (вероятно баг в SQL/параметрах, не сбой БД) — контракт
-                    # обязывает вернуть False, но стек НЕ теряем (иначе реальные баги невидимы).
-                    logger.error(f"Непредвиденная SQL-ошибка в {func} (пул '{db}'): {msg}", exc_info=True)
-                    return False
-
-            # сюда — только при восстановимой ошибке (иначе уже вернули результат/False)
-            logger.warning(f"Соединение пула '{db}' разорвано в {func} ({attempt}/{retries}): {recoverable_err}")
-            if attempt < retries:
-                backoff = delay * (2 ** (attempt - 1))
-                await asyncio.sleep(backoff + random.uniform(0, 0.4 * backoff))
-                continue
-            # ретраи исчерпаны — пересоздаём пул для следующих запросов, эту серию валим
-            logger.error(f"{func}: пересоздаю пул '{db}'")
-            try:
-                await self._recreate_pool(db)
-            except (Exception,) as pool_error:
-                logger.error(f"Не удалось пересоздать пул '{db}': {pool_error}")
-            if not self._recovery_error_logged:
-                logger.error(f"Не удалось восстановить соединение пула '{db}' после всех попыток")
-                self._recovery_error_logged = True
-            return False
-        return False
+        super().__init__(DB_NAMES, user=pg_user, password=pg_password,
+                         host=pg_host, port=pg_port, init=init_json_codec,
+                         min_size=min_size, max_size=max_size, command_timeout=60)
 
     # -------------------- SQL API --------------------
     # Данные опционов, счётчики, cookies.pages — в БД binodex (db='binodex').

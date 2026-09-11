@@ -5,7 +5,8 @@ from logging import Handler, LogRecord, handlers
 
 from aiogram import Bot
 from settings.logger_config import (token, frame, file_suffix,
-                                    error_dest, session_dest, message_dest, cookies_dest)
+                                    error_dest, session_dest, message_dest, cookies_dest,
+                                    premium_dest)
 
 # Единый формат файловых/консольных хендлеров (раньше дублировался в двух местах).
 LOG_FORMAT = u'%(filename)s [LINE:%(lineno)d] #%(levelname)-8s [%(asctime)s]  %(message)s'
@@ -26,11 +27,14 @@ ERROR_LEVEL = logging.ERROR  # Используем стандартный ур�
 REPORT_LEVEL = 25  # Новый уровень для report
 COOKIES_LEVEL = 35  # Уровень для ошибок - отвал cookies
 SESSION_LEVEL = 37  # Уровень для отвала session юзербота (критичный, в свой канал)
+PREMIUM_LEVEL = 36  # Premium юзербота: между COOKIES=35 и SESSION=37 — потеря Premium ломает
+                    # ОФОРМЛЕНИЕ постов (хуже протухших кук), но программу не останавливает.
 
 # Добавление новых уровней логирования
 logging.addLevelName(REPORT_LEVEL, "REPORT")
 logging.addLevelName(COOKIES_LEVEL, "COOKIES")
 logging.addLevelName(SESSION_LEVEL, "SESSION")
+logging.addLevelName(PREMIUM_LEVEL, "PREMIUM")
 
 
 # Добавление новых методов в класс Logger
@@ -46,10 +50,15 @@ def session(self, message, *args, **kws):
     if self.isEnabledFor(SESSION_LEVEL):
         self._log(SESSION_LEVEL, message, args, **kws)
 
+def premium(self, message, *args, **kws):
+    if self.isEnabledFor(PREMIUM_LEVEL):
+        self._log(PREMIUM_LEVEL, message, args, **kws)
+
 
 logging.Logger.report = report
 logging.Logger.cookies = cookies
 logging.Logger.session = session
+logging.Logger.premium = premium
 
 # Синглтон для aiogram Bot (один экземпляр на всё приложение)
 _telegram_bot: Bot | None = None
@@ -124,6 +133,10 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
                 # Критичный отвал session — в выделенный канал, форматом-алертом.
                 self.setFormatter(self.err_fmt)
                 self._spawn_send(loop, session_dest, self.format(record=record))
+            elif record.levelno == PREMIUM_LEVEL:
+                # Premium юзербота — своя тема форума ошибок (§3.5), формат алерта.
+                self.setFormatter(self.err_fmt)
+                self._spawn_send(loop, premium_dest, self.format(record=record))
             elif record.levelno == REPORT_LEVEL:
                 self.setFormatter(self.msg_fmt)
                 self._spawn_send(loop, message_dest, self.format(record=record))

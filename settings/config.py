@@ -88,6 +88,9 @@ else:
                          f"в telegram.telegram — нужна переавторизация и заливка строки в БД")
     session_file = None  # прод не использует файловую session (только TEST=1)
 prog_name = option['prog_name']
+# id аккаунта юзербота: по нему ведётся отметка Premium в telegram.telegram
+# (apps/premium_watch, стандарт §3.5).
+user_bot_id = option['user_bot']
 # Куки. FIN (TV) — плоский list[dict] из Program.cookies.tv_cookies (add_cookies).
 # OTC (binodex) — storage_state {cookies, origins} из binodex.cookies.binodex_cookies
 # (Privy держит сессию в localStorage, одних cookies мало → new_context(storage_state=...)).
