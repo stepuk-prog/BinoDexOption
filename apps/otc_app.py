@@ -1077,7 +1077,10 @@ async def _verify_otc_ready(page: Page) -> None:
     tracker = get_price_tracker()
     for _ in range(20):
         if tracker.ws_connected and tracker.prices:
-            logger.report("✅ binodex: WS котировок подключён")
+            # info, а не report: рутинный успех подъёма браузера (старт, пересоздание,
+            # восстановление сессии) — в служебную тему это шумело на каждом рестарте, как
+            # ранее open_tv_browser finished. Провал подъёма WS ниже остаётся warning.
+            logger.info("✅ binodex: WS котировок подключён")
             return
         await asyncio.sleep(0.5)
     logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
