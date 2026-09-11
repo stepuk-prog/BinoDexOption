@@ -394,7 +394,10 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
             return
         state = res.get('state')
         if state == 'closed':
-            _overlay_log(f'Снято окно в зоне кадра (кнопка: {res.get("by")!r})')
+            # info, а не канал: TV показывает онбординг на каждом подъёме браузера, то есть
+            # сообщение приходило бы после каждого рестарта у каждого инстанса. Сам факт, что
+            # окно нашлось и снято, — рутина; в тему ошибок ему незачем (11-09-2026).
+            logger.info(f'Снято окно в зоне кадра (кнопка: {res.get("by")!r})')
             await page.wait_for_timeout(200)
             continue
         if state == 'no-zone':
