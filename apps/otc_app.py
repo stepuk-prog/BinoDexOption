@@ -649,7 +649,7 @@ async def _missing_indicators(page: Page) -> list[tuple[str, str]] | None:
             "   if (badges.includes(t) && !found.includes(t)) found.push(t); }"
             " return found; }", badges)
     except (Exception,) as err:
-        logger.debug(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
+        logger.info(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
         return None
     if not isinstance(present, list):
         return None
@@ -752,7 +752,7 @@ async def _scale_drifted(page: Page) -> bool:
         except (Exception,):
             return True
         if not current:
-            logger.debug(f'OTC: масштаб ({name}) не прочитать с кнопки — перевыставляю вслепую')
+            logger.info(f'OTC: масштаб ({name}) не прочитать с кнопки — перевыставляю вслепую')
             return True
         if want.lower() not in current.lower():
             logger.warning(f"OTC: масштаб ({name}) сбился: '{current}' вместо '{want}' — возвращаю")
@@ -898,7 +898,7 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
         _label_cutout_cache[key] = result
         return result
     except (Exception,) as err:
-        logger.debug(f"OTC {asset}: вырезка ярлыка не удалась ({err}) — кадр без ярлыка")
+        logger.info(f"OTC {asset}: вырезка ярлыка не удалась ({err}) — кадр без ярлыка")
         return None
 
 
@@ -961,7 +961,7 @@ async def _apply_offzone(page: Page) -> None:
                             {'zone': screen_zone_otc, 'settingsSel': otc_settings_btn,
                              'pairSel': otc_select_pair})
     except (Exception,) as err:
-        logger.debug(f"OTC off-zone apply: {err}")
+        logger.info(f"OTC off-zone apply: {err}")
 
 
 async def _clear_offzone(page: Page) -> None:
@@ -969,7 +969,7 @@ async def _clear_offzone(page: Page) -> None:
     try:
         await _eval(page, _CLEAR_OFFZONE_JS)
     except (Exception,) as err:
-        logger.debug(f"OTC off-zone clear: {err}")
+        logger.info(f"OTC off-zone clear: {err}")
 
 
 async def _build_label_cutout(page: Page, asset: str) -> None:
@@ -983,7 +983,7 @@ async def _build_label_cutout(page: Page, asset: str) -> None:
                     'width': round(box['width']), 'height': round(box['height'])}
             await _label_cutout(page, asset, clip, rebuild=True)   # пересобрать (актуальный payout), пока off-zone снят
     except (Exception,) as err:
-        logger.debug(f"OTC {asset}: подготовка вырезки ярлыка не удалась — {err}")
+        logger.info(f"OTC {asset}: подготовка вырезки ярлыка не удалась — {err}")
 
 
 async def screenshot_otc(page: Page, asset: str = None, qr=None):
@@ -1051,7 +1051,7 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                 # chartData не отдал ни одного чтения — кадр снят, но цену берём из WS-фолбэка.
                 # Логируем: в пост-мортеме видно, что источник цены кадра — WS, а не ярлык графика.
                 price = get_price_tracker().get_price_at(asset, t_shot)
-                logger.debug(f"OTC {asset}: chartData пуст на кадре — цена из WS-фолбэка ({price})")
+                logger.info(f"OTC {asset}: chartData пуст на кадре — цена из WS-фолбэка ({price})")
             if price is None:  # ни chartData, ни WS не дали цену
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: нет цены графика OTC для {asset}")
                 await asyncio.sleep(0.5)

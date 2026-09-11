@@ -237,7 +237,6 @@ async def api_alive(timeout: float = API_ALIVE_TIMEOUT) -> bool:
         return False
 
 
-
 async def binodex_ready(pair: str = FEED_PROBE_PAIR) -> bool:
     """binodex готов к подъёму браузера: И auth-API (api.binodex.app) жив, И market-WS отдаёт кадр.
     Любой из двух мёртв → False (держим браузер-фри ожидание, НЕ молотим релогин/прокси/рестарт).

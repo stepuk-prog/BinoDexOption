@@ -178,10 +178,16 @@ class _ExactLevelFilter(logging.Filter):
 # есть все logger.info и logger.debug молчали. Терялась ровно форензика горячего пути: цена
 # кадра взята из WS-фолбэка вместо ярлыка, вырезка ярлыка не удалась, чипы индикаторов не
 # прочитались, «на binodex нет торговых пар», ошибки разбора WS-фрейма. Образец — BinoStoch.
+# DEBUG (10) — по требованию: `LOG_DEBUG=1` в .env добавляет debug.log и опускает порог. По
+# умолчанию выключен: это поштучные сообщения горячего цикла (каждый WS-фрейм), и держать их
+# всегда — лишний диск. Важные диагностики живут на INFO, а не здесь.
+_DEBUG_ON = os.getenv('LOG_DEBUG', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 _INFO_ON = os.getenv('LOG_INFO', '1').strip().lower() not in ('0', 'false', 'no', 'off')
-_BASE_LEVEL = logging.INFO if _INFO_ON else REPORT_LEVEL
+_BASE_LEVEL = (logging.DEBUG if _DEBUG_ON else
+               logging.INFO if _INFO_ON else REPORT_LEVEL)
 
 _LEVEL_FILES = [
+    *([(logging.DEBUG, 'debug.log')] if _DEBUG_ON else []),
     (logging.INFO, 'info.log'),
     (REPORT_LEVEL, 'report.log'),
     (logging.WARNING, 'warning.log'),

@@ -49,7 +49,7 @@ class WebSocketPriceTracker:
             try:
                 payload = payload.decode('utf-8')
             except (Exception,) as error:
-                logger.debug(f"WS: не удалось декодировать payload — {error}")
+                logger.info(f"WS: не удалось декодировать payload — {error}")
                 return
         payload = str(payload)
         # Socket.IO-префикс ('42/graphic,') до JSON-массива ['graphic', {...}]
@@ -72,7 +72,7 @@ class WebSocketPriceTracker:
                 dq.append((time.time(), price))
                 self.last_tick = time.monotonic()  # фид жив — отметка для feed_dead
         except (Exception,) as error:
-            logger.debug(f"WS: ошибка разбора котировки — {error}")
+            logger.info(f"WS: ошибка разбора котировки — {error}")
 
     def reset(self) -> None:
         """Сбросить состояние под НОВУЮ браузер-сессию (init_otc после ребута/отвала).
