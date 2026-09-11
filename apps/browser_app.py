@@ -185,10 +185,18 @@ def _overlay_log(text: str) -> None:
         logger.report(text)
 
 
+# Потолок на evaluate() ЗДЕСЬ: у Playwright встроенного таймаута у evaluate нет, а эти два
+# зова сидят на горячем пути (click_guarded → init_valute_browser: на каждую пару × страницы).
+# Зависший рендерер TV иначе вешал бы процесс насмерть — диспетчер видит живой юнит, а помочь
+# можно только kill -USR1. Тот же приём уже стоит в otc_app._eval.
+_EVAL_TIMEOUT = 15   # сек
+
+
 async def _probe_point(page: Page, selector: str) -> dict:
     """Что лежит в точке, куда целится клик. Пустой dict — спросить не вышло."""
     try:
-        return await page.evaluate(_AT_POINT_JS, selector) or {}
+        return await asyncio.wait_for(page.evaluate(_AT_POINT_JS, selector),
+                                      timeout=_EVAL_TIMEOUT) or {}
     except (Exception,):
         return {}
 
@@ -215,7 +223,8 @@ async def _close_overlay(page: Page, selector: str) -> bool:
                        f'DOM: {info.get("html", "")}')
 
     try:
-        result = await page.evaluate(_DISMISS_JS, selector) or {}
+        result = await asyncio.wait_for(page.evaluate(_DISMISS_JS, selector),
+                                        timeout=_EVAL_TIMEOUT) or {}
     except (Exception,):
         result = {}
     if result.get('state') == 'closed':

@@ -109,6 +109,7 @@ def setup_websocket_tracker(page: Page):
             return
         logger.info(f"🔌 WS котировок binodex: {ws.url}")
         tracker.ws_connected = True
+        tracker.ws_ever_connected = True   # см. feed_dead: отличает «отвалился» от «не было вовсе»
 
         def on_frame(data):
             # callback Playwright синхронный: исключение здесь всплыло бы в event loop
@@ -1007,7 +1008,13 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                 await asyncio.sleep(0.5)
                 continue
             # Сэндвич: глобус(файл) → канвас(прозрачный) → ярлык пары(вырезка) → QR.
-            comp = Image.alpha_composite(_load_globe(canvas_img.size), canvas_img)
+            # Глобуса может не быть (сбой выкатки — load_rgba отдаёт None, и докстринг
+            # _load_globe это обещает): собираем кадр без подложки, а не падаем. Раньше
+            # alpha_composite(None, ...) давал AttributeError, все попытки скриншота сгорали
+            # и программа уходила в бесконечный рестарт-цикл — картинки в канале при этом нет,
+            # а в логах только общий «Ошибка скриншота».
+            globe = _load_globe(canvas_img.size)
+            comp = Image.alpha_composite(globe, canvas_img) if globe else canvas_img.copy()
             cut = await _label_cutout(page, asset, clip)
             if cut:
                 comp.alpha_composite(cut[0], dest=(max(0, cut[1][0]), max(0, cut[1][1])))

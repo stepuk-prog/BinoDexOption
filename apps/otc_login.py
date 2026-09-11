@@ -128,7 +128,11 @@ async def _clear_session(page: Page, context: BrowserContext) -> None:
     except (Exception,):
         pass
     try:
-        await page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }")
+        # evaluate без встроенного таймаута — оборачиваем (как otc_app._eval):
+        # зависший рендерер иначе подвесил бы релогин навсегда.
+        await asyncio.wait_for(
+            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }"),
+            timeout=15)
     except (Exception,):
         pass
 

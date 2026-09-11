@@ -38,6 +38,9 @@ class WebSocketPriceTracker:
         self.prices: dict[str, float] = {}                  # 'EUR/USD-OTC' -> последняя цена
         self.history: dict[str, deque] = {}                 # symbol -> deque[(recv_wall, price)]
         self.ws_connected: bool = False
+        # Подключался ли WS хоть раз ЗА ЖИЗНЬ ПРОЦЕССА. Переживает reset() намеренно: он
+        # различает «фид отвалился» (лечится пересозданием браузера) и «фида тут вообще нет».
+        self.ws_ever_connected: bool = False
         self.last_tick: float | None = None                 # monotonic-время последнего тика (feed_dead)
 
     def handle_message(self, payload):
@@ -112,6 +115,13 @@ class WebSocketPriceTracker:
         реконнект Socket.IO не дал ложного срабатывания. Дополняет URL-детект /trade (§4.4)."""
         if self.ws_connected:
             return False
+        if not self.ws_ever_connected:
+            # WS не поднимался НИ РАЗУ за процесс: либо домен переехал (хинт перехвата
+            # устарел — так уже было, .io → .app), либо фид недоступен отсюда. Пересоздание
+            # браузера это не лечит, а «мёртвый фид» после КАЖДОГО опциона уводило программу
+            # в вечный цикл close+re-init с одним warning в файл. Детект в этом случае
+            # деградирован (о чём честно пишет _verify_otc_ready), цена берётся из chartData.
+            return False
         if self.last_tick is None:
-            return True  # WS закрыт и тиков не было вовсе
+            return True  # WS был жив, закрылся и тиков не принёс
         return (time.monotonic() - self.last_tick) > max_silence
