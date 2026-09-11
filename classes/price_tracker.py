@@ -43,13 +43,17 @@ class WebSocketPriceTracker:
         self.ws_ever_connected: bool = False
         self.last_tick: float | None = None                 # monotonic-время последнего тика (feed_dead)
 
+    # ⚠️ Логи внутри handle_message — ТОЛЬКО debug: функция зовётся на КАЖДОМ WS-фрейме
+    # (~6/с). Подняли их на info 11-09-2026 — и получили бы ~2-3 МБ/час при ротации info.log
+    # 1 МБ × 5: лог, заведённый ради форензики, за пару часов перетёр бы сам себя и вынес всю
+    # остальную диагностику. Включаются флагом LOG_DEBUG=1, когда нужен именно разбор фреймов.
     def handle_message(self, payload):
         """Разобрать входящий WS-фрейм binodex и обновить последнюю цену + историю тиков."""
         if isinstance(payload, (bytes, bytearray)):
             try:
                 payload = payload.decode('utf-8')
             except (Exception,) as error:
-                logger.info(f"WS: не удалось декодировать payload — {error}")
+                logger.debug(f"WS: не удалось декодировать payload — {error}")
                 return
         payload = str(payload)
         # Socket.IO-префикс ('42/graphic,') до JSON-массива ['graphic', {...}]
@@ -72,7 +76,7 @@ class WebSocketPriceTracker:
                 dq.append((time.time(), price))
                 self.last_tick = time.monotonic()  # фид жив — отметка для feed_dead
         except (Exception,) as error:
-            logger.info(f"WS: ошибка разбора котировки — {error}")
+            logger.debug(f"WS: ошибка разбора котировки — {error}")
 
     def reset(self) -> None:
         """Сбросить состояние под НОВУЮ браузер-сессию (init_otc после ребута/отвала).
