@@ -74,6 +74,21 @@ class WebSocketPriceTracker:
         except (Exception,) as error:
             logger.debug(f"WS: ошибка разбора котировки — {error}")
 
+    def reset(self) -> None:
+        """Сбросить состояние под НОВУЮ браузер-сессию (init_otc после ребута/отвала).
+
+        Трекер — process-global (один на процесс), а цены/история/liveness привязаны к
+        конкретной странице и WS: без сброса состояние прошлой сессии течёт в новую. Хуже
+        всего это било по выбору пары — select_otc_pair видел цену из ПРОШЛОЙ сессии и
+        мгновенно считал пару загруженной, то есть первый кадр опциона уходил с чужого или
+        пустого графика. Метод потерялся при копировании программы (ссылка на него в
+        комментарии выше осталась), возвращён 11-09-2026."""
+        self.prices.clear()
+        self.history.clear()
+        self.ws_connected = False
+        self.last_tick = None
+        self._last_symbol = None
+
     def get_price(self, asset: str = None) -> float | None:
         """Последняя цена по активу. asset вида 'EUR/USD' или 'EUR/USD OTC' → ключ 'EUR/USD-OTC'.
         При заданном, но не найденном активе → None (не отдаём цену чужой пары)."""

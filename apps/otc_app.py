@@ -317,21 +317,36 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
 
         # Ждём, пока движок переключит график на выбранную пару, — по факту (chartData.symbol),
         # а не слепой секундной паузой: в норме выходим за ~0.1–0.3с, потолок PAIR_SWITCH_WAIT.
-        # Не дождались — не беда: ниже всё равно ждём WS-котировку пары до 8с.
-        await _wait_chart_symbol(page, symbol_key(pair), PAIR_SWITCH_WAIT)
+        # Подтверждение №1 — сам график: chartData.symbol переключился на нужную пару. Раньше
+        # результат этого ожидания выбрасывался, и подтверждением служил ТОЛЬКО WS.
+        chart_ok = await _wait_chart_symbol(page, symbol_key(pair), PAIR_SWITCH_WAIT)
         await _close_pair_modal(page)        # закрыть модалку (иначе перекрывает график и блокирует прогрузку)
 
-        # Дождаться, пока сайт прогрузит новую пару и WS отдаст её котировку (до 8с —
-        # рабочие пары приходят за 1–3с). Если не пришла, пара на binodex не грузится
-        # (бывает по отдельным парам) → возвращаем False, parce_otc возьмёт следующую.
+        # Подтверждение №2 — WS-котировка пары (до 8с; рабочие пары приходят за 1–3с). Тик
+        # обязан быть СВЕЖЕЕ момента клика: трекер process-global, и цена прошлой сессии/пары
+        # иначе подтверждала бы загрузку мгновенно.
         tracker = get_price_tracker()
         target = pair + ' OTC'
+        clicked_at = time.time()
         for _ in range(32):
-            if tracker.get_price(target) is not None:
+            if tracker.get_price_at(target, time.time(), back_ms=(time.time() - clicked_at) * 1000) \
+                    is not None and tracker.last_tick is not None:
                 await _build_label_cutout(page, target)   # запечь вырезку ярлыка, пока off-zone снят
                 return True
             await asyncio.sleep(0.25)
-        logger.warning(f"OTC: пара '{pair}' не прогрузилась на binodex (нет WS-котировки за 8с) — пропускаю")
+
+        # WS не подтвердил. Если график УЖЕ показывает нужную пару — работаем: _verify_otc_ready
+        # сознательно допускает, что WS не поднимется вовсе (домен фида переезжал .io → .app), и
+        # цена кадра всё равно берётся из chartData. Без этой ветки одна промашка перехвата WS
+        # означала бы, что НИ ОДНА пара не выбирается: parce_otc перебирает весь список →
+        # 'no_pairs' → реинит по кругу, юнит зелёный, в канале тишина и ни одного алерта.
+        if chart_ok:
+            logger.warning(f"OTC: пара '{pair}' — WS-котировки нет, но график переключился; "
+                           f"работаю по chartData (детект фида деградирован)")
+            await _build_label_cutout(page, target)
+            return True
+        logger.warning(f"OTC: пара '{pair}' не прогрузилась на binodex "
+                       f"(ни WS-котировки, ни переключения графика за 8с) — пропускаю")
         return False
     except (Exception,) as error:
         logger.warning(f"OTC: ошибка выбора пары {pair} — {error}")
@@ -793,8 +808,8 @@ _CANVAS_ALPHA_JS = ("el => ({ url: el.toDataURL('image/png'), w: el.width, h: el
 # кладём отдельным слоем. Находим по содержимому+геометрии (у верх-левого угла бокса канваса,
 # текст с 'OTC' и '%') — устойчиво к ротации классов binodex; ставим маркер data-otc-lbl.
 _LABEL_BOX_JS = r"""
-(sel) => {
-  const cv = document.querySelector(sel);
+({zone, settingsSel, pairSel}) => {
+  const cv = document.querySelector(zone);
   if (!cv) return null;
   const b = cv.getBoundingClientRect();
   let best = null, area = 0;
@@ -903,8 +918,13 @@ _HIDE_OFFZONE_JS = r"""
     for (let e = el; e; e = e.parentElement) e.style.setProperty('visibility', 'visible', 'important');
     for (const d of el.querySelectorAll('*')) d.style.setProperty('visibility', 'visible', 'important');
   };
-  show(document.querySelector('#setup_settings_open'));    // детект кук (_ui_loaded) — обязательно видим
-  const pl = document.querySelector('#select_pair_add');   // ярлык пары (вырезка + кнопка модалки)
+  // Селекторы белого списка приходят из БД (settings.binodex_settings) — теми же значениями,
+  // по которым работают _ui_loaded и выбор пары. Раньше они были зашиты здесь литералами:
+  // второй источник истины, и смена id в БД (как при переезде на #id) оставила бы кнопку
+  // настроек скрытой → _ui_loaded=False → otc_session_dead на каждом цикле → бесконечное
+  // пересоздание браузера при исправном сайте.
+  show(document.querySelector(settingsSel));               // детект кук (_ui_loaded) — обязательно видим
+  const pl = document.querySelector(pairSel);              // ярлык пары (вырезка + кнопка модалки)
   show(pl);
   if (pl && pl.parentElement) show(pl.parentElement);
   return n;
@@ -919,7 +939,9 @@ _CLEAR_OFFZONE_JS = ("() => { for (const el of document.querySelectorAll('body *
 async def _apply_offzone(page: Page) -> None:
     """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары."""
     try:
-        await _eval(page, _HIDE_OFFZONE_JS, screen_zone_otc)
+        await _eval(page, _HIDE_OFFZONE_JS,
+                            {'zone': screen_zone_otc, 'settingsSel': otc_settings_btn,
+                             'pairSel': otc_select_pair})
     except (Exception,) as err:
         logger.debug(f"OTC off-zone apply: {err}")
 
@@ -1131,6 +1153,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
     логин в ЭТОМ ЖЕ браузере (apps/otc_login), без подпроцесса/двойной загрузки, и перепроверка. Не
     вышло → CookiesExpired наверх (main: счётчик RECOVER_ATTEMPTS → плановый выход)."""
     page = manager.pages['main']
+    get_price_tracker().reset()   # новая сессия: цены/история/liveness прошлой — невалидны
     _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
