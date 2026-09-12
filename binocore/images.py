@@ -71,7 +71,10 @@ def load_rgba(path: str, size=None):
     # Файл читаем (и логируем сбой) один раз на путь, независимо от того, сколько размеров спросят.
     if (path, None) not in _IMAGE_CACHE:
         try:
-            _IMAGE_CACHE[(path, None)] = Image.open(path).convert('RGBA')
+            # with: convert() отдаёт НОВЫЙ объект, а исходный (с открытым дескриптором) тут же
+            # терялся — файл закрывался лишь на сборке мусора, с ResourceWarning под отладкой.
+            with Image.open(path) as src:
+                _IMAGE_CACHE[(path, None)] = src.convert('RGBA')
         except (Exception,) as error:
             _logger.warning(_warn_template.format(path=path, error=error))
             _IMAGE_CACHE[(path, None)] = None
