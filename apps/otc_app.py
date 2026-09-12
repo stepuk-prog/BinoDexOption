@@ -59,22 +59,14 @@ CHART_DATA_JS = ("() => { const c = window.chartData;"
 CHART_READS_BEFORE = 3  # чтений chartData вплотную ДО screenshot
 CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
 
-# Серия чтений chartData ОДНИМ evaluate: count значений с паузой CHART_READ_GAP_MS между ними.
-# Раньше это были count отдельных evaluate, каждый со своим round-trip'ом в браузер (плюс
-# планировщик asyncio сверху) — окно вокруг кадра растягивалось и плавало вместе с нагрузкой.
-# Теперь пауза задана явно и мала: окно уже, медиана ближе к тому, что нарисовано на ярлыке.
-CHART_READ_GAP_MS = 2
-CHART_SERIES_JS = """
-async ({count, gap}) => {
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const c = window.chartData;
-    if (c && typeof c.price === 'number') out.push({symbol: c.symbol, price: c.price});
-    if (i < count - 1) await new Promise(r => setTimeout(r, gap));
-  }
-  return out;
-}
-"""
+# Пауза между чтениями chartData — порядка одного кадра отрисовки. Задаётся ЗДЕСЬ, в Python, а НЕ
+# внутри страницы: setTimeout подчинён троттлингу таймеров браузера (Chromium зажимает фоновые и
+# вложенные цепочки), и серия чтений могла бы молча растянуться на секунды внутри EVAL_TIMEOUT.
+# Разносить чтения во времени обязательно: ярлык анимируется, и сэмплы, снятые вплотную, дают
+# ОДНО значение — медиана по [X,X,X,Y,Y,Y] вырождается в (X+Y)/2, то есть в среднее двух групп,
+# а анимационный выброс, попавший в свою группу, уже не отсекается, а усредняется — на выходе
+# цена, которой на ярлыке не было ни в один момент (ревизия 12-09-2026).
+CHART_READ_GAP = 0.016   # сек
 # Канвас на ~97% прозрачный даже с графиком (свечи/оси/часы ≈ 3% непрозрачных пикселей). Сразу
 # после переключения пары канвас бывает пустым (свечи не дорисованы) — такой кадр не постим.
 # Порог доли непрозрачных пикселей: ниже = «пусто» → ждём отрисовку (норм. график проходит с запасом).
@@ -442,16 +434,22 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
 
 
 async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list[float]:
-    """`count` быстрых чтений window.chartData.price — ОДНИМ evaluate (CHART_SERIES_JS). Если
-    symbol задан — берём только тики этой пары (chartData.symbol == symbol), чтобы не схватить
-    цену чужой пары сразу после переключения. Ошибки evaluate глушим (страница могла моргнуть) —
-    вернём что успели."""
-    try:
-        series = await _eval(page, CHART_SERIES_JS, {'count': count, 'gap': CHART_READ_GAP_MS})
-    except (Exception,):
-        return []
+    """`count` чтений window.chartData.price с паузой CHART_READ_GAP между ними. Если symbol задан
+    — берём только тики этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары
+    сразу после переключения.
+
+    Сбой ОДНОГО чтения (страница моргнула) серию НЕ рвёт — собираем что успели. Пустую серию
+    логируем: иначе односторонняя медиана (скажем, только пост-кадровые сэмплы, если серия «до»
+    отвалилась целиком) уехала бы в пост молча."""
     out: list[float] = []
-    for data in series or ():
+    for i in range(count):
+        if i:
+            await asyncio.sleep(CHART_READ_GAP)
+        try:
+            data = await _eval(page, CHART_DATA_JS)
+        except (Exception,) as err:
+            logger.info(f"OTC: чтение chartData не удалось ({err}) — продолжаю серию")
+            continue
         if not isinstance(data, dict):
             continue
         if symbol and data.get('symbol') != symbol:
@@ -459,6 +457,8 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
         price = data.get('price')
         if isinstance(price, (int, float)):
             out.append(float(price))
+    if not out:
+        logger.info(f"OTC: серия чтений chartData пуста (symbol={symbol}, count={count})")
     return out
 
 
@@ -751,12 +751,30 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
                            f"({', '.join(n for n, _ in still)}) — кадр уйдёт без них")
 
 
-async def _wait_indicator_on(page: Page, name: str, badge: str, timeout: float = 3.0) -> bool:
+async def _wait_menu_open(page: Page, timeout: float = 1.5) -> bool:
+    """Дождаться открытия меню индикаторов ТЕМ ЖЕ предикатом, каким открытость определяется
+    везде в файле (_indicators_menu_open).
+
+    Ждать видимости 'button.chart_indicator' локатором нельзя: закрытое меню оставляет свои
+    кнопки в DOM, и первый матч может оказаться именно невидимым узлом — предикаты разошлись бы,
+    а мы выжигали бы TIMEOUT_SHORT на КАЖДЫЙ индикатор. При пропавшем селекторе меню проход
+    вырос бы с ~18 до ~39 с, и это перед каждым опционом (ревизия 12-09-2026)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if await _indicators_menu_open(page):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+
+
+async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> bool:
     """Дождаться, что индикатор реально включился — по чипу легенды на графике.
 
     Вместо слепой паузы: клик по пункту меню ТОГГЛИТ индикатор, и раньше мы просто ждали 700 мс
-    на каждый, то есть ~2.1 с за проход и при этом без всякой гарантии. Читаем то же, что и
-    _missing_indicators (один обход DOM), и выходим сразу, как чип появился.
+    на каждый, то есть ~2.1 с за проход и при этом без всякой гарантии. Проверку делает
+    _missing_indicators — он и читает чипы легенды (один обход DOM), а `name` тут только ключ
+    записи; отдельный аргумент под чип был лишним и не использовался.
 
     `None` от _missing_indicators — «прочитать не удалось»: не трактуем как готовность, просто
     пробуем ещё раз до потолка."""
@@ -777,17 +795,18 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]]) -> None:
         try:
             if not await _indicators_menu_open(page):
                 await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
-                # Ждём сами пункты меню, а не «полсекунды на всякий случай»: на живой странице
-                # они появляются за десятки мс, а на медленной 500 мс могло и не хватить.
-                await page.locator('button.chart_indicator').first.wait_for(
-                    state='visible', timeout=TIMEOUT_SHORT)
+                # Ждём факт открытия, а не «полсекунды на всякий случай» — и тем же предикатом,
+                # что и остальной файл (см. _wait_menu_open).
+                if not await _wait_menu_open(page):
+                    logger.warning(f"OTC: меню индикаторов не открылось — пропускаю '{menu_name}'")
+                    continue
             clicked = await _eval(page,
                 "(name) => { const b = [...document.querySelectorAll('button.chart_indicator')]"
                 ".find(x => (x.innerText || '').trim() === name); if (!b) return false; b.click(); return true; }",
                 menu_name)
             if not clicked:
                 logger.warning(f"OTC: индикатор '{menu_name}' не найден в меню")
-            elif not await _wait_indicator_on(page, menu_name, _badge):
+            elif not await _wait_indicator_on(page, menu_name):
                 logger.warning(f"OTC: индикатор '{menu_name}' не зажёгся на графике за отведённое "
                                f"время — проверю следующим проходом")
         except (Exception,) as error:
@@ -942,6 +961,12 @@ def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int 
     уходила в asyncio.to_thread. ImageChops.add клампит сумму каналов на 255 — на итог это не
     влияет: при d ≥ 85 альфа и так равна 255 (min(255, d*k) при k=3), а срезаются только
     значения выше этого потолка."""
+    if crop_a.size != crop_b.size:
+        # ImageChops.difference ТРЕБУЕТ одинаковых размеров (бросает ValueError), а попиксельный
+        # цикл, что был здесь раньше, разные размеры терпел. Два _shot одного clip обычно дают
+        # одинаковый кадр, но DPR/скролл между ними могут развести их на пиксель — и ярлык МОЛЧА
+        # перестал бы накладываться (except в _label_cutout → «кадр без ярлыка»).
+        crop_b = crop_b.resize(crop_a.size)
     a = crop_a.convert('RGB')
     r, g, b = ImageChops.difference(a, crop_b.convert('RGB')).split()
     d = ImageChops.add(ImageChops.add(r, g), b)          # |Δr| + |Δg| + |Δb|, clamp 255
@@ -1033,9 +1058,10 @@ _CLEAR_OFFZONE_JS = r"""
   const style = document.getElementById(styleId);
   if (style) style.remove();
   for (const el of document.querySelectorAll('[' + keepAttr + ']')) el.removeAttribute(keepAttr);
-  // Хвост прежней реализации: инлайновые visibility могли остаться от кода до перехода на CSS
-  // (страница живёт через reload, стиль пережил бы навигацию) — подчищаем их один раз.
-  for (const el of document.querySelectorAll('[style*="visibility"]')) el.style.removeProperty('visibility');
+  // Чужие инлайновые visibility НЕ трогаем: своих мы больше не ставим (всё в <style> выше), а
+  // сметать всё подряд на каждом снятии — значит регулярно стирать собственный inline-стиль
+  // binodex (MUI-переходы, легенда чарта). Хвост прежней реализации не переживает reload,
+  // через который эта страница и живёт, поэтому подчищать нечего (ревизия 12-09-2026).
 }
 """
 
@@ -1094,10 +1120,10 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
         try:
             element = page.locator(screen_zone_otc).first
             await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
-            # Защита: модалка выбора пары иногда осталась открытой (select_otc_pair не дозакрыл) —
-            # она перекрывает график. Закрываем перед кадром, чтобы не попала в пост. В норме
-            # (модалка закрыта) _close_pair_modal выходит сразу на первой проверке — без кликов.
-            await _close_pair_modal(page)
+            # _close_pair_modal здесь НЕ зовём (снято 12-09-2026): кадр собирается из
+            # canvas.toDataURL, куда DOM-оверлей физически не попадает, а под активным off-zone
+            # модалка скрыта (visibility:hidden) — _pair_modal_open возвращал False всегда, то
+            # есть «страховка» ничего не проверяла и просто ходила в DOM на каждой попытке.
             box = await element.bounding_box()
             if not box:  # элемент невидим/отсоединён → bounding_box=None (иначе TypeError на box['x'])
                 last_error = 'нет bounding_box зоны графика OTC'
