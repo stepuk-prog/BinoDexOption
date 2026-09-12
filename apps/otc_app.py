@@ -276,6 +276,39 @@ async def _dump_pair_modal(page: Page, phase: str) -> None:
         logger.warning('OTC-DIAG [%s] дамп модалки не удался: %s', phase, err)
 
 
+async def _overlay_backdrop_visible(page: Page) -> bool:
+    """Висит ли поверх страницы бэкдроп MUI (промо/онбординг binodex)."""
+    try:
+        backdrop = page.locator(MODAL_BACKDROP).first
+        return bool(await backdrop.count()) and await backdrop.is_visible()
+    except (Exception,):
+        return False
+
+
+async def _open_pair_modal(page: Page) -> None:
+    """Открыть модалку выбора пары, не упираясь в чужой оверлей.
+
+    Обычный click перед нажатием ждёт, пока элемент перестанут перекрывать, и на модалке
+    binodex выжигает ВЕСЬ таймаут — по 10с на КАЖДУЮ пару (11-09-2026: промо-модалка после
+    reload, пять пар подряд у трёх программ сразу; пары в итоге выбирались, но опцион уходил
+    на минуту позже, а в warning.log ложились простыни ретраев Playwright).
+
+    Поэтому: модалка уже открыта — не трогаем; бэкдроп висит — гасим; не погас — открываем
+    меню DOM-событием (dispatch_event проверку перекрытия пропускает).
+    """
+    if await _pair_modal_open(page):
+        return
+    await dismiss_modal_backdrop(page)      # дёшево: бэкдропа нет — мгновенный выход
+    if await _overlay_backdrop_visible(page):
+        logger.warning('OTC: бэкдроп binodex не погас — открываю выбор пары DOM-событием')
+        await page.locator(otc_select_pair).first.dispatch_event('click')
+        return
+    try:
+        await page.click(otc_select_pair, timeout=TIMEOUT_MEDIUM)
+    except (Exception,):
+        await page.locator(otc_select_pair).first.dispatch_event('click')
+
+
 async def select_otc_pair(page: Page, pair: str) -> bool:
     """Выбрать '<pair> OTC' в модалке binodex (pair вида 'EUR/USD').
     Открыть выбор → категория Валюты → ввести пару → клик по элементу '<pair> ... OTC' →
@@ -285,7 +318,7 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         # (visibility:hidden) её пункты не кликаются. off-zone ВОЗВРАЩАЕТСЯ в finally на любом исходе
         # (иначе для нерабочих пар и в 10-мин сне бот бы крутился на полном CPU).
         await _clear_offzone(page)
-        await page.click(otc_select_pair, timeout=TIMEOUT_MEDIUM)
+        await _open_pair_modal(page)
         await page.locator(otc_category_valute).first.wait_for(state='visible', timeout=TIMEOUT_MEDIUM)
         await page.click(otc_category_valute, timeout=TIMEOUT_MEDIUM)
         # input_pair = #input_pair — id теперь на самом <input>. fill() сам ждёт
