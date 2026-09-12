@@ -2,9 +2,14 @@
 
 Пулы, ретраи, самовосстановление и тексты логов живут в BaseDatabase — здесь только запросы
 этой программы. Два пула на одном объекте:
-  'program' (pg_name)      — program.programdata (статус диспетчеру), cookies.tv_cookies.
+  'program' (pg_name)      — program.programdata (статус диспетчеру), cookies.tv_cookies,
+                             settings.forum_quiet (окна тишины по темам форума).
   'binodex' (pg_name_fin)  — данные опционов (option_data.*), счётчики, cookies.pages,
-                             cookies.binodex_cookies, settings.proxy_data.
+                             cookies.binodex_cookies, settings.proxy_data,
+                             settings.forum_message (дедуп вех по темам).
+Две таблицы settings.forum_* лежат в РАЗНЫХ базах — так и есть в схеме (проверено 12-09-2026):
+forum_quiet только в Program, forum_message только в binodex. Выглядит как опечатка в db=,
+поэтому записано здесь явно.
 Пул выбирается параметром db= у самого запроса. Настройки/креды/cookies, нужные на старте,
 читает settings/_bootstrap.py (одноразовые коннекты ДО создания этих пулов).
 

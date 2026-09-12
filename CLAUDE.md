@@ -15,7 +15,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 ## Запуск
 - Один экземпляр = пара env **`TIMEFRAME`** (1m/3m/5m/10m/15m) + **`BINARY`** (1=FIN, 0=OTC) + `PROG_KEY`.
   Пример: `TIMEFRAME=1m BINARY=0 .venv/bin/python main.py`.
-- На сервере — systemd-юниты **`binodex-{tf}-{bin|otc}.service`** (5 шт. в `systemd/`), путь `/home/vova/Binodex/BinoOptions`, под `User=vova`, venv = **`venv`**.
+- На сервере — systemd-юниты **`binodex-{tf}-{bin|otc}.service`** (5 шт. в `systemd/` + шаблон `binodex-bot@.service`), путь `/home/vova/Binodex/BinoOptions`, под `User=vova`, venv = **`venv`**.
 - `main.py` — вход (asyncio loop, graceful по SIGTERM, старт/выходные-посты для FIN).
 
 ## Две БД (через PgBouncer, asyncpg)
@@ -24,12 +24,12 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - Старт читается синхронно (`settings/_bootstrap.py`) до подъёма пулов; рантайм — `database/database.py` (`Database`, пулы program+binodex). Подробно: **`docs/DATABASE.md`**.
 
 ## env (.env — gitignored; пример в `.env.example`)
-`DATABASE`, `DATABASE_FIN`, `PG_*` (порт 6442), `ERROR_CHANNEL`/`MESSAGE_CHANNEL`/`COOKIES_CHANNEL`, `TOKEN`, `PROG_KEY`, `OVERLAP`, `OVERLAP_RANDOM`. `TIMEFRAME`/`BINARY` — задаёт диспетчер per-instance (для локального можно в .env). Тест-оверрайды: `TEST`, `CHANNEL`, `TEST_API_ID/HASH/SESSION_FILE`, `COOK_OTC`, `SIGNAL_CHANNEL`.
+`DATABASE`, `DATABASE_FIN`, `PG_*` (порт 6442), `ERROR_CHANNEL`/`MESSAGE_CHANNEL`/`COOKIES_CHANNEL`, `TOKEN`, `PROG_KEY`, `OVERLAP`, `OVERLAP_RANDOM`. `TIMEFRAME`/`BINARY` — задаёт диспетчер per-instance (для локального можно в .env). Тест-оверрайды: `TEST`, `TEST_CHANNEL`, `TEST_API_ID/HASH/SESSION_FILE`, `COOK_OTC`, `SIGNAL_CHANNEL`. Ещё читаются: `BROWSER` (`auto|firefox|chromium`), `BROWSER_HEADLESS`, `LOG_INFO`/`LOG_DEBUG`, `PREMIUM_TOPIC`, `MAIN_CYCLE_PAUSE_MIN`/`MAX` — все с дефолтами, полный список с пояснениями в `.env.example`.
 
 ## Структура
 - `apps/` — процедурная логика: `app.py` (FIN: цена/скрин/точка входа), `otc_app.py` (OTC: выбор пары/скрин/WS-цена + inline-релогин), `browser_app.py` (init Playwright/TV), `main_app.py` (главный цикл + посты), `exit_app.py` (завершение/алерты), `otc_login.py` (inline Privy email-OTP логин в основном браузере, async), `binodex_feed.py` (браузер-фри health-чек market-WS), `my_exeptions.py`, `cookie_utils.py`.
 - `classes/` — `Option_class.py` (`Option` — данные опциона; обычный класс, НЕ dataclass), `browser_manager.py`, `price_tracker.py` (WS-цены OTC), `result_types.py`.
-- `database/database.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер; ⚠️ **INFO не пишется никуда** — уровень логгера `REPORT` (25), а в `_LEVEL_FILES` нет `info.log`, поэтому все `logger.info` в программе молчат. Включать — по образцу `BinoStoch/logs/log_init.py`: env `LOG_INFO` → `_BASE_LEVEL` плюс отдельный `info.log`), `pictures/`, `scripts/`, `systemd/`, `docs/`.
+- `database/database.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер; INFO пишется ПО УМОЛЧАНИЮ с 11-09-2026: порог логгера — `INFO`, заводится `info.log`; `LOG_INFO=0` возвращает прежний `REPORT` (25), `LOG_DEBUG=1` добавляет `debug.log` и опускает порог до DEBUG), `pictures/`, `scripts/`, `systemd/`, `docs/`.
 
 ## OTC / binodex (важное)
 - Логин binodex — через **Privy**: сессия в `localStorage`, поэтому нужен **`storage_state`** (не только cookies); контекст создаётся `new_context(storage_state=...)`. См. `docs/COOKIES_BINODEX.md`.
