@@ -151,10 +151,21 @@ async def exit_main(channel_mess: bool,
         return MainResult(result, plus, fall, bug_text, check_cookies)
     # Сбой ДО первого поста опциона: подписчики ничего не видели — баг-картинку не шлём.
     # Извиняться не за что, а «сбой программы» в ленте без единого прогноза читается как
-    # поломка на ровном месте; причина при этом целиком остаётся в логах.
+    # поломка на ровном месте; причина целиком остаётся в логах.
+    #
+    # Сегодня это УТВЕРЖДЕНИЕ ИНВАРИАНТА, а не исправление: все channel_mess=True в _run_option
+    # стоят после успешной отправки первого сообщения (её собственная ветка неуспеха уходит с
+    # channel_mess=False), а обёртка main() передаёт сам option_data.posted — то есть
+    # channel_mess=True ⇒ posted=True. Гард держит это свойство на будущее: новый ранний выход
+    # с channel_mess=True не сможет молча начать слать картинку в пустую ленту.
+    #
+    # Выходим СРАЗУ, а не снимаем channel_mess: иначе управление ушло бы в else-ветку ниже,
+    # то есть в check_plus/check_minus, и «не слать алерт» означало бы «двигать серию» —
+    # ровно то, от чего отдельной веткой защищён shutdown выше.
     if channel_mess and not option_data.posted:
         logger.warning(f'Сбой до первого поста опциона — баг-картинку не шлю: {bug_text}')
-        channel_mess = False
+        option_data.clear_data()
+        return MainResult(result, plus, fall, bug_text, check_cookies)
     if channel_mess:
         # Через send_photo_safe (2026-08-15): прямой send_photo шёл мимо пробы доставки и
         # повтора — при потерях SYN сообщение о сбое просто не доходило (в инциденте оно

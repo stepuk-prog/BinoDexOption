@@ -662,6 +662,27 @@ async def dismiss_modal_backdrop(page: Page) -> None:
                        f'настройки графика выставляем через DOM-события')
 
 
+# Остаток бюджета для ОДНОЙ операции. Без него потолок был номинальным: бюджет проверялся
+# только МЕЖДУ шагами, а каждый шаг тянул свой штатный таймаут (click 5с, wait_for 5с, _eval до
+# EVAL_TIMEOUT=10с) — на залипшем UI ремонт выбирал ~90–100с против объявленных 25с. Теперь
+# таймаут каждой операции = min(штатный, остаток), то есть потолок соблюдается по-настоящему.
+# Пол в 0.2с намеренный: ноль/отрицательное Playwright понял бы как «ждать бесконечно», а гейты
+# перед шагами всё равно выходят раньше, чем остаток дойдёт до пола.
+_OP_FLOOR = 0.2   # сек
+
+
+def _left_s(deadline: float | None, cap: float) -> float:
+    """Сколько СЕКУНД можно ждать: не дольше штатного потолка и не дольше остатка бюджета."""
+    if deadline is None:
+        return cap
+    return max(_OP_FLOOR, min(cap, deadline - time.monotonic()))
+
+
+def _left_ms(deadline: float | None, cap_ms: float) -> float:
+    """То же в МИЛЛИСЕКУНДАХ — для таймаутов Playwright (click/wait_for)."""
+    return _left_s(deadline, cap_ms / 1000) * 1000
+
+
 async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
     """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
     при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
@@ -690,9 +711,9 @@ async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
     for opener, item, name in ((otc_candle_scale, otc_candle_scale_item, 'свеча 30S'),
                                (otc_chart_scale, otc_chart_scale_item, 'график H1')):
         try:
-            await page.locator(opener).first.click(timeout=TIMEOUT_SHORT)
+            await page.locator(opener).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
             item_loc = page.locator(item).first
-            await item_loc.wait_for(state='visible', timeout=TIMEOUT_SHORT)
+            await item_loc.wait_for(state='visible', timeout=_left_ms(deadline, TIMEOUT_SHORT))
             # Контейнер-дропдаун binodex (.profile_add_wrap_selected_wrap_options) перехватывает
             # pointer events на своём же пункте (overlay/стэкинг) — обычный .click() ловит «intercepts
             # pointer events». Кликаем напрямую DOM-событием: пункт уже зарезолвлен и видим, оверлей
@@ -701,7 +722,7 @@ async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
             # Дропдаун закрывается сам — ждём именно этого, а не фиксированные полсекунды.
             # Не закрылся (редкий залипший оверлей) — не страшно: следующий шаг открывает своё меню.
             try:
-                await item_loc.wait_for(state='hidden', timeout=TIMEOUT_SHORT)
+                await item_loc.wait_for(state='hidden', timeout=_left_ms(deadline, TIMEOUT_SHORT))
             except (Exception,):
                 pass
         except (Exception,) as error:
@@ -717,16 +738,22 @@ async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
 OTC_CHART_INDICATORS = (('Whale Absorption', 'Whale'), ('Stochastic', 'Stoch'), ('Volume', 'VOL'))
 
 
-async def _indicators_menu_open(page: Page) -> bool:
-    """Открыто ли меню индикаторов (видимы пункты button.chart_indicator)."""
+async def _indicators_menu_open(page: Page, cap: float | None = None) -> bool:
+    """Открыто ли меню индикаторов (видимы пункты button.chart_indicator).
+
+    `cap` — потолок на ЭТО чтение (секунды). Нужен, когда проверку зовут под общим бюджетом
+    ремонта: без него один evaluate на подвисшей странице ждёт EVAL_TIMEOUT=10с, и «ожидание
+    1.5с» в _wait_menu_open растягивалось до десяти — ровно та гранулярность, из-за которой
+    потолок SETUP_TOTAL_BUDGET оставался номинальным."""
     try:
         return await _eval(page,
-            "() => [...document.querySelectorAll('button.chart_indicator')].some(b => b.offsetParent !== null)")
+            "() => [...document.querySelectorAll('button.chart_indicator')].some(b => b.offsetParent !== null)",
+            cap=cap)
     except (Exception,):
         return False
 
 
-async def _missing_indicators(page: Page) -> list[tuple[str, str]] | None:
+async def _missing_indicators(page: Page, cap: float | None = None) -> list[tuple[str, str]] | None:
     """Какие индикаторы сейчас ВЫКЛЮЧЕНЫ — по чипам-легендам на графике (элемент с ТОЧНЫМ текстом,
     напр. 'VOL'). Детект по тексту, а не по классу: CSS-хэши binodex (_badge_XXXX) плавают между
     сборками. Один обход DOM на все чипы сразу.
@@ -742,7 +769,7 @@ async def _missing_indicators(page: Page) -> list[tuple[str, str]] | None:
             " for (const el of document.querySelectorAll('div,span')) {"
             "   const t = (el.textContent || '').trim();"
             "   if (badges.includes(t) && !found.includes(t)) found.push(t); }"
-            " return found; }", badges)
+            " return found; }", badges, cap=cap)
     except (Exception,) as err:
         logger.info(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
         return None
@@ -809,7 +836,7 @@ async def _wait_menu_open(page: Page, timeout: float = 1.5) -> bool:
     вырос бы с ~18 до ~39 с, и это перед каждым опционом (ревизия 12-09-2026)."""
     deadline = time.monotonic() + timeout
     while True:
-        if await _indicators_menu_open(page):
+        if await _indicators_menu_open(page, cap=max(_OP_FLOOR, deadline - time.monotonic())):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -828,7 +855,7 @@ async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> boo
     пробуем ещё раз до потолка."""
     deadline = time.monotonic() + timeout
     while True:
-        missing = await _missing_indicators(page)
+        missing = await _missing_indicators(page, cap=max(_OP_FLOOR, deadline - time.monotonic()))
         if missing is not None and not any(item_name == name for item_name, _ in missing):
             return True
         if time.monotonic() >= deadline:
@@ -858,19 +885,20 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
             break
         try:
             if not await _indicators_menu_open(page):
-                await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
+                await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
                 # Ждём факт открытия, а не «полсекунды на всякий случай» — и тем же предикатом,
                 # что и остальной файл (см. _wait_menu_open).
-                if not await _wait_menu_open(page):
+                if not await _wait_menu_open(page, timeout=_left_s(deadline, 1.5)):
                     logger.warning(f"OTC: меню индикаторов не открылось — пропускаю '{menu_name}'")
                     continue
             clicked = await _eval(page,
                 "(name) => { const b = [...document.querySelectorAll('button.chart_indicator')]"
                 ".find(x => (x.innerText || '').trim() === name); if (!b) return false; b.click(); return true; }",
-                menu_name)
+                menu_name, cap=_left_s(deadline, EVAL_TIMEOUT))
             if not clicked:
                 logger.warning(f"OTC: индикатор '{menu_name}' не найден в меню")
-            elif not await _wait_indicator_on(page, menu_name):
+            elif not await _wait_indicator_on(page, menu_name,
+                                              timeout=_left_s(deadline, 3.0)):
                 logger.warning(f"OTC: индикатор '{menu_name}' не зажёгся на графике за отведённое "
                                f"время — проверю следующим проходом")
         except (Exception,) as error:
@@ -878,7 +906,7 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
     # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
     try:
         if await _indicators_menu_open(page):
-            await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
+            await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
     except (Exception,):
         pass
 
