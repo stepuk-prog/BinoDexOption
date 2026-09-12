@@ -33,7 +33,7 @@ from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 from settings.config import screenshot_path, database, cookies_pocket_id
 from settings.constant import globe_otc_path
-from settings.timing import (EVAL_TIMEOUT, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
+from settings.timing import (TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
                              MAX_SCREENSHOT_ATTEMPTS)
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, load_rgba, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
@@ -428,9 +428,13 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
     — берём только тики этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары
     сразу после переключения.
 
-    Сбой ОДНОГО чтения (страница моргнула) серию НЕ рвёт — собираем что успели. Пустую серию
-    логируем: иначе односторонняя медиана (скажем, только пост-кадровые сэмплы, если серия «до»
-    отвалилась целиком) уехала бы в пост молча."""
+    Сбой ОДНОГО чтения (страница моргнула) серию НЕ рвёт — собираем что успели.
+
+    Логи здесь — ТОЛЬКО debug: функция зовётся ДВАЖДЫ за каждую итерацию ожидания отрисовки
+    канваса в screenshot_otc, то есть в сценарии «канвас пуст / символ ещё не переключился»
+    (а он ровно тот, где серия и оказывается пустой) на INFO выходило до ~60 строк на один
+    опцион. Про неполный брекет один раз сообщает сам screenshot_otc — там это видно целиком,
+    и именно там односторонняя медиана превращается в цену поста."""
     out: list[float] = []
     for i in range(count):
         if i:
@@ -438,7 +442,10 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
         try:
             data = await _eval(page, CHART_DATA_JS)
         except (Exception,) as err:
-            logger.info(f"OTC: чтение chartData не удалось ({err}) — продолжаю серию")
+            # type(err).__name__ обязателен: самый вероятный сбой здесь — таймаут _eval, а у
+            # asyncio.TimeoutError пустой str(), и строка выродилась бы в «не удалось () —».
+            logger.debug(f"OTC: чтение chartData не удалось "
+                         f"({type(err).__name__}: {err}) — продолжаю серию")
             continue
         if not isinstance(data, dict):
             continue
@@ -448,7 +455,7 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
         if isinstance(price, (int, float)):
             out.append(float(price))
     if not out:
-        logger.info(f"OTC: серия чтений chartData пуста (symbol={symbol}, count={count})")
+        logger.debug(f"OTC: серия чтений chartData пуста (symbol={symbol}, count={count})")
     return out
 
 
@@ -647,7 +654,7 @@ async def dismiss_modal_backdrop(page: Page) -> None:
                        f'настройки графика выставляем через DOM-события')
 
 
-async def apply_chart_scale(page: Page) -> None:
+async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
     """Выставить масштабы графика: свеча '30S' → график 'H1'. binodex сбрасывает их на дефолт
     при КАЖДОМ запуске браузера (новый контекст из storage_state → M30; reload в рамках сессии
     значение держит — проверено), а раньше штатный setup шёл только на холодном
@@ -656,7 +663,21 @@ async def apply_chart_scale(page: Page) -> None:
     рестарта: новая версия фронта / переинициализация чарта). Порядок важен: смена
     масштаба свечи сбрасывает масштаб графика, поэтому график (H1) ставим ПОСЛЕДНИМ. Пункты —
     по тексту (порядок списков binodex плавает). Ошибки не критичны для запуска (масштаб — оформление
-    кадра, не данные) — логируем и продолжаем."""
+    кадра, не данные) — логируем и продолжаем.
+
+    `deadline` (monotonic) — общий бюджет ремонта от ensure_chart_setup. На залипшем UI одна пара
+    масштабов стоит до 30с (на каждый: click 5 + wait visible 5 + wait hidden 5), а вызывается это
+    перед каждым опционом. None (холодный старт из _verify_otc_ready) — без ограничения: там мы
+    никуда не спешим и оформление нужно выставить целиком.
+
+    Бюджет проверяется ОДИН раз, ДО цикла — «оба масштаба или ни одного». Проверять перед каждым
+    шагом нельзя: смена масштаба свечи СБРАСЫВАЕТ масштаб графика (см. выше про порядок), поэтому
+    выход по бюджету между двумя шагами оставил бы график на дефолтном M30 — кадр уехал бы с чужим
+    таймфреймом, то есть хуже, чем если вообще не трогать."""
+    if deadline is not None and time.monotonic() >= deadline:
+        logger.warning('OTC: бюджет ремонта оформления исчерпан до масштабов — не трогаю их '
+                       '(частичная правка сбила бы масштаб графика), оставляю следующему опциону')
+        return
     await dismiss_modal_backdrop(page)
     for opener, item, name in ((otc_candle_scale, otc_candle_scale_item, 'свеча 30S'),
                                (otc_chart_scale, otc_chart_scale_item, 'график H1')):
@@ -745,14 +766,15 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     не открылась / пункт перерисовался), а без проверки индикатор оставался бы выключенным до
     следующего опциона.
 
-    `deadline` (monotonic) — общий бюджет ремонта от ensure_chart_setup: повторный проход самый
-    дорогой, и на залипшем UI именно он растягивал подготовку перед опционом. Бюджет вышел —
-    повтор пропускаем, кадр уйдёт как есть."""
+    `deadline` (monotonic) — общий бюджет ремонта от ensure_chart_setup. Передаётся и ВНУТРЬ
+    проходов (_click_indicators проверяет его перед каждым индикатором): гейта только на повторном
+    проходе не хватало — один залипший индикатор стоит до ~40с (меню не открывается, чип не
+    зажигается), и первый же проход по трём выбирал минуты против объявленных секунд."""
     if not otc_indicators:  # старая БД без строки setup_indicators — тихо пропускаем
         return
     if missing is None:
         missing = list(OTC_CHART_INDICATORS)
-    await _click_indicators(page, missing)
+    await _click_indicators(page, missing, deadline=deadline)
     left = await _missing_indicators(page)
     retry = [item for item in missing if left is not None and item in left]
     if retry and deadline is not None and time.monotonic() >= deadline:
@@ -761,7 +783,7 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     elif retry:
         logger.warning(f"OTC: индикаторы не включились с первого раза "
                        f"({', '.join(n for n, _ in retry)}) — повторяю")
-        await _click_indicators(page, retry)
+        await _click_indicators(page, retry, deadline=deadline)
         left = await _missing_indicators(page)
         still = [item for item in retry if left is not None and item in left]
         if still:
@@ -806,10 +828,21 @@ async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> boo
         await asyncio.sleep(0.15)
 
 
-async def _click_indicators(page: Page, missing: list[tuple[str, str]]) -> None:
-    """Один проход кликов по пунктам меню индикаторов."""
+async def _click_indicators(page: Page, missing: list[tuple[str, str]],
+                            deadline: float | None = None) -> None:
+    """Один проход кликов по пунктам меню индикаторов.
+
+    `deadline` (monotonic) — бюджет ремонта от ensure_chart_setup, проверяется ПЕРЕД каждым
+    индикатором. Это и есть место, где бюджет реально ограничивает работу: один залипший
+    индикатор стоит до ~40с (открытие меню до 10 + click 5 + _wait_menu_open 1.5 + клик-eval
+    до 10 + _wait_indicator_on до 13), а проход идёт по трём. None — без ограничения (холодный
+    старт из _verify_otc_ready: там оформление надо выставить целиком)."""
     await dismiss_modal_backdrop(page)
     for menu_name, _badge in missing:
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.warning(f"OTC: бюджет ремонта оформления исчерпан — индикатор '{menu_name}' "
+                           f"не включён, оставляю следующему опциону")
+            break
         try:
             if not await _indicators_menu_open(page):
                 await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
@@ -900,7 +933,12 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     Общий БЮДЖЕТ на ремонт — SETUP_TOTAL_BUDGET: проверки дёшевы, а вот ремонт (клики по меню,
     ожидание чипов, второй проход) на залипшем UI складывался в десятки секунд ПЕРЕД каждым
     опционом, и потолка у этого не было вовсе. Бюджет исчерпан — выходим с тем, что успели
-    поправить: кадр без индикатора хуже опоздавшего кадра, но лучше пропущенного опциона."""
+    поправить: кадр без индикатора хуже опоздавшего кадра, но лучше пропущенного опциона.
+
+    Дедлайн уходит ВНУТРЬ обоих ремонтников (apply_chart_scale / _click_indicators), а не только
+    проверяется между ними: внешних гейтов не хватало — на залипшем UI сама пара масштабов стоит
+    до 30с, а проход по трём индикаторам до ~2 мин, то есть первый же шаг выбирал больше всего
+    бюджета и ограничивать было уже нечего (ревизия 12-09-2026)."""
     page = manager.pages.get('main')
     if page is None:
         return
@@ -915,7 +953,7 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     await _clear_offzone(page)
     try:
         if scale_drifted:
-            await apply_chart_scale(page)
+            await apply_chart_scale(page, deadline=deadline)
         if missing and time.monotonic() >= deadline:
             logger.warning(f'OTC: бюджет ремонта оформления {SETUP_TOTAL_BUDGET:.0f}с исчерпан на '
                            f'масштабе — индикаторы оставляю следующему опциону')
@@ -1000,7 +1038,16 @@ def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int 
         # цикл, что был здесь раньше, разные размеры терпел. Два _shot одного clip обычно дают
         # одинаковый кадр, но DPR/скролл между ними могут развести их на пиксель — и ярлык МОЛЧА
         # перестал бы накладываться (except в _label_cutout → «кадр без ярлыка»).
-        crop_b = crop_b.resize(crop_a.size)
+        #
+        # Обрезаем оба кадра до общего размера, а НЕ ресайзим B под A: ресайз пересчитывает все
+        # пиксели (bicubic), фон перестаёт быть побитово равным — и вся идея матирования («где
+        # A == B, там альфа 0») рассыпается. Замер на фоне графика (сетка + свечи, т.е. высокие
+        # частоты): после resize 53% фоновых пикселей получают ненулевую альфу, вплоть до 255,
+        # то есть в пост уезжает прямоугольный кусок графика вместо прозрачности. При crop —
+        # ровно 0%. Обрезка теряет полоску в 1 px по краю, что на вырезку ярлыка не влияет.
+        w = min(crop_a.width, crop_b.width)
+        h = min(crop_a.height, crop_b.height)
+        crop_a, crop_b = crop_a.crop((0, 0, w, h)), crop_b.crop((0, 0, w, h))
     a = crop_a.convert('RGB')
     r, g, b = ImageChops.difference(a, crop_b.convert('RGB')).split()
     d = ImageChops.add(ImageChops.add(r, g), b)          # |Δr| + |Δg| + |Δb|, clamp 255
@@ -1198,6 +1245,15 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                 continue
             if reads:
                 price = statistics.median(reads)
+                # Неполный брекет = часть сэмплов не собралась. Опасен не сам недобор, а
+                # ПЕРЕКОС: если целиком отвалилась серия «до кадра», медиана считается только
+                # по пост-кадровым чтениям, то есть по цене, которой на ярлыке ещё не было.
+                # Сообщаем ОДИН раз здесь, а не в _read_chart_prices (та зовётся дважды за
+                # каждую итерацию ожидания канваса — на INFO это были десятки строк на опцион).
+                expected = CHART_READS_BEFORE + CHART_READS_AFTER
+                if len(reads) < expected:
+                    logger.info(f"OTC {asset}: неполный ценовой брекет — {len(reads)}/{expected} "
+                                f"чтений chartData, медиана может быть односторонней (цена {price})")
             else:
                 # chartData не отдал ни одного чтения — кадр снят, но цену берём из WS-фолбэка.
                 # Логируем: в пост-мортеме видно, что источник цены кадра — WS, а не ярлык графика.
@@ -1230,8 +1286,18 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
 
 
 async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
-    """Открытие binodex для OTC."""
-    return OperationResult(success=bool(await init_otc(manager=manager)))
+    """Открытие binodex для OTC.
+
+    `error` заполняем ОБЯЗАТЕЛЬНО: init_load логирует его через logger.error, то есть текст
+    уходит алертом в канал ошибок. С дефолтным '' это был алерт «‼️Сбой …» с пустым телом —
+    и до 12-09-2026 оно никому не мешало только потому, что ветка была недостижима (init_otc
+    выходил через close_program). Теперь это штатная реакция на транзиентный сбой подъёма,
+    поэтому у алерта должен быть смысл. Конкретную причину init_otc уже положил в warning.log."""
+    if await init_otc(manager=manager):
+        return OperationResult(success=True)
+    return OperationResult(success=False,
+                           error='OTC: binodex не поднялся (причина — warning.log выше) — '
+                                 'отдаю неуспех в политику подъёма')
 
 
 async def _verify_otc_ready(page: Page) -> None:

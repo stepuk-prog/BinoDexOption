@@ -1033,11 +1033,13 @@ async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
         raise
 
     if not browser_result.success:
-        logger.error(browser_result.error)
+        # `or` — страховка от ПУСТОГО алерта: logger.error уходит в канал ошибок, и запись без
+        # текста даёт «‼️Сбой …» ни о чём. Смысл держит вызываемый (open_otc_browser заполняет
+        # error), здесь — последний рубеж, чтобы новый безмолвный OperationResult не пролез.
+        logger.error(browser_result.error or 'подъём браузера не удался (без текста ошибки)')
         # Закрываем браузер, как и в ветке исключений выше: без этого Firefox остаётся
-        # осиротевшим и держит lock в общем кэше Playwright. Путь сейчас почти недостижим
-        # (всё уходит через close_program → sys.exit), но латентная утечка от этого не
-        # перестаёт быть утечкой — а стоит она одну строку.
+        # осиротевшим и держит lock в общем кэше Playwright. Для OTC это ШТАТНЫЙ путь (init_otc
+        # с 12-09-2026 отдаёт неуспех, а не выходит через close_program), для FIN — редкий.
         await manager.close()
         return False
 
