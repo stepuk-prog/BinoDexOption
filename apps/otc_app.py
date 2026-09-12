@@ -27,6 +27,7 @@ from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
+from apps.browser_io import eval_js as _eval, shot as _shot
 from apps.otc_login import otc_inline_login
 from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
@@ -95,16 +96,6 @@ RELOAD_RETRY_PAUSE = 2.0  # сек между ретраями reload
 logger = init_logger(__name__)
 
 
-async def _eval(target, js, *args):
-    """page/element.evaluate с верхней границей по времени (зависший рендер иначе вешает await навсегда)."""
-    return await asyncio.wait_for(target.evaluate(js, *args), timeout=EVAL_TIMEOUT)
-
-
-async def _shot(page, **kwargs):
-    """page.screenshot с верхней границей по времени (как _eval — встроенного таймаута нет)."""
-    return await asyncio.wait_for(page.screenshot(**kwargs), timeout=EVAL_TIMEOUT)
-
-
 # Глобальный трекер цен (один на процесс; страница регистрирует WS-перехват в init_otc)
 _price_tracker: WebSocketPriceTracker | None = None
 
@@ -163,7 +154,7 @@ async def _wait_chart_symbol(page: Page, symbol: str | None, timeout: float) -> 
         # подвисший evaluate растянул бы «ожидание на 2с» до десяти.
         left = deadline - time.monotonic()
         try:
-            data = await asyncio.wait_for(page.evaluate(CHART_DATA_JS), timeout=max(0.2, left))
+            data = await _eval(page, CHART_DATA_JS, timeout=max(0.2, left))
         except (Exception,):
             data = None
         if isinstance(data, dict) and data.get('symbol') == symbol:
@@ -526,8 +517,8 @@ async def _error_boundary_shown(page: Page) -> bool:
     может ОСТАТЬСЯ (апп упал до его очистки), поэтому token-чек такой случай не ловит. Чистый
     контекст грузится без этого → трактуем как мёртвую сессию → релогин."""
     try:
-        return bool(await asyncio.wait_for(page.evaluate(
-            "() => (document.body.innerText || '').includes('Something went wrong')"), timeout=5))
+        return bool(await _eval(
+            page, "() => (document.body.innerText || '').includes('Something went wrong')", timeout=5))
     except (Exception,):
         return False
 
@@ -543,6 +534,28 @@ async def _raise_if_backend_down(detail: str) -> None:
     if not await api_alive():
         raise FeedOutage(f'binodex OTC: {detail} + auth-API api.binodex.app не отвечает (5xx/таймаут) '
                          f'браузер-фри — backend-аутэйдж binodex')
+
+
+async def _raise_off_trade(page: Page, detail: str, authed: bool,
+                           check_backend: bool = True) -> None:
+    """binodex увёл с /trade — развести причину. ОДНА реализация на оба места (_raise_ui_dead и
+    _verify_otc_ready): развязка тут нетривиальная и копий у неё быть не должно — расходятся
+    молча, а цена расхождения — релогин вместо ожидания (или наоборот) на живой сессии.
+
+    Порядок и смысл (docs/lifecycle-standard §4.5):
+      • auth-API (api.binodex.app) 5xx браузер-фри → FeedOutage: падение бэкенда доминирует,
+        релогин/прокси/движок бесполезны, пока API лежит (грабли 2026-07-23);
+      • токен ЖИВ → апп-шелл не поднялся и фронт САМ сбросил на лендинг/?boot-recovery= при живой
+        сессии: аутэйдж ИХ фронта, не куки → SetupError(mounted=False), прокси-фолбэк + переподъём;
+      • токена нет → storage_state реально протух → CookiesExpired (релогин).
+    `check_backend=False` — когда вызывающий уже проверил бэкенд (не ходить по сети дважды).
+    Всегда бросает."""
+    if check_backend:
+        await _raise_if_backend_down(detail)
+    if authed:
+        raise SetupError(f'binodex OTC: {detail} при живой авторизации — аутэйдж фронта binodex '
+                         f'(boot-recovery), не куки', mounted=False)
+    raise CookiesExpired(f'binodex OTC: {detail}, нет privy:token — сессия протухла')
 
 
 async def _raise_ui_dead(page: Page, detail: str) -> None:
@@ -573,11 +586,9 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     # реально протухла → CookiesExpired. authed — безопасный дефолт True (грабли 2026-07: boot-recovery).
     authed = await _privy_token_alive(page, on_error=True)
     if not on_trade(page.url):
-        if authed:
-            raise SetupError(f'binodex OTC: {detail} + редирект с /trade на {page.url} при живой '
-                             f'авторизации — аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)
-        raise CookiesExpired(f'binodex OTC: {detail} + редирект с /trade на {page.url}, '
-                             f'нет privy:token — сессия протухла')
+        # backend уже проверен выше по функции — второй раз по сети не ходим.
+        await _raise_off_trade(page, f'{detail} + редирект с /trade на {page.url}', authed,
+                               check_backend=False)
     # Токен очищен (Privy сбросил протухшую сессию на буте) → реальная смерть сессии → релогин.
     # Проверяем ДО error-boundary: иначе «Something went wrong» поверх мёртвой сессии увёл бы в
     # выживание-без-релогина вместо восстановления кук.
@@ -1236,15 +1247,7 @@ async def _verify_otc_ready(page: Page) -> None:
         # binodex увёл с /trade. Сперва — backend: auth-API 5xx браузер-фри → это НЕ куки и НЕ
         # front-end-аутэйдж, а падение бэкенда binodex (Privy-логин на 502); релогин/прокси не
         # помогут → FeedOutage (браузер-фри ожидание). Грабли 2026-07-23.
-        await _raise_if_backend_down(f'редирект с /trade на {page.url}')
-        # Токен ЖИВ → апп-шелл не поднялся и фронт САМ сбросил на лендинг/?boot-recovery=… (их само-
-        # восстановление) при живой сессии = аутэйдж их фронта, НЕ куки: релогин бесполезен →
-        # SetupError(mounted=False) (прокси-фолбэк + переподъём). Токена нет → storage_state реально
-        # протух → CookiesExpired. Грабли 2026-07: boot-recovery.
-        if authed:
-            raise SetupError(f'binodex OTC: редирект с /trade на {page.url} при живой авторизации — '
-                             f'аутэйдж фронта binodex (boot-recovery), не куки', mounted=False)
-        raise CookiesExpired(f'binodex OTC: редирект с /trade на {page.url}, нет privy:token — сессия протухла')
+        await _raise_off_trade(page, f'редирект с /trade на {page.url}', authed)
     # Ранний гейт «сессии нет вовсе» (чистый контекст). На ПРОТУХШЕЙ (но присутствующей) сессии
     # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
     # буте → ловит авторитетная перепроверка ниже.

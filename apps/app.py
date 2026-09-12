@@ -11,6 +11,7 @@ from apps.browser_app import clear_zone_overlays, close_dom_popups, init_valute_
 from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
+from apps.browser_io import eval_js, shot
 from logs import init_logger
 from classes.Option_class import Option
 from classes.result_types import MainResult
@@ -22,7 +23,7 @@ from settings.config import (option_data, binary, program_id, timeframe,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
 from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
-from settings.timing import CHECK_PLUS_DELAY, EVAL_TIMEOUT, POST_SCREENSHOT_DELAY, TIMEOUT_MEDIUM
+from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 from settings.screenshot_set import load_rgba
 
@@ -325,8 +326,8 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
             pass
 
         element = page.locator(f"xpath={screen_zone}").first
-        # У Playwright screenshot нет встроенного таймаута — ставим верхнюю границу (зависший рендер не вешает цикл).
-        await asyncio.wait_for(element.screenshot(path=shot_path), timeout=EVAL_TIMEOUT)
+        # У Playwright screenshot нет встроенного таймаута — верхняя граница в shot (browser_io).
+        await shot(element, path=shot_path)
 
         with Image.open(shot_path) as img:
             if qr:
@@ -374,8 +375,7 @@ async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]
             await mouse_move(page, price_field, 1)
 
             # Получаем цвет элемента через evaluate (с верхней границей — у evaluate нет встроенного таймаута)
-            tp = await asyncio.wait_for(
-                price_element.evaluate("el => getComputedStyle(el).color"), timeout=EVAL_TIMEOUT)
+            tp = await eval_js(price_element, "el => getComputedStyle(el).color")
             tp = str(tp)
 
             if color in tp:
@@ -434,6 +434,27 @@ async def dop_plus_message():
     if ok:
         return True, ''
     return False, f"Ошибка отправки дополнительного сообщения плюсов - {err}"
+
+
+async def sleep_or_stop(stop_event, seconds: float) -> bool:
+    """Прерываемый сон: True — проснулись по сигналу остановки, False — по таймауту.
+
+    ОДНА реализация на программу (раньше их было две: main._interruptible_sleep и
+    main_app._sleep_or_stop — одинаковая механика, разные сигнатуры и разный контракт возврата).
+    Нужна везде, где ждём долго: иначе sleep(option_time/dgn_time/backoff) держал бы
+    graceful-shutdown минутами, с риском SIGKILL и недозакрытых БД/браузера.
+
+    `stop_event=None` (самый ранний init, событие ещё не создано) — обычный sleep."""
+    if stop_event is None:
+        await asyncio.sleep(seconds)
+        return False
+    if stop_event.is_set():
+        return True
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 async def time_sleep():

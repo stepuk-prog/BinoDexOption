@@ -10,6 +10,7 @@ from classes.browser_manager import BrowserManager
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
+from apps.browser_io import eval_js
 from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
@@ -188,8 +189,7 @@ def _overlay_log(text: str) -> None:
 async def _probe_point(page: Page, selector: str) -> dict:
     """Что лежит в точке, куда целится клик. Пустой dict — спросить не вышло."""
     try:
-        return await asyncio.wait_for(page.evaluate(_AT_POINT_JS, selector),
-                                      timeout=EVAL_TIMEOUT) or {}
+        return await eval_js(page, _AT_POINT_JS, selector) or {}
     except (Exception,):
         return {}
 
@@ -216,8 +216,7 @@ async def _close_overlay(page: Page, selector: str) -> bool:
                        f'DOM: {info.get("html", "")}')
 
     try:
-        result = await asyncio.wait_for(page.evaluate(_DISMISS_JS, selector),
-                                        timeout=EVAL_TIMEOUT) or {}
+        result = await eval_js(page, _DISMISS_JS, selector) or {}
     except (Exception,):
         result = {}
     if result.get('state') == 'closed':
@@ -387,8 +386,7 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
     модалкой, чем пропущенный опцион."""
     for _ in range(attempts):
         try:
-            res = await asyncio.wait_for(page.evaluate(_ZONE_CLEAR_JS, zone_selector),
-                                         timeout=EVAL_TIMEOUT) or {}
+            res = await eval_js(page, _ZONE_CLEAR_JS, zone_selector) or {}
         except (Exception,) as error:
             _overlay_log(f'Проба зоны кадра не выполнилась: {type(error).__name__}: {error}')
             return
@@ -943,7 +941,7 @@ async def _click_exchange_pair(page, pair: str, exchange: str) -> bool:
                     await loc.click(timeout=2000, force=True)
                 else:
                     # evaluate без встроенного таймаута — оборачиваем верхней границей
-                    await asyncio.wait_for(loc.evaluate('el => el.click()'), timeout=EVAL_TIMEOUT)
+                    await eval_js(loc, 'el => el.click()')
                 return True
             except (Exception,):
                 continue

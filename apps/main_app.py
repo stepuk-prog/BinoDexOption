@@ -2,7 +2,7 @@ import asyncio
 import random
 from typing import TYPE_CHECKING
 
-from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price
+from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price, sleep_or_stop
 from apps.my_exeptions import send_photo_safe
 from apps.otc_app import (parce_otc, screenshot_otc, reload_otc_page, select_otc_pair,
                           ensure_chart_setup, _ui_loaded, UI_DEAD_CONFIRM)
@@ -52,16 +52,6 @@ async def _try_send(photo, caption, mes_type: str, timeout: float = TG_SEND_TIME
     return await send_photo_safe(photo, caption, mes_type, timeout)
 
 
-async def _sleep_or_stop(stop_event, seconds: float):
-    """Прерываемый сон: вернётся по таймауту ИЛИ при выставленном stop_event
-    (SIGTERM/SIGINT). Иначе долгий sleep(option_time/dgn_time) блокировал бы
-    graceful-shutdown на минуты (риск SIGKILL и недозакрытия БД/браузера)."""
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-    except asyncio.TimeoutError:
-        pass
-
-
 async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     """OTC: перед фиксацией результата СНАЧАЛА дёшево проверить, жив ли UI — видна ли кнопка
     настроек аккаунта (точный маркер «не сплеш»). Видна → ничего не делаем, БЕЗ reload. И только
@@ -95,10 +85,10 @@ async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
     в норме (UI жив, проверка ~мгновенна) задержки нет; при сплеше результат снимется с опозданием,
     но опцион не прервётся. stop_event прерывает паузы (после вызова проверять stop_event.is_set())."""
     lead = min(float(HEALTH_LEAD), seconds) if not binary else 0.0
-    await _sleep_or_stop(stop_event, seconds - lead)
+    await sleep_or_stop(stop_event, seconds - lead)
     if lead and not stop_event.is_set():
         await _ensure_otc_alive(manager, stop_event)
-        await _sleep_or_stop(stop_event, lead)
+        await sleep_or_stop(stop_event, lead)
 
 
 async def _capture(manager: "BrowserManager", qr, *, seek_point: bool):
@@ -133,7 +123,7 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
             return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
         if await parce_otc(manager=manager, log_data=option_data, valute=used_val):
             return 'ok'
-        await _sleep_or_stop(stop_event, NO_PAIRS_RELOAD_PAUSE)
+        await sleep_or_stop(stop_event, NO_PAIRS_RELOAD_PAUSE)
     if stop_event.is_set():
         return 'stopped'
     logger.info('OTC: на binodex нет торговых пар после быстрых reload — отдаю главному циклу '

@@ -4,7 +4,7 @@ import sys
 
 from datetime import datetime, timedelta
 
-from apps.app import get_water, time_sleep, request_shutdown
+from apps.app import get_water, time_sleep, request_shutdown, sleep_or_stop
 from apps.browser_app import init_load
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
                            session_recoverable, write_status_offline)
@@ -80,21 +80,6 @@ def _reset_cookie_fails():
     _otc_recover_cycles = 0
 
 
-async def _interruptible_sleep(seconds: float) -> bool:
-    """Сон, прерываемый сигналом остановки. True — проснулись по сигналу (надо завершаться),
-    False — по таймауту. До установки _stop_event (самый первый init) — обычный sleep."""
-    if _stop_event is None:
-        await asyncio.sleep(seconds)
-        return False
-    if _stop_event.is_set():
-        return True
-    try:
-        await asyncio.wait_for(_stop_event.wait(), timeout=seconds)
-        return True
-    except asyncio.TimeoutError:
-        return False
-
-
 async def _handle_cookie_failure(detail: str = '') -> bool:
     """Отвал cookies — сообщение в cookies-канал + анти-спам пауза (120с×N, далее 300с) +
     возврат (caller пересоздаёт браузер, init перечитает куки из БД). См. §4.3.
@@ -106,7 +91,7 @@ async def _handle_cookie_failure(detail: str = '') -> bool:
     mode_label = 'TV' if binary else 'OTC'
     logger.cookies(f'{mode_label}: отвал cookies (попытка {_cookie_fails}, пауза {delay // 60} мин, '
                    f'пересоздаю браузер). {detail}'.rstrip())
-    return await _interruptible_sleep(delay)
+    return await sleep_or_stop(_stop_event, delay)
 
 
 # OTC: релогин — INLINE в основном браузере (apps/otc_login, из otc_app.init_otc). Здесь только
@@ -238,13 +223,13 @@ async def _init_with_retry():
                         logger.warning(f'OTC: прокси не поднял front-end binodex — ротация '
                                        f'({_proxy_outage_streak}/{PROXY_REPROBE_AFTER}), пауза '
                                        f'{SETUP_OUTAGE_BACKOFF // 60} мин, выживаю: {error}')
-                    if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
+                    if await sleep_or_stop(_stop_event, SETUP_OUTAGE_BACKOFF):
                         return None
                     continue
                 # FIN: прокси не применяем — прежнее поведение (выживание с backoff)
                 logger.warning(f'front-end не поднялся — аутэйдж, пауза {SETUP_OUTAGE_BACKOFF // 60} '
                                f'мин, выживаю: {error}')
-                if await _interruptible_sleep(SETUP_OUTAGE_BACKOFF):
+                if await sleep_or_stop(_stop_event, SETUP_OUTAGE_BACKOFF):
                     return None
                 continue
             # OTC: апп смонтирован, но наш селектор не найден — сменились селекторы binodex.
@@ -258,7 +243,7 @@ async def _init_with_retry():
                 await close_program(manager=None, status=EXIT_SETUP,
                                     text=f'OTC: сайт не настраивается — проверить селекторы binodex ⚙️🛑 (код {EXIT_SETUP})')
                 return None  # close_program делает sys.exit; страховка
-            if await _interruptible_sleep(INIT_RETRY_DELAY):
+            if await sleep_or_stop(_stop_event, INIT_RETRY_DELAY):
                 return None
             continue
         except CookiesExpired as error:
@@ -294,7 +279,7 @@ async def _init_with_retry():
                                     text=f'Браузер не поднялся {BROWSER_MAX_ATTEMPTS}× — отдаю ноду диспетчеру ☄️ (код {EXIT_BROWSER})')
                 return None  # close_program делает sys.exit; страховка
         logger.error(f'init_load провалился — пауза {INIT_RETRY_DELAY}с и повтор')
-        if await _interruptible_sleep(INIT_RETRY_DELAY):
+        if await sleep_or_stop(_stop_event, INIT_RETRY_DELAY):
             return None
 
 
