@@ -836,7 +836,12 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
     индикатором. Это и есть место, где бюджет реально ограничивает работу: один залипший
     индикатор стоит до ~40с (открытие меню до 10 + click 5 + _wait_menu_open 1.5 + клик-eval
     до 10 + _wait_indicator_on до 13), а проход идёт по трём. None — без ограничения (холодный
-    старт из _verify_otc_ready: там оформление надо выставить целиком)."""
+    старт из _verify_otc_ready: там оформление надо выставить целиком).
+
+    Прерваться ПОСЕРЕДИНЕ здесь безопасно (в отличие от пары масштабов, где частичная правка
+    сбивает масштаб графика): `missing` всегда идёт в порядке OTC_CHART_INDICATORS, поэтому
+    break оставляет включённым ПРЕФИКС списка, а следующий проход добирает хвост — Volume
+    по-прежнему окажется включён последним, и его панель осядет нижней."""
     await dismiss_modal_backdrop(page)
     for menu_name, _badge in missing:
         if deadline is not None and time.monotonic() >= deadline:
