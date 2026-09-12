@@ -12,6 +12,11 @@ from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
 from apps.browser_io import eval_js, shot
+# Остановка живёт в нейтральном apps/shutdown.py (его могут импортировать модули, которым
+# apps.app тянуть нельзя — my_exeptions, binodex_feed). Здесь — реэкспорт: main.py и
+# main_app.py берут request_shutdown/sleep_or_stop по прежнему адресу.
+from apps.shutdown import (request_shutdown, shutdown_event,  # noqa: F401 (реэкспорт)
+                           shutdown_requested, sleep_or_stop)
 from logs import init_logger
 from classes.Option_class import Option
 from classes.result_types import MainResult
@@ -36,14 +41,6 @@ logger = init_logger(__name__)
 # binocore о нём не знает и без этого писал бы в стандартный logging мимо наших файлов.
 _configure(logger=logger)
 
-# Флаг штатной остановки (SIGTERM/SIGINT): при нём exit_main не шлёт main_bug_message.
-_shutdown_requested = False
-
-
-def request_shutdown():
-    """Пометить штатную остановку — подавляет сообщение о сбое (main_bug_message)."""
-    global _shutdown_requested
-    _shutdown_requested = True
 
 
 async def _close_popup(page):
@@ -149,9 +146,15 @@ async def exit_main(channel_mess: bool,
     # Штатная остановка (SIGTERM/SIGINT): ничего не шлём в канал и не трогаем счётчики —
     # просто чистим состояние и выходим. Иначе ошибочный выход на shutdown ушёл бы
     # в plus-ветку (check_plus/dop_plus в канал + инкремент серии).
-    if _shutdown_requested:
+    if shutdown_requested():
         option_data.clear_data()
         return MainResult(result, plus, fall, bug_text, check_cookies)
+    # Сбой ДО первого поста опциона: подписчики ничего не видели — баг-картинку не шлём.
+    # Извиняться не за что, а «сбой программы» в ленте без единого прогноза читается как
+    # поломка на ровном месте; причина при этом целиком остаётся в логах.
+    if channel_mess and not option_data.posted:
+        logger.warning(f'Сбой до первого поста опциона — баг-картинку не шлю: {bug_text}')
+        channel_mess = False
     if channel_mess:
         # Через send_photo_safe (2026-08-15): прямой send_photo шёл мимо пробы доставки и
         # повтора — при потерях SYN сообщение о сбое просто не доходило (в инциденте оно
@@ -282,7 +285,7 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
     except (Exception,) as error:
         error_text = f"Не удалось загрузить цену - {error}"
         # при штатной остановке драйвер уже снесён — это не сбой, не шумим в error-канал
-        if _shutdown_requested:
+        if shutdown_requested():
             logger.warning(error_text)
         else:
             logger.error(error_text)
@@ -340,7 +343,7 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
     except (Exception,) as error:
         error_text = f'Ошибка записи скриншота - {str(error)}'
         # при штатной остановке драйвер уже снесён — это не сбой (как в find_price)
-        if _shutdown_requested:
+        if shutdown_requested():
             logger.warning(error_text)
         else:
             logger.error(error_text)
@@ -434,27 +437,6 @@ async def dop_plus_message():
     if ok:
         return True, ''
     return False, f"Ошибка отправки дополнительного сообщения плюсов - {err}"
-
-
-async def sleep_or_stop(stop_event, seconds: float) -> bool:
-    """Прерываемый сон: True — проснулись по сигналу остановки, False — по таймауту.
-
-    ОДНА реализация на программу (раньше их было две: main._interruptible_sleep и
-    main_app._sleep_or_stop — одинаковая механика, разные сигнатуры и разный контракт возврата).
-    Нужна везде, где ждём долго: иначе sleep(option_time/dgn_time/backoff) держал бы
-    graceful-shutdown минутами, с риском SIGKILL и недозакрытых БД/браузера.
-
-    `stop_event=None` (самый ранний init, событие ещё не создано) — обычный sleep."""
-    if stop_event is None:
-        await asyncio.sleep(seconds)
-        return False
-    if stop_event.is_set():
-        return True
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
-        return True
-    except asyncio.TimeoutError:
-        return False
 
 
 async def time_sleep():

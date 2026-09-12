@@ -14,6 +14,7 @@ import asyncio
 
 import aiohttp
 
+from apps.shutdown import sleep_or_stop
 from classes.price_tracker import symbol_key
 from logs import init_logger
 from settings.browser_config import otc_ws_origin, otc_api_url
@@ -268,14 +269,11 @@ async def wait_for_feed(stop_event=None, pair: str = FEED_PROBE_PAIR) -> bool:
                 return False       # SIGTERM пришёл в окне подтверждения
             logger.warning(f'wait_for_feed: binodex подал признак жизни, но не удержал '
                            f'{int(FEED_CONFIRM_WINDOW)}с — продолжаю ждать (pair={pair})')
-        if stop_event is not None:
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=FEED_WAIT_POLL)
-                return False  # stop_event выставлен во время паузы
-            except asyncio.TimeoutError:
-                pass
-        else:
-            await asyncio.sleep(FEED_WAIT_POLL)
+        # Общий sleep_or_stop (apps/shutdown — модуль без зависимостей, браузер-фри природу
+        # этого файла он не нарушает). stop_event=None (вызов без сигнала) там же обрабатывается
+        # обычным sleep, как и раньше здесь.
+        if await sleep_or_stop(stop_event, FEED_WAIT_POLL):
+            return False  # stop_event выставлен во время паузы
         waited += FEED_WAIT_POLL
         if waited >= next_heartbeat:
             down = 'auth-API api.binodex.app' if not await api_alive() else 'market-WS котировок'

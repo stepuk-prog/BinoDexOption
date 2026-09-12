@@ -24,8 +24,9 @@
 ### `option_data.counter`
 Счётчики серий плюсов/минусов. `plus_counter` / `minus_counter`.
 
-- Колонки: `plus`, `minus`; ключ — `program_id`.
-- `UPDATE … SET plus = plus + 1, minus = 0 … RETURNING plus` (и зеркально для минусов).
+- Колонки: `program_id` (**PK**), `timeframe`, `otc`, `plus`, `minus`. Все NOT NULL; дефолт `0` есть только у `plus`/`minus`, поэтому `timeframe` и `otc` при вставке передаются явно (из конфига: `timeframe`, `otc = not binary`).
+- `INSERT … (program_id, timeframe, otc, plus, minus) VALUES ($1,$2,$3,1,0) ON CONFLICT (program_id) DO UPDATE SET plus = counter.plus + 1, minus = 0 RETURNING plus` (и зеркально для минусов).
+- Это **UPSERT**, а не `UPDATE` (12-09-2026). Голый `UPDATE` без строки счётчика не задевал ничего и возвращал пусто, а вызывающий трактовал это как «строки ещё нет, нормально» — серия у новой программы не начиналась НИКОГДА, ни одной вехи за всё время. Теперь первый плюс сам заводит строку.
 
 ### `settings.option_setting`
 Базовые настройки экземпляра (на старте через `bootstrap_fetch`).

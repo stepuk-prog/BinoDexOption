@@ -154,7 +154,7 @@ async def _wait_chart_symbol(page: Page, symbol: str | None, timeout: float) -> 
         # подвисший evaluate растянул бы «ожидание на 2с» до десяти.
         left = deadline - time.monotonic()
         try:
-            data = await _eval(page, CHART_DATA_JS, timeout=max(0.2, left))
+            data = await _eval(page, CHART_DATA_JS, cap=max(0.2, left))
         except (Exception,):
             data = None
         if isinstance(data, dict) and data.get('symbol') == symbol:
@@ -397,13 +397,19 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         await _apply_offzone(page)   # off-zone восстанавливается на ЛЮБОМ исходе (успех/неудача/ошибка)
 
 
-async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -> bool:
+async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
+                    deadline: float | None = None) -> bool:
     """Подобрать активную OTC-пару из БД и выбрать её на binodex.
     Сначала берём активные пары, исключая последние использованные (valute) — чтобы актив не
     повторялся в окне. Если после исключения кандидатов не осталось (узкий пул активных OTC на
     этом ТФ сузился до недавно использованных), повторяем запрос БЕЗ исключения — разрешаем
     повтор пары. Иначе бот ложно решил бы «пар нет» и ушёл бы в ожидание-простой, хотя пары
-    на сайте есть (просто все недавно крутились). :return: True при успешном выборе."""
+    на сайте есть (просто все недавно крутились). :return: True при успешном выборе.
+
+    `deadline` (monotonic) — потолок на ПЕРЕБОР, от вызывающего (main_app._acquire_otc_pair).
+    Перебор идёт по ВСЕМУ списку активных пар, а одна неудачная пара стоит до ~70с (открытие
+    модалки, ожидание пункта, ожидание WS-котировки) — на двух десятках пар это десятки минут
+    при формально живом юните. Бюджет вышел — отдаём False, вызывающий переждёт штатно."""
     page = manager.pages['main']
     active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
     if active_otc_list is False:  # ошибка пула (контракт execute_query) — не «нет пар»
@@ -413,7 +419,11 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
         active_otc_list = await database.option_data_pocket(exclude_ids=[], tf=log_data.find_timeframe)
     if not active_otc_list:  # пусто и без исключения (нет активных пар на ТФ) либо ошибка пула
         return False
-    for otc in active_otc_list:
+    for idx, otc in enumerate(active_otc_list):
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.warning(f'OTC: бюджет подбора пары исчерпан — перебрал {idx} из '
+                           f'{len(active_otc_list)} активных пар, прекращаю')
+            return False
         log_data.add_option_data(otc)  # log_data.name = 'EUR/USD' (из БД)
         if not await select_otc_pair(page, log_data.name):  # сам ждёт прогрузку пары (WS)
             logger.warning(f"OTC-пара {log_data.name} не выбралась, пробую следующую")
@@ -512,8 +522,7 @@ async def _privy_token_alive(page: Page, *, on_error: bool) -> bool:
                 (гнать релогин впустую) на нём нельзя.
     """
     try:
-        return bool(await asyncio.wait_for(
-            page.evaluate("() => !!localStorage.getItem('privy:token')"), timeout=5))
+        return bool(await _eval(page, "() => !!localStorage.getItem('privy:token')", cap=5))
     except (Exception,):
         return on_error
 
@@ -525,7 +534,7 @@ async def _error_boundary_shown(page: Page) -> bool:
     контекст грузится без этого → трактуем как мёртвую сессию → релогин."""
     try:
         return bool(await _eval(
-            page, "() => (document.body.innerText || '').includes('Something went wrong')", timeout=5))
+            page, "() => (document.body.innerText || '').includes('Something went wrong')", cap=5))
     except (Exception,):
         return False
 
@@ -543,8 +552,7 @@ async def _raise_if_backend_down(detail: str) -> None:
                          f'браузер-фри — backend-аутэйдж binodex')
 
 
-async def _raise_off_trade(page: Page, detail: str, authed: bool,
-                           check_backend: bool = True) -> None:
+async def _raise_off_trade(detail: str, authed: bool, check_backend: bool = True) -> None:
     """binodex увёл с /trade — развести причину. ОДНА реализация на оба места (_raise_ui_dead и
     _verify_otc_ready): развязка тут нетривиальная и копий у неё быть не должно — расходятся
     молча, а цена расхождения — релогин вместо ожидания (или наоборот) на живой сессии.
@@ -594,7 +602,7 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     authed = await _privy_token_alive(page, on_error=True)
     if not on_trade(page.url):
         # backend уже проверен выше по функции — второй раз по сети не ходим.
-        await _raise_off_trade(page, f'{detail} + редирект с /trade на {page.url}', authed,
+        await _raise_off_trade(f'{detail} + редирект с /trade на {page.url}', authed,
                                check_backend=False)
     # Токен очищен (Privy сбросил протухшую сессию на буте) → реальная смерть сессии → релогин.
     # Проверяем ДО error-boundary: иначе «Something went wrong» поверх мёртвой сессии увёл бы в
@@ -1318,7 +1326,7 @@ async def _verify_otc_ready(page: Page) -> None:
         # binodex увёл с /trade. Сперва — backend: auth-API 5xx браузер-фри → это НЕ куки и НЕ
         # front-end-аутэйдж, а падение бэкенда binodex (Privy-логин на 502); релогин/прокси не
         # помогут → FeedOutage (браузер-фри ожидание). Грабли 2026-07-23.
-        await _raise_off_trade(page, f'редирект с /trade на {page.url}', authed)
+        await _raise_off_trade(f'редирект с /trade на {page.url}', authed)
     # Ранний гейт «сессии нет вовсе» (чистый контекст). На ПРОТУХШЕЙ (но присутствующей) сессии
     # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
     # буте → ловит авторитетная перепроверка ниже.

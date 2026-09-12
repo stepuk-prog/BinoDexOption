@@ -20,7 +20,7 @@ from settings.config import (cookies, database, binary, browser_engine, prog_key
                              cookies_pocket_id)
 from apps.cookie_utils import add_cookies_to_context
 from settings.timing import (
-    POPUP_SETTLE_DELAY, EVAL_TIMEOUT,
+    POPUP_SETTLE_DELAY,
     TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_EXTRA_LONG
 )
 from classes.result_types import BrowserInitResult, OperationResult
@@ -794,7 +794,17 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
         page_name = page_data['description']  # ключ из БД: main, price
 
         if idx == 0:
-            # Первая страница - используем существующую (уже 'main')
+            # Первая страница — уже открытая, она же 'main'. Ключ 'main' ЖЁСТКО зашит по всей
+            # программе (apps/app.py, otc_app, _ensure_otc_alive — везде manager.pages['main']),
+            # поэтому имя из БД для неё нормализуем, а не регистрируем вторым ключом: алиас дал бы
+            # две записи на одну страницу, то есть двойной обход в pages.items() и двойное закрытие.
+            # Ниже идёт безусловное manager.pages[page_name] — без этой нормализации переименование
+            # строки в cookies.pages давало бы KeyError на старте (ветка idx>0 свою страницу
+            # регистрирует, а эта полагалась на то, что в БД написано ровно 'main').
+            if page_name != 'main':
+                logger.warning("cookies.pages: первая страница (order_idx=0) названа %r, а не "
+                               "'main' — использую 'main' (этот ключ зашит в коде)", page_name)
+                page_name = 'main'
             page = manager.pages['main']
             try:
                 await page.goto(page_data['url'], wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
@@ -825,9 +835,8 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
                 # Ожидаем новую страницу и открываем её одновременно
                 async with manager.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
                     # URL передаём аргументом, а не в строку JS — кавычка в URL не сломает evaluate.
-                    # Верхняя граница по времени: у evaluate нет встроенного таймаута.
-                    await asyncio.wait_for(
-                        current_page.evaluate("u => window.open(u)", page_data['url']), timeout=EVAL_TIMEOUT)
+                    # Верхняя граница по времени — в eval_js (browser_io): у evaluate её нет.
+                    await eval_js(current_page, "u => window.open(u)", page_data['url'])
 
                 page = await new_page_info.value
                 manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл

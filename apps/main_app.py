@@ -1,11 +1,12 @@
 import asyncio
 import random
+import time
 from typing import TYPE_CHECKING
 
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price, sleep_or_stop
 from apps.my_exeptions import send_photo_safe
 from apps.otc_app import (parce_otc, screenshot_otc, reload_otc_page, select_otc_pair,
-                          ensure_chart_setup, _ui_loaded, UI_DEAD_CONFIRM)
+                          ensure_chart_setup, _ui_loaded, _apply_offzone, UI_DEAD_CONFIRM)
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -19,10 +20,6 @@ if TYPE_CHECKING:
 used_val = [0]
 prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
 count_price = 0  # счетчик количества одинаковой цены подряд
-# Отправлено ли ПЕРВОЕ сообщение опциона = началась «середина опциона» (после первого, до итога).
-# По нему обёртка main() решает: непредвиденный сбой в этом окне → баг-картинка в канал (подписчики
-# не должны остаться без итога); до первого сообщения — тихо (пояснять нечего).
-_posted = False
 logger = init_logger(__name__)
 
 # OTC: binodex периодически (тест-режим) висит БЕЗ единой торговой пары — модалка пар пуста,
@@ -34,6 +31,11 @@ logger = init_logger(__name__)
 # просто повторит цикл через time_sleep. Никаких длинных таймер-снов с удержанием браузера здесь.
 NO_PAIRS_RELOADS = 3
 NO_PAIRS_RELOAD_PAUSE = 5      # сек между быстрыми reload
+# Потолок на ВЕСЬ подбор пары (reload'ы + перебор активных пар в parce_otc). Без него три круга
+# reload_otc_page (до ~90с) плюс перебор всех пар по ~70с на неудачную давали десятки минут —
+# юнит зелёный, постов нет, в логе одни warning'и. Исчерпали — отдаём главному циклу ('timeout'),
+# он переждёт штатно (браузер-фри при мёртвом фиде / повтор при живом), БЕЗ рестарта процесса.
+ACQUIRE_TOTAL_BUDGET = 120     # сек
 
 # OTC: binodex сам может свалиться на сплеш В ТЕЧЕНИЕ опциона (новая версия/переинициализация
 # Privy — без нашего reload, см. memory binodex-stuck-splash). Чтобы опцион не прерывался, за
@@ -41,6 +43,10 @@ NO_PAIRS_RELOAD_PAUSE = 5      # сек между быстрыми reload
 # и при сплеше поднимаем reload+переселект ТОЙ ЖЕ пары — результат снимется с опозданием, а не
 # потеряется. Лид прячется в хвосте ожидания экспирации, поэтому в норме задержки нет.
 HEALTH_LEAD = 15              # сек до фиксации результата — упреждающая проверка/восстановление UI
+# Потолок на сам ремонт (reload + переселект пары + оформление). Он идёт за HEALTH_LEAD до
+# фиксации результата, а без потолка растягивался на минуты — итоговая котировка снималась бы
+# сильно ПОСЛЕ экспирации, то есть была бы неверной. Лучше не снять итог, чем снять чужой.
+ALIVE_REPAIR_BUDGET = 45      # сек
 
 
 async def _try_send(photo, caption, mes_type: str, timeout: float = TG_SEND_TIMEOUT) -> tuple[bool, str]:
@@ -49,22 +55,18 @@ async def _try_send(photo, caption, mes_type: str, timeout: float = TG_SEND_TIME
 
     Дефолт — из settings.timing, а не число: свой литерал здесь переопределял бы общий потолок
     (посты основного цикла шли бы мимо правки TG_SEND_TIMEOUT — так и было до 2026-08-15)."""
-    return await send_photo_safe(photo, caption, mes_type, timeout)
+    ok, err = await send_photo_safe(photo, caption, mes_type, timeout)
+    if ok:
+        # Отмечаем ФАКТ публикации: по нему exit_main решает, слать ли баг-картинку. Сбой до
+        # первого поста подписчики не видели вовсе — извиняться за него не за что, а картинка
+        # «сбой программы» в ленте без единого прогноза выглядит как поломка на ровном месте.
+        option_data.posted = True
+    return ok, err
 
 
-async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
-    """OTC: перед фиксацией результата СНАЧАЛА дёшево проверить, жив ли UI — видна ли кнопка
-    настроек аккаунта (точный маркер «не сплеш»). Видна → ничего не делаем, БЕЗ reload. И только
-    если пропала (binodex сам свалился на сплеш в течение опциона, не наш reload) — поднять reload
-    (он ретраит сплеш) и ВЕРНУТЬ ТУ ЖЕ пару (reload сбрасывает выбор пары). Best-effort: не вышло —
-    результат снимется как раньше с ошибкой → exit_main. FIN не трогаем. SIGTERM пропускаем."""
-    if binary or stop_event.is_set():
-        return
-    page = manager.pages['main']
-    if await _ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
-        return
-    logger.warning('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
-                   'не прерывая опцион')  # рутина → файл, не канал
+async def _repair_otc_ui(manager: "BrowserManager", page) -> None:
+    """Собственно ремонт UI в течение опциона: reload → вернуть ТУ ЖЕ пару → вернуть оформление.
+    Вынесено из _ensure_otc_alive, чтобы накрыть всё это ОДНИМ потолком по времени (см. там)."""
     if not await reload_otc_page(manager=manager):
         logger.warning('OTC: reload в течение опциона не поднял UI — результат может не сняться')
         return
@@ -77,6 +79,35 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     # Аварийный reload сбрасывает и оформление графика (масштабы/индикаторы) — возвращаем, иначе
     # остаток опциона снимался бы чужим таймфреймом и без индикаторов.
     await ensure_chart_setup(manager)
+
+
+async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
+    """OTC: перед фиксацией результата СНАЧАЛА дёшево проверить, жив ли UI — видна ли кнопка
+    настроек аккаунта (точный маркер «не сплеш»). Видна → ничего не делаем, БЕЗ reload. И только
+    если пропала (binodex сам свалился на сплеш в течение опциона, не наш reload) — поднять reload
+    (он ретраит сплеш) и ВЕРНУТЬ ТУ ЖЕ пару (reload сбрасывает выбор пары). Best-effort: не вышло —
+    результат снимется как раньше с ошибкой → exit_main. FIN не трогаем. SIGTERM пропускаем.
+
+    Ремонт накрыт ЖЁСТКИМ потолком ALIVE_REPAIR_BUDGET. Зовётся он за HEALTH_LEAD (15с) до
+    фиксации результата, а сам по себе мог идти минуты (reload до ~90с + переселект до ~70с +
+    оформление) — то есть итоговая котировка снималась бы далеко ПОСЛЕ экспирации и была бы
+    просто неверной. Лучше признать опцион несостоявшимся, чем опубликовать чужую цену."""
+    if binary or stop_event.is_set():
+        return
+    page = manager.pages['main']
+    if await _ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
+        return
+    logger.warning('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
+                   'не прерывая опцион')  # рутина → файл, не канал
+    try:
+        await asyncio.wait_for(_repair_otc_ui(manager, page), timeout=ALIVE_REPAIR_BUDGET)
+    except asyncio.TimeoutError:
+        logger.warning(f'OTC: ремонт UI не уложился в {ALIVE_REPAIR_BUDGET}с — прекращаю, '
+                       f'итог снимется как есть (цена после экспирации была бы неверной)')
+        # Отмена могла оборвать select_otc_pair на полуслове, вместе с его finally, который
+        # возвращает off-zone. Без off-zone остаток опциона рендерится на полном CPU — ставим
+        # его обратно явно (сама по себе неудача ремонта это не чинит, но CPU не жжёт).
+        await _apply_offzone(page)
 
 
 async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
@@ -113,19 +144,43 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
                         otc_session_dead (пересоздание браузера/авто-рефреш кук), НЕ ждём пары;
       'no_pairs'      — после быстрых reload пар по-прежнему нет → отдаём главному циклу
                         (result=False, fall=False): тот переждёт браузер-фри/повтором, БЕЗ рестарта;
+      'timeout'       — бюджет подбора исчерпан (UI отвечает, но каждый шаг залипает) → туда же,
+                        куда 'no_pairs', но с честной причиной в логе и bug_text;
       'stopped'       — пришёл сигнал остановки (SIGTERM/SIGINT) во время пауз.
     Длинных таймер-снов здесь нет: кадэнс ожидания держит главный цикл (browser-free / time_sleep),
-    чтобы не удерживать тяжёлый браузер впустую и не плодить рестарты на простое сайта."""
+    чтобы не удерживать тяжёлый браузер впустую и не плодить рестарты на простое сайта.
+
+    ОБЩИЙ БЮДЖЕТ — ACQUIRE_TOTAL_BUDGET. Раньше потолка не было вовсе: три круга по
+    reload_otc_page (до ~90с каждый) плюс parce_otc, который перебирает ВСЕ активные пары по
+    ~70с на неудачную, складывались в десятки минут — для диспетчера это неотличимо от
+    зависания, а в логе только warning'и."""
+    deadline = time.monotonic() + ACQUIRE_TOTAL_BUDGET
     for _ in range(NO_PAIRS_RELOADS):
         if stop_event.is_set():
             return 'stopped'
+        if time.monotonic() >= deadline:
+            logger.warning(f'OTC: бюджет подбора пары {ACQUIRE_TOTAL_BUDGET:.0f}с исчерпан — '
+                           f'отдаю главному циклу (без рестарта)')
+            return 'timeout'
         if not await reload_otc_page(manager=manager):
             return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
-        if await parce_otc(manager=manager, log_data=option_data, valute=used_val):
+        if await parce_otc(manager=manager, log_data=option_data, valute=used_val,
+                           deadline=deadline):
             return 'ok'
-        await sleep_or_stop(stop_event, NO_PAIRS_RELOAD_PAUSE)
+        # Пауза перед следующим кругом — тоже под бюджетом. Иначе она спала полные
+        # NO_PAIRS_RELOAD_PAUSE перед кругом, которого уже не будет (бюджет-то вышел), и
+        # «потолок 120с» превращался в 120 + 5 на каждый оставшийся круг.
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        if await sleep_or_stop(stop_event, min(NO_PAIRS_RELOAD_PAUSE, left)):
+            return 'stopped'
     if stop_event.is_set():
         return 'stopped'
+    if time.monotonic() >= deadline:
+        logger.warning(f'OTC: бюджет подбора пары {ACQUIRE_TOTAL_BUDGET:.0f}с исчерпан — '
+                       f'отдаю главному циклу (без рестарта)')
+        return 'timeout'
     logger.info('OTC: на binodex нет торговых пар после быстрых reload — отдаю главному циклу '
                 '(браузер-фри ожидание при мёртвом фиде / повтор при живом), без рестарта')
     return 'no_pairs'
@@ -133,20 +188,22 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
 
 async def main(manager: "BrowserManager", qr, stop_event):
     """Тонкая обёртка над _run_option: ловит НЕПРЕДВИДЕННОЕ исключение середины опциона (после
-    первого сообщения, до итогового) и шлёт баг-картинку в канал (channel_mess по флагу _posted),
+    первого сообщения, до итогового) и шлёт баг-картинку в канал (channel_mess по option_data.posted),
     а не молчаливый краш/рестарт без пояснения подписчикам. Явные сбои покрыты в _run_option."""
-    global _posted
-    _posted = False
+    # Флаг публикации живёт в option_data (ставит _try_send на КАЖДОМ успешном посте,
+    # снимает clear_data): раньше тут был свой модульный флаг ровно с тем же смыслом,
+    # и два источника одной правды разъехались бы при первой же правке.
+    option_data.posted = False
     try:
         return await _run_option(manager, qr, stop_event)
     except (Exception,) as error:
         logger.error(f'Непредвиденная ошибка в опционе: {error}')
-        return await exit_main(channel_mess=_posted, result=False,
+        return await exit_main(channel_mess=option_data.posted, result=False,
                                bug_text=f'Непредвиденная ошибка - {error}', check_cookies=count_price)
 
 
 async def _run_option(manager: "BrowserManager", qr, stop_event):
-    global prev_price, count_price, _posted   # used_val только мутируем (append/del) — global не нужен
+    global prev_price, count_price   # used_val только мутируем (append/del) — global не нужен
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
 
@@ -176,6 +233,11 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
             return await exit_main(channel_mess=False, result=False, fall=False,
                                    bug_text='На binodex нет торговых пар (тест-режим) — жду, не рестартю',
                                    check_cookies=count_price)
+        if outcome == 'timeout':  # UI отвечает, но подбор залип → туда же, но причина честная
+            return await exit_main(channel_mess=False, result=False, fall=False,
+                                   bug_text=f'Подбор OTC-пары не уложился в '
+                                            f'{ACQUIRE_TOTAL_BUDGET}с — жду, не рестартю',
+                                   check_cookies=count_price)
         # Оформление графика (масштабы свеча/график + индикаторы) binodex периодически сбрасывает
         # сам — проверяем и возвращаем ПЕРЕД каждым опционом, до первого кадра. В норме read-only и
         # мгновенно; UI трогаем только при реальном сбросе. См. otc_app.ensure_chart_setup.
@@ -197,7 +259,6 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
     ok, err = await _try_send(new_prognoz_img, message_text, 'первое сообщение')
     if not ok:
         return await exit_main(channel_mess=False, result=False, bug_text=err, check_cookies=count_price)
-    _posted = True   # первое сообщение ушло → «середина опциона»: непредвиденный сбой ниже = баг-картинка
 
     used_val.append(option_data.id_val)
     if len(used_val) >= 4:  # держим последние 3 id → актив не повторяется в окне из 4 рынков подряд

@@ -19,6 +19,7 @@ from email.header import decode_header, make_header
 
 from playwright.async_api import Page, BrowserContext, TimeoutError as PWTimeout
 
+from apps.browser_io import eval_js
 from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 
@@ -128,11 +129,10 @@ async def _clear_session(page: Page, context: BrowserContext) -> None:
     except (Exception,):
         pass
     try:
-        # evaluate без встроенного таймаута — оборачиваем (как otc_app._eval):
+        # evaluate без встроенного таймаута — оборачиваем общим eval_js (apps/browser_io):
         # зависший рендерер иначе подвесил бы релогин навсегда.
-        await asyncio.wait_for(
-            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }"),
-            timeout=15)
+        await eval_js(page, "() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }",
+                      cap=15)
     except (Exception,):
         pass
 

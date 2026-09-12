@@ -42,6 +42,7 @@ class Option:  # Класс структуры хранения данных в 
     minus: bool = False  # True, если опцион в минус
     vozvrat: bool = False  # True, если опцион возврат
     dgn: bool = False  # True, если нужен догон
+    posted: bool = False  # в этом опционе уже ушёл хотя бы один пост подписчикам
 
     dgn_time: int = 0  # Время догона в секундах
     dgn_time_str: str = ''  # Время догона строкой
@@ -81,6 +82,7 @@ class Option:  # Класс структуры хранения данных в 
         self.minus = False  # True, если опцион в минус
         self.vozvrat = False  # True, если опцион возврат
         self.dgn = False  # True, если нужен догон
+        self.posted: bool = False  # в этом опционе уже ушёл хотя бы один пост подписчикам
         self.dgn_time = 0  # Время догона в секундах
         self.dgn_time_str = ''  # Время догона строкой
         self.message_forecast = ''  # строка с направлением опциона для второго сообщения

@@ -486,20 +486,15 @@ async def bot():
                                 text=f'Перезагрузка бота ☄️. Ошибка - {res_option.bug_text}')
             return  # close_program делает sys.exit; явный выход (правило 9)
 
-        # Прерываемый сон: проснёмся сразу при сигнале остановки
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=await time_sleep())
-        except asyncio.TimeoutError:
-            pass
+        # Прерываемый сон: проснёмся сразу при сигнале остановки (общий sleep_or_stop, как и
+        # остальные ожидания программы — своей копии wait_for здесь больше нет).
+        await sleep_or_stop(stop_event, await time_sleep())
 
         if binary and not stop_event.is_set():
             if (datetime.now() + timedelta(hours=2)).weekday() >= 5:
                 if not res_option.plus:
                     # Прерываемый сон (как выше) — иначе SIGTERM завис бы тут на 100–150с
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=await time_sleep())
-                    except asyncio.TimeoutError:
-                        pass
+                    await sleep_or_stop(stop_event, await time_sleep())
                     continue
                 # Через send_photo_safe (проба доставки + повтор): голый send_photo терял пост
                 # на таймауте, а следом идёт write_status_offline и выход — подписчики остались

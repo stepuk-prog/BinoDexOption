@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pyrogram.errors import Unauthorized, FloodWait
 
 from apps.exit_app import session_dead_shutdown, session_failed
+from apps.shutdown import shutdown_event, sleep_or_stop
 from logs import init_logger
 from settings.config import get_app, channel_id
 from settings.timing import (TG_HISTORY_PROBE_LIMIT, TG_HISTORY_PROBE_SKEW,
@@ -188,7 +189,11 @@ async def lost_connection_photo(error, photo, text, mes_type, started_at: dateti
         # Пробы доставки здесь НЕ нужно (в отличие от таймаута/обрыва ниже): FloodWait — это
         # ОТКАЗ Telegram принять запрос, пост заведомо не ушёл, дубля из повтора не будет.
         logger.warning(f'{mes_type}: FloodWait — ждём {wait}s и повторяю')
-        await asyncio.sleep(wait)
+        # Прерываемое ожидание: окно FloodWait — до _FLOODWAIT_MAX (120с), и голый asyncio.sleep
+        # держал бы graceful-shutdown всё это время (риск SIGKILL с недозакрытыми БД/браузером).
+        if await sleep_or_stop(shutdown_event(), wait):
+            logger.warning(f'{mes_type}: остановка во время окна FloodWait — пост не повторяю')
+            return False, 'остановка во время FloodWait', None
         try:
             sent = await asyncio.wait_for(
                 bot.send_photo(chat_id=channel_id, photo=photo, caption=text),
