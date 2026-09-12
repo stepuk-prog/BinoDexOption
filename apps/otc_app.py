@@ -20,7 +20,7 @@ import time
 from io import BytesIO
 from typing import TYPE_CHECKING
 
-from PIL import Image
+from PIL import Image, ImageChops
 from playwright.async_api import Page, WebSocket, FloatRect
 
 from classes.Option_class import Option
@@ -58,6 +58,23 @@ CHART_DATA_JS = ("() => { const c = window.chartData;"
 # (проверено: 3+3 чтения → 9/10 совпадений с нарисованным ценником; см. docs/BINODEX_PRICE.md).
 CHART_READS_BEFORE = 3  # чтений chartData вплотную ДО screenshot
 CHART_READS_AFTER = 3   # и сразу ПОСЛЕ
+
+# Серия чтений chartData ОДНИМ evaluate: count значений с паузой CHART_READ_GAP_MS между ними.
+# Раньше это были count отдельных evaluate, каждый со своим round-trip'ом в браузер (плюс
+# планировщик asyncio сверху) — окно вокруг кадра растягивалось и плавало вместе с нагрузкой.
+# Теперь пауза задана явно и мала: окно уже, медиана ближе к тому, что нарисовано на ярлыке.
+CHART_READ_GAP_MS = 2
+CHART_SERIES_JS = """
+async ({count, gap}) => {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const c = window.chartData;
+    if (c && typeof c.price === 'number') out.push({symbol: c.symbol, price: c.price});
+    if (i < count - 1) await new Promise(r => setTimeout(r, gap));
+  }
+  return out;
+}
+"""
 # Канвас на ~97% прозрачный даже с графиком (свечи/оси/часы ≈ 3% непрозрачных пикселей). Сразу
 # после переключения пары канвас бывает пустым (свечи не дорисованы) — такой кадр не постим.
 # Порог доли непрозрачных пикселей: ниже = «пусто» → ждём отрисовку (норм. график проходит с запасом).
@@ -425,15 +442,16 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list) -
 
 
 async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list[float]:
-    """`count` быстрых чтений window.chartData.price. Если symbol задан — берём только тики
-    этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары сразу после
-    переключения. Ошибки evaluate глушим (страница могла моргнуть) — вернём что успели."""
+    """`count` быстрых чтений window.chartData.price — ОДНИМ evaluate (CHART_SERIES_JS). Если
+    symbol задан — берём только тики этой пары (chartData.symbol == symbol), чтобы не схватить
+    цену чужой пары сразу после переключения. Ошибки evaluate глушим (страница могла моргнуть) —
+    вернём что успели."""
+    try:
+        series = await _eval(page, CHART_SERIES_JS, {'count': count, 'gap': CHART_READ_GAP_MS})
+    except (Exception,):
+        return []
     out: list[float] = []
-    for _ in range(count):
-        try:
-            data = await _eval(page, CHART_DATA_JS)
-        except (Exception,):
-            data = None
+    for data in series or ():
         if not isinstance(data, dict):
             continue
         if symbol and data.get('symbol') != symbol:
@@ -641,7 +659,12 @@ async def apply_chart_scale(page: Page) -> None:
             # pointer events». Кликаем напрямую DOM-событием: пункт уже зарезолвлен и видим, оверлей
             # при dispatch_event не помеха (проверка перекрытия пропускается).
             await item_loc.dispatch_event('click')
-            await page.wait_for_timeout(500)  # дать дропдауну закрыться перед следующим шагом
+            # Дропдаун закрывается сам — ждём именно этого, а не фиксированные полсекунды.
+            # Не закрылся (редкий залипший оверлей) — не страшно: следующий шаг открывает своё меню.
+            try:
+                await item_loc.wait_for(state='hidden', timeout=TIMEOUT_SHORT)
+            except (Exception,):
+                pass
         except (Exception,) as error:
             logger.warning(f"OTC: не удалось выставить масштаб ({name}): {error}")
 
@@ -728,6 +751,25 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
                            f"({', '.join(n for n, _ in still)}) — кадр уйдёт без них")
 
 
+async def _wait_indicator_on(page: Page, name: str, badge: str, timeout: float = 3.0) -> bool:
+    """Дождаться, что индикатор реально включился — по чипу легенды на графике.
+
+    Вместо слепой паузы: клик по пункту меню ТОГГЛИТ индикатор, и раньше мы просто ждали 700 мс
+    на каждый, то есть ~2.1 с за проход и при этом без всякой гарантии. Читаем то же, что и
+    _missing_indicators (один обход DOM), и выходим сразу, как чип появился.
+
+    `None` от _missing_indicators — «прочитать не удалось»: не трактуем как готовность, просто
+    пробуем ещё раз до потолка."""
+    deadline = time.monotonic() + timeout
+    while True:
+        missing = await _missing_indicators(page)
+        if missing is not None and not any(item_name == name for item_name, _ in missing):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.15)
+
+
 async def _click_indicators(page: Page, missing: list[tuple[str, str]]) -> None:
     """Один проход кликов по пунктам меню индикаторов."""
     await dismiss_modal_backdrop(page)
@@ -735,14 +777,19 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]]) -> None:
         try:
             if not await _indicators_menu_open(page):
                 await page.locator(otc_indicators).first.click(timeout=TIMEOUT_SHORT)
-                await page.wait_for_timeout(500)
+                # Ждём сами пункты меню, а не «полсекунды на всякий случай»: на живой странице
+                # они появляются за десятки мс, а на медленной 500 мс могло и не хватить.
+                await page.locator('button.chart_indicator').first.wait_for(
+                    state='visible', timeout=TIMEOUT_SHORT)
             clicked = await _eval(page,
                 "(name) => { const b = [...document.querySelectorAll('button.chart_indicator')]"
                 ".find(x => (x.innerText || '').trim() === name); if (!b) return false; b.click(); return true; }",
                 menu_name)
             if not clicked:
                 logger.warning(f"OTC: индикатор '{menu_name}' не найден в меню")
-            await page.wait_for_timeout(700)
+            elif not await _wait_indicator_on(page, menu_name, _badge):
+                logger.warning(f"OTC: индикатор '{menu_name}' не зажёгся на графике за отведённое "
+                               f"время — проверю следующим проходом")
         except (Exception,) as error:
             logger.warning(f"OTC: не удалось включить индикатор '{menu_name}': {error}")
     # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
@@ -888,15 +935,18 @@ async def _canvas_alpha(element) -> Image.Image:
 
 def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int = 10) -> Image.Image:
     """Вырезка ярлыка по разнице: A (ярлык виден) − B (фон). Альфа = clamp(|A−B|*k).
-    Так фон (где A==B) становится прозрачным, остаётся только сам ярлык — без «короба»."""
-    a, b = crop_a.convert('RGB').load(), crop_b.convert('RGB').load()
-    out = Image.new('RGBA', crop_a.size)
-    o = out.load()
-    for y in range(crop_a.size[1]):
-        for x in range(crop_a.size[0]):
-            ra, ga, ba = a[x, y]; rb, gb, bb = b[x, y]
-            d = abs(ra - rb) + abs(ga - gb) + abs(ba - bb)
-            o[x, y] = (ra, ga, ba, 0 if d < thr else min(255, d * k))
+    Так фон (где A==B) становится прозрачным, остаётся только сам ярлык — без «короба».
+
+    Векторно средствами PIL, а не попиксельным циклом на Python: результат тот же, но работа идёт
+    на C. Прежний двойной for по ~100×30 px и был единственной причиной, по которой вырезка
+    уходила в asyncio.to_thread. ImageChops.add клампит сумму каналов на 255 — на итог это не
+    влияет: при d ≥ 85 альфа и так равна 255 (min(255, d*k) при k=3), а срезаются только
+    значения выше этого потолка."""
+    a = crop_a.convert('RGB')
+    r, g, b = ImageChops.difference(a, crop_b.convert('RGB')).split()
+    d = ImageChops.add(ImageChops.add(r, g), b)          # |Δr| + |Δg| + |Δb|, clamp 255
+    out = a.copy()
+    out.putalpha(d.point([0 if v < thr else min(255, v * k) for v in range(256)]))
     return out
 
 
@@ -925,8 +975,8 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
         finally:                                                          # вернуть ярлык в любом случае
             await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
                               " if (e) e.style.removeProperty('visibility'); }")
-        # Пиксельное матирование — синхронный CPU-цикл; уводим в поток, чтобы не блокировать event loop.
-        cutout = await asyncio.to_thread(_matte_label, Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
+        # Матирование векторное (ImageChops) — доли миллисекунды на C, отдельный поток не нужен.
+        cutout = _matte_label(Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
         result = (cutout, (lx - clip['x'], ly - clip['y']))
         _label_cutout_cache[key] = result
         return result
@@ -941,50 +991,53 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
 # видимыми #setup_settings_open (по нему _ui_loaded детектит отвал кук в рантайме — НЕЛЬЗЯ прятать!)
 # и ярлык пары (нужен для вырезки + это кнопка открытия модалки). Применяем после выбора пары и в
 # init_otc; СНИМАЕМ на время select_otc_pair (модалка выбора — вне зоны, под off-zone не кликается).
+_OFFZONE_STYLE_ID = '__offzone_style'
+_OFFZONE_KEEP_ATTR = 'data-offzone-keep'
+
+# Реализация — ОДНО инжектируемое правило CSS, а не обход DOM. Раньше здесь был
+# `document.querySelectorAll('body *')` с inline-стилем на КАЖДОМ узле (и такой же обход на
+# снятии) — три прохода по тяжёлой SPA за опцион. Теперь помечаем атрибутом ровно те узлы, что
+# должны остаться видимыми, а всё остальное гасим одним правилом на body: visibility наследуется,
+# поэтому видимый потомок скрытого предка рисуется — на этом весь приём и держится.
 _HIDE_OFFZONE_JS = r"""
-({zone, settingsSel, pairSel}) => {
+({zone, settingsSel, pairSel, styleId, keepAttr}) => {
   const cv = document.querySelector(zone);
   if (!cv) return -1;
-  const keep = new Set();
-  for (let e = cv; e; e = e.parentElement) keep.add(e);
-  let n = 0;
-  // Запоминаем ИМЕННО те узлы, которым поставили visibility: снятие off-zone потом пройдёт по
-  // этому списку, а не обходом всего body ещё раз (обход идёт перед каждым опционом).
-  const touched = [];
-  for (const el of document.querySelectorAll('body *')) {
-    if (keep.has(el) || el === cv || el.contains(cv)) continue;
-    el.style.setProperty('visibility', 'hidden', 'important');
-    touched.push(el);
-    n++;
-  }
-  window.__offzoneTouched = touched;
-  const show = (el) => {                                   // вернуть видимость элементу + предкам + потомкам
-    if (!el) return;
-    for (let e = el; e; e = e.parentElement) e.style.setProperty('visibility', 'visible', 'important');
-    for (const d of el.querySelectorAll('*')) d.style.setProperty('visibility', 'visible', 'important');
-  };
+  for (const el of document.querySelectorAll('[' + keepAttr + ']')) el.removeAttribute(keepAttr);
+  const keep = (el) => { if (el) el.setAttribute(keepAttr, ''); return el; };
+  keep(cv);
   // Селекторы белого списка приходят из БД (settings.binodex_settings) — теми же значениями,
   // по которым работают _ui_loaded и выбор пары. Раньше они были зашиты здесь литералами:
   // второй источник истины, и смена id в БД (как при переезде на #id) оставила бы кнопку
   // настроек скрытой → _ui_loaded=False → otc_session_dead на каждом цикле → бесконечное
   // пересоздание браузера при исправном сайте.
-  show(document.querySelector(settingsSel));               // детект кук (_ui_loaded) — обязательно видим
-  const pl = document.querySelector(pairSel);              // ярлык пары (вырезка + кнопка модалки)
-  show(pl);
-  if (pl && pl.parentElement) show(pl.parentElement);
-  return n;
+  keep(document.querySelector(settingsSel));               // детект кук (_ui_loaded) — обязательно видим
+  const pl = keep(document.querySelector(pairSel));        // ярлык пары (вырезка + кнопка модалки)
+  if (pl && pl.parentElement) keep(pl.parentElement);      // обрамление ярлыка — нужно для вырезки
+  let style = document.getElementById(styleId);
+  if (!style) {
+    style = document.createElement('style');
+    style.id = styleId;
+    (document.head || document.documentElement).appendChild(style);
+  }
+  style.textContent = 'body{visibility:hidden!important}'
+                    + '[' + keepAttr + '],[' + keepAttr + '] *{visibility:visible!important}';
+  return 1;
 }
 """
 
-# Снять off-zone: убрать наши инлайновые visibility со всех элементов (binodex inline-visibility не использует).
-# Снятие off-zone: идём по списку узлов, которым сами же ставили visibility (его кладёт
-# _HIDE_OFFZONE_JS в window.__offzoneTouched). Фолбэк на полный обход body остаётся для случая,
-# когда списка нет — страница перезагружалась, а инлайновый стиль пережил навигацию.
-_CLEAR_OFFZONE_JS = ("() => { const t = window.__offzoneTouched;"
-                     " const nodes = (t && t.length) ? t : document.querySelectorAll('body *');"
-                     " for (const el of nodes)"
-                     "  if (el && el.style && el.style.visibility) el.style.removeProperty('visibility');"
-                     " window.__offzoneTouched = null; }")
+# Снятие off-zone: убрать наш <style> и пометки. Обхода DOM тут тоже нет — querySelectorAll идёт
+# по атрибуту (это индексируемый поиск по считаным узлам), а не по 'body *'.
+_CLEAR_OFFZONE_JS = r"""
+({styleId, keepAttr}) => {
+  const style = document.getElementById(styleId);
+  if (style) style.remove();
+  for (const el of document.querySelectorAll('[' + keepAttr + ']')) el.removeAttribute(keepAttr);
+  // Хвост прежней реализации: инлайновые visibility могли остаться от кода до перехода на CSS
+  // (страница живёт через reload, стиль пережил бы навигацию) — подчищаем их один раз.
+  for (const el of document.querySelectorAll('[style*="visibility"]')) el.style.removeProperty('visibility');
+}
+"""
 
 
 async def _apply_offzone(page: Page) -> None:
@@ -992,7 +1045,8 @@ async def _apply_offzone(page: Page) -> None:
     try:
         await _eval(page, _HIDE_OFFZONE_JS,
                             {'zone': screen_zone_otc, 'settingsSel': otc_settings_btn,
-                             'pairSel': otc_select_pair})
+                             'pairSel': otc_select_pair,
+                             'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR})
     except (Exception,) as err:
         logger.info(f"OTC off-zone apply: {err}")
 
@@ -1000,7 +1054,8 @@ async def _apply_offzone(page: Page) -> None:
 async def _clear_offzone(page: Page) -> None:
     """Вернуть весь UI (на время выбора пары — модалка выбора под off-zone не кликается)."""
     try:
-        await _eval(page, _CLEAR_OFFZONE_JS)
+        await _eval(page, _CLEAR_OFFZONE_JS,
+                            {'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR})
     except (Exception,) as err:
         logger.info(f"OTC off-zone clear: {err}")
 
