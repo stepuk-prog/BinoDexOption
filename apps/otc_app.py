@@ -33,7 +33,7 @@ from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 from settings.config import screenshot_path, database, cookies_pocket_id
 from settings.constant import globe_otc_path
-from settings.timing import (TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
+from settings.timing import (EVAL_TIMEOUT, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
                              MAX_SCREENSHOT_ATTEMPTS)
 from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, load_rgba, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
@@ -884,7 +884,7 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
                            f"не включён, оставляю следующему опциону")
             break
         try:
-            if not await _indicators_menu_open(page):
+            if not await _indicators_menu_open(page, cap=_left_s(deadline, EVAL_TIMEOUT)):
                 await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
                 # Ждём факт открытия, а не «полсекунды на всякий случай» — и тем же предикатом,
                 # что и остальной файл (см. _wait_menu_open).
@@ -905,7 +905,7 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
             logger.warning(f"OTC: не удалось включить индикатор '{menu_name}': {error}")
     # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
     try:
-        if await _indicators_menu_open(page):
+        if await _indicators_menu_open(page, cap=_left_s(deadline, EVAL_TIMEOUT)):
             await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
     except (Exception,):
         pass
@@ -930,16 +930,20 @@ _SCALE_TEXT_JS = ("(sel) => { const el = document.querySelector(sel);"
                   " return el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : null; }")
 
 
-async def _scale_drifted(page: Page) -> bool:
+async def _scale_drifted(page: Page, cap: float | None = None) -> bool:
     """Сбились ли масштабы графика (свеча/график) — read-only: читаем текст открывашек, ничего не
     кликая и не открывая. Прочитать не удалось (нет кнопки / БД без значения / кнопка без текста) →
-    True: перевыставим вслепую, это безопасно (выбор уже выбранного значения ничего не меняет)."""
+    True: перевыставим вслепую, это безопасно (выбор уже выбранного значения ничего не меняет).
+
+    `cap` — потолок на ОДНО чтение (секунды), от бюджета ремонта. Проверка read-only и в норме
+    занимает единицы миллисекунд, но на подвисшей странице БЕЗ него каждое чтение ждёт
+    EVAL_TIMEOUT=10с — и «дешёвые проверки» съедали бюджет целиком, ещё до ремонта."""
     for opener, want, name in ((otc_candle_scale, CANDLE_SCALE_LABEL, 'свеча'),
                                (otc_chart_scale, CHART_SCALE_LABEL, 'график')):
         if not want:
             return True
         try:
-            current = await _eval(page, _SCALE_TEXT_JS, opener)
+            current = await _eval(page, _SCALE_TEXT_JS, opener, cap=cap)
         except (Exception,):
             return True
         if not current:
@@ -984,14 +988,19 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     if page is None:
         return
     deadline = time.monotonic() + SETUP_TOTAL_BUDGET
-    scale_drifted = await _scale_drifted(page)
-    missing = await _missing_indicators(page)   # None — прочитать не удалось: НЕ трогаем
+    # Бюджет уходит и в САМИ проверки: на живой странице это единицы миллисекунд, а на подвисшей
+    # каждое чтение без cap ждёт EVAL_TIMEOUT=10с — три таких чтения плюс два переключения
+    # off-zone выбирали 40с при объявленных 25, то есть потолок оставался номинальным даже после
+    # того, как его прокинули в ремонт (замер на модели: ×1.6 → ×1.0).
+    scale_drifted = await _scale_drifted(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    # None — прочитать не удалось: НЕ трогаем
+    missing = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     if missing:
         logger.warning(f"OTC: индикаторы графика сбились ({', '.join(n for n, _ in missing)}) — "
                        f"включаю заново")
     if not scale_drifted and not missing:
         return
-    await _clear_offzone(page)
+    await _clear_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     try:
         if scale_drifted:
             await apply_chart_scale(page, deadline=deadline)
@@ -1002,13 +1011,17 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
             if scale_drifted:
                 # Масштаб перерисовал чарт — замер ДО кликов мог устареть. Перечитываем; не
                 # прочиталось (None) — идём по прежнему замеру, это лучшее, что у нас есть.
-                refreshed = await _missing_indicators(page)
+                refreshed = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
                 if refreshed is not None:
                     missing = refreshed
             if missing:
                 await apply_chart_indicators(page, missing, deadline=deadline)
     finally:
-        await _apply_offzone(page)
+        # Восстановление off-zone — ОБЯЗАТЕЛЬНАЯ уборка (без него остаток опциона рендерится на
+        # полном CPU), поэтому идёт и при исчерпанном бюджете. Но тоже под потолком: остаток, а
+        # при нулевом остатке — пол _OP_FLOOR. На живой странице это один evaluate за единицы
+        # миллисекунд, так что 0.2с хватает с запасом; на мёртвой off-zone уже ничего не решает.
+        await _apply_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
 
 
 # ── Композит кадра OTC (глобус-файл + прозрачный канвас + ярлык пары + QR) ────────────────────────────
@@ -1191,22 +1204,30 @@ _CLEAR_OFFZONE_JS = r"""
 """
 
 
-async def _apply_offzone(page: Page) -> None:
-    """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары."""
+async def _apply_offzone(page: Page, cap: float | None = None) -> None:
+    """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары.
+
+    `cap` — потолок (секунды) для вызова под бюджетом ремонта. На живой странице это один
+    evaluate за единицы миллисекунд, поэтому даже пол в 0.2с — с огромным запасом; на мёртвой
+    off-zone всё равно ничего не спасёт (опцион уже не снимется), и ждать её десять секунд
+    незачем."""
     try:
         await _eval(page, _HIDE_OFFZONE_JS,
-                            {'zone': screen_zone_otc, 'settingsSel': otc_settings_btn,
-                             'pairSel': otc_select_pair,
-                             'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR})
+                    {'zone': screen_zone_otc, 'settingsSel': otc_settings_btn,
+                     'pairSel': otc_select_pair,
+                     'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR},
+                    cap=cap)
     except (Exception,) as err:
         logger.info(f"OTC off-zone apply: {err}")
 
 
-async def _clear_offzone(page: Page) -> None:
-    """Вернуть весь UI (на время выбора пары — модалка выбора под off-zone не кликается)."""
+async def _clear_offzone(page: Page, cap: float | None = None) -> None:
+    """Вернуть весь UI (на время выбора пары — модалка выбора под off-zone не кликается).
+    `cap` — как в _apply_offzone: потолок для вызова под бюджетом ремонта."""
     try:
         await _eval(page, _CLEAR_OFFZONE_JS,
-                            {'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR})
+                    {'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR},
+                    cap=cap)
     except (Exception,) as err:
         logger.info(f"OTC off-zone clear: {err}")
 
