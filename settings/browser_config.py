@@ -76,7 +76,7 @@ if binary:
 else:
     # OTC: FIN/TV-селекторы не используются — заглушки, чтобы импорт не падал.
     vib_all_kat = None
-    search_val = tf_menu = price_field = move_field = pop_up = pop_up2 = pop_up3 = \
+    search_val = tf_menu = price_field = move_field = \
         screen_zone = symbol = tf_link_price = tf_link = panel_toggle = \
         panel_wrap = None
 

@@ -62,11 +62,6 @@ _stop_event: asyncio.Event | None = None
 # settings.proxy_data через локальный релей. НЕ sticky навсегда: после PROXY_REPROBE_AFTER неудач
 # подряд прокси-режим сбрасывается обратно в direct (переотбивка — front-end мог восстановиться,
 # иначе нода залипает до рестарта). FIN/TradingView фолбэк не использует.
-# Текущий BrowserManager — для АВАРИЙНОЙ уборки в предохранителе внизу файла: там локальной
-# переменной bot() уже не достать, а осиротевший Firefox переживает процесс и держит lock
-# в общем кэше Playwright.
-_current_manager = None
-
 # Предохранители подъёма браузера: считаются МЕЖДУ вызовами _init_with_retry (её зовёт и
 # _recreate_browser), иначе лимит не накопится — см. комментарий внутри функции.
 _setup_streak = 0
@@ -330,13 +325,6 @@ async def _await_binodex_feed(at_start: bool) -> bool:
     return True
 
 
-def _remember_manager(manager):
-    """Запомнить текущий браузер для аварийной уборки (см. предохранитель в __main__)."""
-    global _current_manager
-    _current_manager = manager
-    return manager
-
-
 async def bot():
     """Запуск бота"""
     logger.report('🚀 Стартую')
@@ -445,7 +433,7 @@ async def bot():
             return
 
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
-    manager = _remember_manager(await _init_with_retry())
+    manager = await _init_with_retry()
     if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
         await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
         return
@@ -481,7 +469,7 @@ async def bot():
                 logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):
                 break  # SIGTERM во время ожидания
-            manager = _remember_manager(await _init_with_retry())
+            manager = await _init_with_retry()
             if manager is None:  # остановлены сигналом во время повторного init
                 break
             continue
@@ -502,7 +490,7 @@ async def bot():
                 # пересоздание это переживёт без рефреша (init разведёт: CookiesExpired / FeedOutage / SetupError).
                 # Реальный отвал/невосстановление дойдёт до cookies-канала из _recover_otc_cookies.
                 logger.warning(f'OTC: сессия не отвечает в рантайме ({reason}) — пересоздаю браузер')
-                manager = _remember_manager(await _recreate_browser(manager))
+                manager = await _recreate_browser(manager)
                 if manager is None:  # остановлены сигналом во время пересоздания
                     break
                 continue

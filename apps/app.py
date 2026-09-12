@@ -18,7 +18,7 @@ from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
 from settings.screenshot_set import _configure
 from settings.browser_config import move_field, price_field, screen_zone
-from settings.config import (option_data, binary, program_id,
+from settings.config import (option_data, binary, program_id, timeframe,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
 from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
@@ -84,10 +84,10 @@ FORWARD_MILESTONES = frozenset(m for m in PLUS_MILESTONES if m >= FORWARD_FROM)
 
 async def check_plus():
     """Проверка количества плюсов"""
-    kol_plus = await database.plus_counter(program_id=program_id)
+    kol_plus = await database.plus_counter(program_id=program_id, timeframe=timeframe, otc=not binary)
     # Различаем ДВА исхода, которые раньше сливались в «молча продолжаем»: False — сбой пула
-    # (инкремент серии потерян, веха не сработает — об этом надо знать), None/пусто — строки
-    # счётчика ещё нет (нормально для первого плюса новой программы).
+    # (инкремент серии потерян, веха не сработает — об этом надо знать), None/пусто — теперь
+    # аномалия: с 12-09-2026 запрос UPSERT'ит, то есть первый плюс сам заводит строку счётчика.
     if kol_plus is False:
         logger.warning('Счётчик плюсов не обновился (сбой БД) — серия и веха на этом цикле '
                        'потеряны; пост-веха, если он выпадал на этот плюс, не выйдет')
@@ -125,7 +125,7 @@ async def check_minus():
     # Результат ПРОВЕРЯЕМ: при сбое пула серия плюсов не обнулится, и следующий плюс догонит
     # веху с неверного числа — пост «N в ряд» уйдёт с завышенным счётом. Цикл на этом не рвём
     # (итог опциона уже опубликован), но в лог пишем.
-    if await database.minus_counter(program_id=program_id) is False:
+    if await database.minus_counter(program_id=program_id, timeframe=timeframe, otc=not binary) is False:
         logger.warning('Счётчик минусов не обновился (сбой БД) — серия плюсов НЕ обнулена, '
                        'следующая веха может уйти с завышенным числом')
     return True, ''

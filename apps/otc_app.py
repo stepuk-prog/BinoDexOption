@@ -27,7 +27,6 @@ from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
-from apps.exit_app import close_program
 from apps.otc_login import otc_inline_login
 from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
@@ -713,7 +712,8 @@ async def _missing_indicators(page: Page) -> list[tuple[str, str]] | None:
     return [(name, badge) for name, badge in OTC_CHART_INDICATORS if badge not in present]
 
 
-async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | None = None) -> None:
+async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | None = None,
+                                 deadline: float | None = None) -> None:
     """Включить индикаторы графика (OTC_CHART_INDICATORS) для OTC-кадра — рисуются binodex на том же
     канвасе, что и свечи, поэтому попадают в toDataURL-кадр (screenshot_otc) без отдельного слоя.
     Меню #setup_indicators, пункты button.chart_indicator выбираются ПО ТЕКСТУ (порядок списка
@@ -732,7 +732,11 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
 
     После кликов ОДИН раз перечитываем чипы и добираем не появившиеся: клик мог не дойти (модалка
     не открылась / пункт перерисовался), а без проверки индикатор оставался бы выключенным до
-    следующего опциона."""
+    следующего опциона.
+
+    `deadline` (monotonic) — общий бюджет ремонта от ensure_chart_setup: повторный проход самый
+    дорогой, и на залипшем UI именно он растягивал подготовку перед опционом. Бюджет вышел —
+    повтор пропускаем, кадр уйдёт как есть."""
     if not otc_indicators:  # старая БД без строки setup_indicators — тихо пропускаем
         return
     if missing is None:
@@ -740,7 +744,10 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     await _click_indicators(page, missing)
     left = await _missing_indicators(page)
     retry = [item for item in missing if left is not None and item in left]
-    if retry:
+    if retry and deadline is not None and time.monotonic() >= deadline:
+        logger.warning(f"OTC: индикаторы не включились ({', '.join(n for n, _ in retry)}), "
+                       f"бюджет ремонта исчерпан — повтор пропускаю, кадр уйдёт без них")
+    elif retry:
         logger.warning(f"OTC: индикаторы не включились с первого раза "
                        f"({', '.join(n for n, _ in retry)}) — повторяю")
         await _click_indicators(page, retry)
@@ -859,6 +866,13 @@ async def _scale_drifted(page: Page) -> bool:
     return False
 
 
+# Потолок на ВЕСЬ ремонт оформления перед опционом (проверки + клики + повторный проход).
+# Сами проверки read-only и дёшевы, но ремонт на залипшем UI (меню не открывается, чипы не
+# зажигаются) складывался в десятки секунд, а вызывается это ПЕРЕД каждым опционом — и общего
+# потолка не было (ревизия 12-09-2026).
+SETUP_TOTAL_BUDGET = 25.0   # сек
+
+
 async def ensure_chart_setup(manager: "BrowserManager") -> None:
     """Проверить оформление графика и вернуть сбитое: масштабы (свеча 30S / график H1) + индикаторы.
 
@@ -870,10 +884,16 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     В норме дёшево: обе проверки read-only (текст кнопки масштаба + чипы легенды индикаторов), UI
     трогаем ТОЛЬКО при реальном сбросе. На время кликов снимаем off-zone — под ним
     (visibility:hidden) кнопки настроек не кликаются; возвращаем в finally на любом исходе.
-    Ошибки не критичны (оформление кадра, не данные) — внутри логируются."""
+    Ошибки не критичны (оформление кадра, не данные) — внутри логируются.
+
+    Общий БЮДЖЕТ на ремонт — SETUP_TOTAL_BUDGET: проверки дёшевы, а вот ремонт (клики по меню,
+    ожидание чипов, второй проход) на залипшем UI складывался в десятки секунд ПЕРЕД каждым
+    опционом, и потолка у этого не было вовсе. Бюджет исчерпан — выходим с тем, что успели
+    поправить: кадр без индикатора хуже опоздавшего кадра, но лучше пропущенного опциона."""
     page = manager.pages.get('main')
     if page is None:
         return
+    deadline = time.monotonic() + SETUP_TOTAL_BUDGET
     scale_drifted = await _scale_drifted(page)
     missing = await _missing_indicators(page)   # None — прочитать не удалось: НЕ трогаем
     if missing:
@@ -885,7 +905,10 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     try:
         if scale_drifted:
             await apply_chart_scale(page)
-        if missing:
+        if missing and time.monotonic() >= deadline:
+            logger.warning(f'OTC: бюджет ремонта оформления {SETUP_TOTAL_BUDGET:.0f}с исчерпан на '
+                           f'масштабе — индикаторы оставляю следующему опциону')
+        elif missing:
             if scale_drifted:
                 # Масштаб перерисовал чарт — замер ДО кликов мог устареть. Перечитываем; не
                 # прочиталось (None) — идём по прежнему замеру, это лучшее, что у нас есть.
@@ -893,7 +916,7 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
                 if refreshed is not None:
                     missing = refreshed
             if missing:
-                await apply_chart_indicators(page, missing)
+                await apply_chart_indicators(page, missing, deadline=deadline)
     finally:
         await _apply_offzone(page)
 
@@ -1058,10 +1081,13 @@ _CLEAR_OFFZONE_JS = r"""
   const style = document.getElementById(styleId);
   if (style) style.remove();
   for (const el of document.querySelectorAll('[' + keepAttr + ']')) el.removeAttribute(keepAttr);
-  // Чужие инлайновые visibility НЕ трогаем: своих мы больше не ставим (всё в <style> выше), а
-  // сметать всё подряд на каждом снятии — значит регулярно стирать собственный inline-стиль
-  // binodex (MUI-переходы, легенда чарта). Хвост прежней реализации не переживает reload,
-  // через который эта страница и живёт, поэтому подчищать нечего (ревизия 12-09-2026).
+  // Единственное место, где inline-visibility ставим МЫ САМИ — ярлык пары в _label_cutout
+  // (скрыть на кадр B, вернуть в finally). Если тот возврат не отработает (таймаут зависшего
+  // рендерера, Target closed), ярлык остался бы скрытым: A == B, вырезка полностью прозрачная,
+  // и остаток опциона идёт без ярлыка молча. Поэтому лечим ТОЧЕЧНО, по своему маркеру.
+  for (const el of document.querySelectorAll('[data-otc-lbl]')) el.style.removeProperty('visibility');
+  // Чужие инлайновые visibility не трогаем: сметать всё подряд на каждом снятии — значит
+  // регулярно стирать собственный inline-стиль binodex (MUI-переходы, легенда чарта).
 }
 """
 
@@ -1307,7 +1333,11 @@ async def init_otc(manager: "BrowserManager") -> bool:
         await _goto_otc(page, url)
         await page.set_viewport_size({'width': win_x_otc, 'height': win_y_otc})
     except (Exception,) as error:
-        await close_program(manager=manager, status=1, text=f"Не загрузился binodex - {error}")
+        # НЕ close_program: init_otc зовётся из init_load → _init_with_retry, у которой своя
+        # политика (пауза, пересоздание браузера, ротация прокси, счётчик BROWSER_MAX_ATTEMPTS →
+        # EXIT_BROWSER). Выход прямо отсюда с кодом 1 обрывал транзиентный сбой навигации до
+        # первого же ретрая и прятал его от этих счётчиков (ревизия 12-09-2026).
+        logger.warning(f'OTC: не загрузился binodex ({error}) — отдаю неуспех в политику подъёма')
         return False
 
     try:
@@ -1330,7 +1360,8 @@ async def init_otc(manager: "BrowserManager") -> bool:
     except (CookiesExpired, FeedOutage, SetupError):
         raise  # наружу → init_load → _init_with_retry (счётчик релогина / ожидание фида / setup-ретраи)
     except (Exception,) as error:
-        await close_program(manager=manager, status=1, text=f'Ошибка загрузки OTC binodex - {error}')
+        # Как и выше: неуспех отдаём наверх, решение о выходе принимает _init_with_retry.
+        logger.warning(f'OTC: ошибка загрузки binodex ({error}) — отдаю неуспех в политику подъёма')
         return False
 
 

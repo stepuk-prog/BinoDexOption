@@ -94,10 +94,16 @@ class Option:  # Класс структуры хранения данных в 
             self.fill_otc(data=data)
 
     def _apply_direction(self, buy: bool):
-        """Единый блок направления опциона: buy/sell + эмодзи прогноза/котировки/итога.
-        resume выставляется в fill_binary/fill_otc отдельно (для догона он не нужен)."""
+        """Единый блок направления опциона: buy/sell + resume + эмодзи прогноза/котировки/итога.
+
+        resume выставляется ЗДЕСЬ, а не в fill_binary/fill_otc: он не декоративный, по нему
+        find_point ищет точку входа на графике, а second_message пишет «на покупку/продажу».
+        Пока он стоял только в fill_*, поздний догон (random_dogon → _apply_direction) менял
+        направление, а resume оставался от исходного опциона — кадр и текст расходились с
+        реальным прогнозом догона (ревизия 12-09-2026)."""
         self.buy = buy
         self.sell = not buy
+        self.resume = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
         if buy:
             self.message_forecast = '<i><b>ВХОД ВВЕРХ</b></i> <emoji id="5269460053651366623">📈</emoji>'
             self.message_emoji_quotation = '<emoji id="5377799276548071161">🔹</emoji>'
@@ -122,8 +128,7 @@ class Option:  # Класс структуры хранения данных в 
         self.link_val = link1 + valname[0] + valname[1] + link2 + valname[0] + valname[1]
         self.name_emoji = f"<b><i>{self.name} {data['base_emoji']}/{data['second_emoji']}</i></b>"
         buy = "ПОКУПКУ" in data['resume']
-        self.resume = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
-        self._apply_direction(buy)
+        self._apply_direction(buy)          # buy/sell + resume + эмодзи — одним местом
         # параметр Сила направления движения
         self.direction_force = f"{data['dir_force_down']}% — {data['dir_force_up']}%"
         # параметр Объемный профиль — всегда направленный эмодзи (📈/📉), не зависит от порога
@@ -150,8 +155,7 @@ class Option:  # Класс структуры хранения данных в 
         self.id_val = data['val_id']
         self.name_emoji = f"<b><i>{self.name} {data['base_emoji']}/{data['second_emoji']}</i></b>"
         buy = bool(data['buy'])
-        self.resume = "ПОКУПАТЬ" if buy else "ПРОДАВАТЬ"
-        self._apply_direction(buy)
+        self._apply_direction(buy)          # buy/sell + resume + эмодзи — одним местом
         # параметр Объемный профиль — всегда направленный эмодзи (📈/📉), не зависит от порога
         _vp_arrow = ('<emoji id="5269460053651366623">📈</emoji>' if self.buy
                      else '<emoji id="5271811599785534382">📉</emoji>')

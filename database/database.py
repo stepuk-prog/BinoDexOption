@@ -61,28 +61,38 @@ class Database(BaseDatabase):
         return await self.execute_query(sql, tf, exclude_ids, fetch_mode='all',
                                         func='option_data_tv', db='binodex')
 
-    async def plus_counter(self, program_id: int):
+    async def plus_counter(self, program_id: int, timeframe: str, otc: bool):
         """Инкремент счётчика плюсов экземпляра в binodex.option_data.counter.
-        Ключ — program_id (своя строка программы), сброс серии минусов."""
+        Ключ — program_id (PRIMARY KEY, своя строка программы), сброс серии минусов.
+
+        UPSERT, а не голый UPDATE: без строки счётчика UPDATE не задевал НИ ОДНОЙ записи и
+        возвращал пусто — вызывающий трактовал это как «строки ещё нет, нормально», и серия у
+        новой программы не начиналась НИКОГДА: ни одной вехи за всё время работы. Первый плюс
+        теперь сам заводит строку (timeframe/otc — NOT NULL, поэтому передаются явно)."""
         sql = '''
-            UPDATE option_data.counter
-            SET plus = plus + 1, minus = 0
-            WHERE program_id = $1
+            INSERT INTO option_data.counter (program_id, timeframe, otc, plus, minus)
+            VALUES ($1, $2, $3, 1, 0)
+            ON CONFLICT (program_id) DO UPDATE
+            SET plus = option_data.counter.plus + 1, minus = 0
             RETURNING plus
         '''
-        return await self.execute_query(sql, program_id, fetch_mode='row',
+        return await self.execute_query(sql, program_id, timeframe, otc, fetch_mode='row',
                                         func='plus_counter', db='binodex')
 
-    async def minus_counter(self, program_id: int):
+    async def minus_counter(self, program_id: int, timeframe: str, otc: bool):
         """Инкремент счётчика минусов экземпляра в binodex.option_data.counter.
-        Ключ — program_id (своя строка программы), сброс серии плюсов."""
+        Ключ — program_id (PRIMARY KEY, своя строка программы), сброс серии плюсов.
+
+        UPSERT по той же причине, что и plus_counter: без строки UPDATE молча не делал ничего.
+        Здесь это тише и опаснее — «серия плюсов обнулена» считалось бы выполненным."""
         sql = '''
-            UPDATE option_data.counter
-            SET plus = 0, minus = minus + 1
-            WHERE program_id = $1
+            INSERT INTO option_data.counter (program_id, timeframe, otc, plus, minus)
+            VALUES ($1, $2, $3, 0, 1)
+            ON CONFLICT (program_id) DO UPDATE
+            SET plus = 0, minus = option_data.counter.minus + 1
             RETURNING minus
         '''
-        return await self.execute_query(sql, program_id, fetch_mode='row',
+        return await self.execute_query(sql, program_id, timeframe, otc, fetch_mode='row',
                                         func='minus_counter', db='binodex')
 
     async def get_forum_message(self, forum_id: int, topic_id: int):
