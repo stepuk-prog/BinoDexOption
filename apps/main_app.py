@@ -279,6 +279,13 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
 
     option_data.set_option_time()  # FIN/OTC 3m/5m: рандомное время экспирации + синхронизация name_tf
     option_data.levels()
+    # Старт опциона в лог: пара / ТФ / направление / цена входа / экспирация. Первая половина
+    # пары «старт → итог» (вторая — в app.exit_main): без неё по info.log виден только заход
+    # в main(), а какой опцион ушёл в тему и чем кончился — нет. Место выбрано после
+    # set_option_time: здесь ВСЕ поля уже заполнены, а впереди самое долгое ожидание.
+    logger.info('▶️ Опцион %s %s %s: вход %s, экспирация %sс', option_data.name,
+                option_data.timeframe, option_data.resume, option_data.price,
+                option_data.option_time)
     message_text = second_message()
 
     ok, err = await _try_send(screenshot_path, message_text, 'второе сообщение')
