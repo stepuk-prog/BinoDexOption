@@ -5,7 +5,7 @@ from database import Database
 from pyrogram import Client
 from classes.Option_class import Option
 from logs import init_logger
-from settings._bootstrap import bootstrap_fetch
+from settings._bootstrap import bootstrap_fetch, bootstrap_fetch_many
 from settings.env import parse_bool, req_int, opt_int, req_str  # единые безопасные парсеры env
 from settings.logger_config import file_suffix          # единый суффикс {tf}_{bin|otc}
 
@@ -61,6 +61,22 @@ main_cycle_pause_max = opt_int("MAIN_CYCLE_PAUSE_MAX", 120)
 # Нормализуем порядок (как у translocation): перевёрнутая пара MIN>MAX уронила бы
 # random.randint в app.time_sleep — то есть падение процесса в ГЛАВНОМ цикле, вне try.
 main_cycle_pause_min, main_cycle_pause_max = sorted((main_cycle_pause_min, main_cycle_pause_max))
+# --- Всё, что нужно с базы program на старте, — ОДНИМ коннектом -------------------------------
+# Каждый bootstrap_fetch — отдельный asyncpg.connect через PgBouncer со своим event loop.
+# Креды юзербота и (в FIN-режиме) куки TV известны одновременно — оба зависят только от строки
+# настроек выше. OTC-куки лежат в binodex (storage_state Privy) — это отдельный коннект ниже,
+# как и имя владельца OTC-кук: оно зависит от env-оверрайда COOK_OTC, который разбирается дальше.
+_program_queries, _keys = [], []
+if not test:
+    _program_queries.append(('SELECT api_id, api_hash, session_string FROM telegram.telegram '
+                             'WHERE id_telegram = $1', (option['user_bot'],), 'row'))
+    _keys.append('creds')
+if binary:
+    _program_queries.append(('SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1',
+                             (option['cookies_tv'],), 'val'))
+    _keys.append('cookies_tv')
+_program_rows = dict(zip(_keys, bootstrap_fetch_many('program', _program_queries)))
+
 if test:
     # Тест (§2): файловая session под files/ (TEST_SESSION_FILE), креды/канал — из .env.
     channel_id = req_int("TEST_CHANNEL")
@@ -70,12 +86,7 @@ if test:
     session_string = None
 else:
     channel_id = option['channel_id']
-    # Креды юзербота — из Program (telegram.telegram), таблицу не переносим.
-    creds = bootstrap_fetch(
-        'program',
-        'SELECT api_id, api_hash, session_string FROM telegram.telegram '
-        'WHERE id_telegram = $1',
-        option['user_bot'], fetch_mode='row')
+    creds = _program_rows['creds']
     if not creds:
         raise ValueError(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
     api_id = creds['api_id']
@@ -95,9 +106,7 @@ user_bot_id = option['user_bot']
 # OTC (binodex) — storage_state {cookies, origins} из binodex.cookies.binodex_cookies
 # (Privy держит сессию в localStorage, одних cookies мало → new_context(storage_state=...)).
 if binary:
-    cookies = bootstrap_fetch(
-        'program', 'SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1',
-        option['cookies_tv'], fetch_mode='val')
+    cookies = _program_rows['cookies_tv']   # прочитаны выше, вместе с кредами юзербота
 else:
     cookies = bootstrap_fetch(
         'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',

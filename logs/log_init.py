@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import time
+from collections import deque
 from logging import Handler, LogRecord, handlers
 
 from aiogram import Bot
@@ -96,6 +98,22 @@ TG_MESSAGE_LIMIT = 3900
 _TRUNCATED_MARK = '\n\n…[обрезано, полный текст — в error.log]'
 
 
+# --- Анти-спам TG-хендлера ---------------------------------------------------------------
+# У самого хендлера защиты не было вовсе, хотя именно он упирается в лимит Telegram (~20
+# сообщений в минуту на группу), а темы ошибок/отчётов делятся между пятью инстансами этой
+# программы и английской парой. Цикл, севший на повторяющейся ошибке, выбирал лимит за минуту
+# и топил чужие алерты вместе со своими.
+#
+# Две ступени. Дедуп — одинаковая запись (уровень + место + текст) уходит не чаще раза в окно,
+# а подавленные считаются и показываются в следующей отправке: «(+N за 5 мин)», то есть частота
+# видна, а лента не забита. Потолок частоты — на случай когда сообщения РАЗНЫЕ: лучше потерять
+# часть алертов, чем упереться в лимит и не доставить ни одного (полный текст всегда остаётся
+# в файловых логах). Считается ОТДЕЛЬНО на каждый адрес — лимит у Telegram на чат.
+TG_DEDUP_WINDOW = 300    # сек между повторами ОДНОЙ и той же записи
+TG_RATE_LIMIT = 12       # сообщений за окно ниже на один адрес (лимит группы ~20/мин)
+TG_RATE_WINDOW = 60      # сек
+
+
 class TelegramBotHandler(Handler):  # Handler для логера, отправляющий сообщение в Telegram (async)
     def __init__(self):
         super().__init__()
@@ -105,6 +123,12 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             f'‼️Сбой {frame}\n\n %(filename)s [LINE:%(lineno)d] '
             '#%(levelname)-8s [%(asctime)s] %(message)s')
         self.msg_fmt = logging.Formatter(f'📫{frame}\n\n %(message)s')
+        # Анти-спам: когда запись с таким ключом уходила последний раз и сколько её повторов
+        # подавлено с тех пор (счётчик — вместе со своей меткой времени, см. _note_suppressed);
+        # плюс окно частоты, своё на каждый адрес.
+        self._last_sent: dict[tuple, float] = {}
+        self._suppressed: dict[tuple, tuple[int, float]] = {}
+        self._sent_at: dict[tuple, deque] = {}
 
     async def _send_message(self, chat_id: int, text: str, thread_id: int | None = None):
         """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно).
@@ -132,6 +156,67 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
         _pending_sends.add(task)
         task.add_done_callback(_pending_sends.discard)
 
+    def _route(self, record: LogRecord):
+        """Уровень → (формат, адрес) или None, если уровень не для Telegram. Одно место на обе
+        стороны: адрес нужен и анти-спаму (лимит Telegram считается НА ЧАТ), и самой отправке."""
+        if record.levelno >= ERROR_LEVEL:
+            return self.err_fmt, error_dest
+        if record.levelno == SESSION_LEVEL:
+            # Критичный отвал session — в выделенный канал, форматом-алертом.
+            return self.err_fmt, session_dest
+        if record.levelno == PREMIUM_LEVEL:
+            # Premium юзербота — своя тема форума ошибок (§3.5), формат алерта.
+            return self.err_fmt, premium_dest
+        if record.levelno == REPORT_LEVEL:
+            return self.msg_fmt, message_dest
+        if record.levelno == COOKIES_LEVEL:
+            return self.msg_fmt, cookies_dest
+        return None
+
+    def _note_suppressed(self, key: tuple, now: float) -> None:
+        """Учесть подавленный повтор. Счётчик хранится ВМЕСТЕ с меткой времени: ключ,
+        срезанный потолком частоты, в `_last_sent` не попадает вовсе (там только реально
+        отправленные), поэтому прунинг по чужой метке такую запись не видел бы никогда."""
+        count, _ = self._suppressed.get(key, (0, now))
+        self._suppressed[key] = (count + 1, now)
+
+    def _anti_spam(self, record: LogRecord, dest: tuple) -> str | None:
+        """Пропустить запись в TG или подавить. Возвращает суффикс к тексту (пустой или
+        «(+N за …)»), либо None — не отправлять. Синхронный и зовётся из emit: решение
+        принимается ДО create_task, иначе подавленные записи всё равно плодили бы задачи.
+        Логировать отсюда нельзя — это сам логгер."""
+        now = time.monotonic()
+        key = (record.levelno, record.module, record.lineno, record.getMessage()[:200])
+
+        # Ключи почти всегда уникальны (в тексте пары, цены, строки исключений), а процесс
+        # живёт неделями — без прунинга словари росли бы всё это время. Чистим КАЖДЫЙ по его
+        # СОБСТВЕННОЙ метке.
+        for stale in [k for k, ts in self._last_sent.items() if now - ts > TG_DEDUP_WINDOW]:
+            del self._last_sent[stale]
+        for stale in [k for k, (_, ts) in self._suppressed.items() if now - ts > TG_DEDUP_WINDOW]:
+            del self._suppressed[stale]
+
+        last = self._last_sent.get(key)
+        if last is not None and now - last < TG_DEDUP_WINDOW:
+            self._note_suppressed(key, now)
+            return None
+
+        bucket = self._sent_at.setdefault(dest, deque())
+        while bucket and now - bucket[0] > TG_RATE_WINDOW:
+            bucket.popleft()
+        if len(bucket) >= TG_RATE_LIMIT:
+            # Молча роняем — сказать об этом было бы ещё одним сообщением в ту же
+            # переполненную минуту. В файловых логах запись есть целиком.
+            self._note_suppressed(key, now)
+            return None
+
+        self._last_sent[key] = now
+        bucket.append(now)
+        skipped, _ = self._suppressed.pop(key, (0, now))
+        if not skipped:
+            return ''
+        return f'\n\n(+{skipped} таких же за {TG_DEDUP_WINDOW // 60} мин — см. лог инстанса)'
+
     def emit(self, record: LogRecord):
         try:
             loop = asyncio.get_running_loop()
@@ -139,24 +224,16 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             # Нет запущенного event loop - пропускаем отправку
             return
 
+        route = self._route(record)
+        if route is None:
+            return
+        fmt, dest = route
+        suffix = self._anti_spam(record, dest)
+        if suffix is None:
+            return  # подавлено дедупом или потолком частоты — запись уже легла в файл
         try:
-            if record.levelno >= ERROR_LEVEL:
-                self.setFormatter(self.err_fmt)
-                self._spawn_send(loop, error_dest, self.format(record=record))
-            elif record.levelno == SESSION_LEVEL:
-                # Критичный отвал session — в выделенный канал, форматом-алертом.
-                self.setFormatter(self.err_fmt)
-                self._spawn_send(loop, session_dest, self.format(record=record))
-            elif record.levelno == PREMIUM_LEVEL:
-                # Premium юзербота — своя тема форума ошибок (§3.5), формат алерта.
-                self.setFormatter(self.err_fmt)
-                self._spawn_send(loop, premium_dest, self.format(record=record))
-            elif record.levelno == REPORT_LEVEL:
-                self.setFormatter(self.msg_fmt)
-                self._spawn_send(loop, message_dest, self.format(record=record))
-            elif record.levelno == COOKIES_LEVEL:
-                self.setFormatter(self.msg_fmt)
-                self._spawn_send(loop, cookies_dest, self.format(record=record))
+            self.setFormatter(fmt)
+            self._spawn_send(loop, dest, self.format(record=record) + suffix)
         except (Exception,) as error:
             print(f'Сбой отправки сообщения в Telegram — {error}')
 

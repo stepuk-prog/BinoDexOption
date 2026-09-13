@@ -304,9 +304,17 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
         return False, error_text
 
 
-async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
+# Потолок на FIN-кадр целиком. У каждого шага свой таймаут, но дерево вложенности глубокое:
+# close_dom_popups (несколько evaluate на попытку) сидит внутри get_price, а тот — внутри кадра,
+# и в сумме худший случай уходит в минуты. У OTC-ветки такой потолок есть
+# (otc_app.SHOT_TOTAL_BUDGET), у FIN не было. Промах стоит дорого: неудачный кадр в FIN уводит
+# в рестарт (fall=True), поэтому берём с запасом над суммой внутренних ожиданий, а не впритык.
+SCREENSHOT_TOTAL_TIMEOUT = 120   # сек
+
+
+async def _screenshot_steps(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
     """
-    Снятие скриншота с окна main.
+    Шаги снятия кадра. Наружу — через screenshot() с общим потолком.
     :param manager: менеджер браузера
     :param take_shot: False — только цена без скриншота; True — снимаем скрин и кладём QR.
     :param qr: кортеж (qr110, qr85) — QR-оверлеи
@@ -359,6 +367,21 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
             logger.warning(error_text)
         else:
             logger.error(error_text)
+        return False, error_text
+
+
+async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
+    """Снятие скриншота с окна main под общим потолком SCREENSHOT_TOTAL_TIMEOUT.
+
+    Пропустить кадр дешевле, чем держать цикл минутами на залипшем рендерере: прогноз с
+    опозданием всё равно уже не прогноз, а вызывающий (main_app) сам решит судьбу итерации."""
+    try:
+        return await asyncio.wait_for(_screenshot_steps(manager, take_shot, qr),
+                                      timeout=SCREENSHOT_TOTAL_TIMEOUT)
+    except (asyncio.TimeoutError, TimeoutError):
+        error_text = (f'Кадр не уложился в {SCREENSHOT_TOTAL_TIMEOUT}с — '
+                      f'пропускаю (TV не отвечает?)')
+        logger.error(error_text)
         return False, error_text
 
 

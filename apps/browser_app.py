@@ -11,6 +11,7 @@ from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
 from apps.browser_io import eval_js
+from apps.close_ui import CLOSE_SWEEP_SELECTORS, with_close_config
 from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
@@ -131,7 +132,7 @@ _AT_POINT_JS = """
 # Закрывашку ищем обобщённо: data-name / aria-label / title / класс / подпись кнопки. Хеши TV
 # проворачивает при каждой выкатке фронта, а эти признаки — нет. Жмём через el.click() прямо в
 # DOM: сама кнопка закрытия может быть накрыта соседним оверлеем, и обычный клик до неё не дойдёт.
-_DISMISS_JS = """
+_DISMISS_JS = with_close_config("""
 (selector) => {
   const target = document.querySelector(selector);
   if (!target) return {state: 'no-target'};
@@ -144,18 +145,14 @@ _DISMISS_JS = """
     top = top.parentElement;
   }
   const visible = (el) => !!(el.offsetWidth || el.offsetHeight);
-  const BY_ATTR = ['[data-name*="close" i]',
-                   'button[aria-label*="\u0417\u0430\u043a\u0440" i]', 'button[aria-label*="close" i]',
-                   'button[title*="\u0417\u0430\u043a\u0440" i]', 'button[title*="close" i]',
-                   'button[class*="close" i]', 'button[class*="navButton-"]'];
+  const BY_ATTR = __CLOSE_ATTR_SELECTORS__;
   for (const sel of BY_ATTR) {
     for (const btn of top.querySelectorAll(sel)) {
       if (!visible(btn)) continue;
       try { btn.click(); return {state: 'closed', by: sel}; } catch (e) {}
     }
   }
-  const WORDS = ['\u0437\u0430\u043a\u0440\u044b\u0442\u044c', 'close', '\u043d\u0435 \u0441\u0435\u0439\u0447\u0430\u0441',
-                 '\u043f\u043e\u0437\u0436\u0435', '\u043e\u0442\u043c\u0435\u043d\u0430', '\u043f\u043e\u043d\u044f\u0442\u043d\u043e', 'ok', '\u043e\u043a'];
+  const WORDS = __CLOSE_WORDS__;
   for (const btn of top.querySelectorAll('button,[role="button"]')) {
     if (!visible(btn)) continue;
     if (WORDS.includes((btn.innerText || '').trim().toLowerCase())) {
@@ -166,7 +163,7 @@ _DISMISS_JS = """
           x: top.getBoundingClientRect().x, y: top.getBoundingClientRect().y,
           html: top.outerHTML.slice(0, 1200)};
 }
-"""
+""")
 
 # DOM помехи пишем в лог ОДИН раз за прогон: следующий такой случай надо разбирать по логу, а не
 # поднимать разведку заново (10-09-2026 на это ушло полдня). Тем же флагом глушим и рассказ об
@@ -277,8 +274,7 @@ async def click_guarded(page: Page, selector: str, timeout: int = 10000) -> None
 async def _sweep_close_buttons(page: Page) -> None:
     """Best-effort крестик на страницах БЕЗ точки-ориентира (вкладка binodex и т.п.).
     Прежнее поведение close_dom_popups: жмём видимый крестик, ошибку глотаем."""
-    for css in ('button[class*="closeButton" i]', '[data-name*="close" i]',
-                'button[aria-label*="\u0417\u0430\u043a\u0440" i]'):
+    for css in CLOSE_SWEEP_SELECTORS:
         try:
             item = page.locator(css).first
             if await item.is_visible():
@@ -297,7 +293,10 @@ async def _sweep_close_buttons(page: Page) -> None:
 # `#overlap-manager-root` — штатный контейнер TV для модалок/тултипов — и жмём кнопку закрытия
 # у тех, чей прямоугольник пересекает зону кадра. Зона приходит XPath'ом (так она лежит в БД),
 # поэтому селектор резолвим и через document.evaluate.
-_ZONE_CLEAR_JS = """
+# r"""— в теле JS есть слеш-последовательности (регулярки со \s и родня): для Python
+# это НЕ escape, он оставляет их как есть, но с 3.12 предупреждает SyntaxWarning,
+# а дальше обещает SyntaxError.
+_ZONE_CLEAR_JS = with_close_config(r"""
 (selector) => {
   const resolve = (sel) => {
     if (sel.startsWith('/') || sel.startsWith('(')) {
@@ -314,17 +313,21 @@ _ZONE_CLEAR_JS = """
   const hits = (r) => r.width && r.height &&
       r.x < z.x + z.width && r.x + r.width > z.x &&
       r.y < z.y + z.height && r.y + r.height > z.y;
-  const WORDS = ['\u043f\u043e\u043d\u044f\u0442\u043d\u043e', 'got it', 'ok', '\u043e\u043a',
-                 '\u0437\u0430\u043a\u0440\u044b\u0442\u044c', 'close',
-                 '\u043d\u0435 \u0441\u0435\u0439\u0447\u0430\u0441', '\u043f\u043e\u0437\u0436\u0435',
-                 '\u043e\u0442\u043c\u0435\u043d\u0430', '\u043f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c'];
+  const WORDS = __CLOSE_WORDS__;
   const label = (el) => ((el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '')
                          .trim().toLowerCase());
 
   // 1) Прямой путь: видимая кнопка ВНУТРИ зоны кадра с подписью «Понятно»/«Got it»/крестиком.
   // Контейнер при этом не важен — TV кладёт онбординг то в overlap-manager-root, то отдельным
   // слоем, и привязка к контейнеру уже один раз промахнулась (11-09-2026).
-  for (const btn of document.querySelectorAll('button,[role="button"],[data-name*="close" i]')) {
+  // Кандидаты: кнопки + всё, что помечено атрибутными признаками закрывашки. Набор берётся
+  // из apps/close_ui, а не пишется здесь: иначе новый маркер расширял бы выборку в одних
+  // чистках и не расширял в этой. (Имя плейсхолдера в комментарии не упоминаем — подстановка
+  // текстовая и заменила бы его прямо в тексте.)
+  const CANDIDATES = ['button', '[role="button"]'].concat(__CLOSE_ATTR_SELECTORS__).join(',');
+  // Те же подстроки-признаки, что в селекторах выше, но регуляркой — для уже найденной кнопки.
+  const ATTR_RE = new RegExp('__CLOSE_ATTR_PATTERN__', 'i');
+  for (const btn of document.querySelectorAll(CANDIDATES)) {
     if (!visible(btn) || !hits(btn.getBoundingClientRect())) continue;
     // Кнопка ВНУТРИ самого чарта — не наша: легенда индикаторов TV живёт там же, и стоит
     // переименоваться её aria-label, как мы начали бы удалять индикаторы вместо попапа.
@@ -332,8 +335,8 @@ _ZONE_CLEAR_JS = """
     if (zone.contains(btn)) continue;
     const txt = label(btn);
     const isClose = WORDS.includes(txt) ||
-        /close|\u0437\u0430\u043a\u0440/i.test(btn.getAttribute('data-name') || '') ||
-        /close|\u0437\u0430\u043a\u0440/i.test(btn.getAttribute('aria-label') || '');
+        ATTR_RE.test(btn.getAttribute('data-name') || '') ||
+        ATTR_RE.test(btn.getAttribute('aria-label') || '');
     if (!isClose) continue;
     // Не жмём то, что лежит в самом графике (панель инструментов, легенда): берём только
     // кнопки с плавающим предком. ВАЖНО: position:fixed засчитываем БЕЗ требования z-index —
@@ -368,7 +371,7 @@ _ZONE_CLEAR_JS = """
   }
   return {state: 'clean', probe: seen.join(' ;; ').slice(0, 700)};
 }
-"""
+""")
 
 
 async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3) -> None:
@@ -439,14 +442,9 @@ _BINODEX_APPJS_RE = re.compile(r"^https?://(?:[a-z0-9-]+\.)?binodex\.app/assets/
 # (в отличие от evaluate, который сам вызывает функцию), поэтому стрелочная функция лишь вычислялась в
 # значение и НИКОГДА не выполнялась — скрипт инжектился, но не работал. Обёртка (…)() запускает тело и
 # держит свои const'ы в собственной области видимости (не течём в глобалы страницы).
-TV_POPUP_SUPPRESS_JS = """
+TV_POPUP_SUPPRESS_JS = with_close_config("""
 (() => {
-    const closeSelectors = [
-        'button[class*="closeButton"]',
-        'button[class*="close-button"]',
-        '[aria-label="Close"]',
-        '[aria-label="Закрыть"]',
-    ];
+    const closeSelectors = __CLOSE_SWEEP_SELECTORS__;
 
     // Попытка закрыть попап внутри элемента
     const tryClose = (el) => {
@@ -498,7 +496,7 @@ TV_POPUP_SUPPRESS_JS = """
         }, 200);
     }
 })();
-"""
+""")
 
 # JavaScript для маскировки автоматизации (Firefox-совместимый).
 # IIFE — по той же причине, что и у TV_POPUP_SUPPRESS_JS (см. комментарий выше): без вызова тело не

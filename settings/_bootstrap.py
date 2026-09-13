@@ -19,7 +19,7 @@ from settings.database_config import (DB_NAMES, init_json_codec, pg_host,
                                       pg_password, pg_port, pg_user)
 
 
-async def _fetch(db: str, sql: str, args, fetch_mode: str):
+async def _connect(db: str):
     conn = await asyncpg.connect(
         user=pg_user, password=pg_password, host=pg_host, port=pg_port,
         database=DB_NAMES[db], statement_cache_size=0,
@@ -27,23 +27,41 @@ async def _fetch(db: str, sql: str, args, fetch_mode: str):
         command_timeout=15,   # таймаут самого запроса — не зависнуть на старте навсегда
     )
     await init_json_codec(conn)
+    return conn
+
+
+async def _run_one(conn, sql: str, args, fetch_mode: str):
+    if fetch_mode == 'row':
+        return await conn.fetchrow(sql, *args)
+    if fetch_mode == 'val':
+        return await conn.fetchval(sql, *args)
+    return await conn.fetch(sql, *args)
+
+
+async def _fetch_many(db: str, queries):
+    conn = await _connect(db)
     try:
-        if fetch_mode == 'row':
-            return await conn.fetchrow(sql, *args)
-        if fetch_mode == 'val':
-            return await conn.fetchval(sql, *args)
-        return await conn.fetch(sql, *args)
+        return [await _run_one(conn, sql, args, mode) for sql, args, mode in queries]
     finally:
-        # С потолком: закрытие идёт в finally на СТАРТЕ (логгера/сигналов ещё нет), и зависший
-        # close полумёртвого соединения подвесил бы процесс молча, до всякой диагностики.
-        await conn.close(timeout=5)
+        await conn.close()
+
+
+def bootstrap_fetch_many(db: str, queries):
+    """Несколько стартовых запросов к ОДНОЙ базе за ОДИН коннект.
+
+    `queries` — последовательность (sql, args, fetch_mode); результаты возвращаются в том же
+    порядке. Каждый bootstrap_fetch — отдельный asyncpg.connect через PgBouncer плюс свой
+    event loop. Зависимые запросы (сначала узнать id, потом строку по нему) по-прежнему идут
+    отдельными вызовами — объединяется только то, что известно разом.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_fetch_many(db, list(queries)))
+    finally:
+        loop.close()
 
 
 def bootstrap_fetch(db: str, sql: str, *args, fetch_mode: str = 'all'):
-    """Синхронно (блокирующие) выполнить запрос на старте. db — 'program' | 'binodex'.
+    """Синхронно (блокирующе) выполнить ОДИН запрос на старте. db — 'program' | 'binodex'.
     fetch_mode — 'row' | 'val' | 'all'."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_fetch(db, sql, args, fetch_mode))
-    finally:
-        loop.close()
+    return bootstrap_fetch_many(db, [(sql, args, fetch_mode)])[0]
