@@ -184,9 +184,18 @@ async def exit_main(channel_mess: bool,
         # захода в main(), и по логу нельзя было ни посчитать опционы, ни разобрать минус.
         if result:
             outcome = 'ПЛЮС' if option_data.plus else ('ВОЗВРАТ' if option_data.vozvrat else 'МИНУС')
-            logger.info('🏁 Опцион %s %s: %s — вход %s, итог %s%s', option_data.name,
-                        option_data.resume, outcome, option_data.price, option_data.itg_price,
-                        ' (после догона)' if option_data.dgn else '')
+            # Направление и цена входа берутся из option_data, а её КАЖДЫЙ догон перезаписывает
+            # (dogon_settings ставит своё buy/sell и свой price). Поэтому после догонов это
+            # значения ПОСЛЕДНЕГО лега, а не исходного опциона — так и пишем. Иначе строка
+            # врала: опцион начинался ПОКУПАТЬ по 0.6759, а итог сообщал «ПРОДАВАТЬ, вход
+            # 0.67544» (живой пример 13-09-2026 в английской ветке).
+            if option_data.dgn:
+                logger.info('🏁 Опцион %s: %s — последний лег %s, вход %s, итог %s (после догонов)',
+                            option_data.name, outcome, option_data.resume,
+                            option_data.price, option_data.itg_price)
+            else:
+                logger.info('🏁 Опцион %s %s: %s — вход %s, итог %s', option_data.name,
+                            option_data.resume, outcome, option_data.price, option_data.itg_price)
         # plus — именно «опцион закончился ПЛЮСОМ», а не «цикл прошёл без баг-картинки». Раньше
         # тут стояло plus = True, то есть флаг поднимался и на минусе; по нему FIN решает,
         # закрывать ли неделю (main.py: «неделю закрываем только на плюсовом опционе»), и
