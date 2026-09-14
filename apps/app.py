@@ -22,7 +22,7 @@ from classes.Option_class import Option
 from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
 from settings import qr110_x, qr110_y, qr85_x, qr85_y, paste_overlay
-from settings.screenshot_set import _configure
+from settings.screenshot_set import configure_images
 from settings.browser_config import move_field, price_field, screen_zone
 from settings.config import (option_data, binary, program_id, timeframe,
                             shot_path, screenshot_path, database,
@@ -39,7 +39,7 @@ logger = init_logger(__name__)
 
 # Логгер семьи для общего пакета (свои уровни, файлы по уровням, отправка в Telegram):
 # binocore о нём не знает и без этого писал бы в стандартный logging мимо наших файлов.
-_configure(logger=logger)
+configure_images(logger=logger)
 
 
 

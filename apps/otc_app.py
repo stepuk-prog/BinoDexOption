@@ -394,7 +394,7 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         logger.warning(f"OTC: ошибка выбора пары {pair} — {error}")
         return False
     finally:
-        await _apply_offzone(page)   # off-zone восстанавливается на ЛЮБОМ исходе (успех/неудача/ошибка)
+        await apply_offzone(page)   # off-zone восстанавливается на ЛЮБОМ исходе (успех/неудача/ошибка)
 
 
 async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
@@ -469,7 +469,7 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
     return out
 
 
-async def _ui_loaded(page: Page, timeout: float) -> bool:
+async def ui_loaded(page: Page, timeout: float) -> bool:
     """True, если торговый UI binodex полностью прогрузился — кнопка настроек аккаунта
     (otc_settings_btn) видна в пределах timeout. На сплеше (зависший Privy-токен без редиректа)
     этой кнопки нет, хотя кнопка выбора пары может присутствовать — поэтому это точный DOM-маркер
@@ -1093,7 +1093,7 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
         # полном CPU), поэтому идёт и при исчерпанном бюджете. Но тоже под потолком: остаток, а
         # при нулевом остатке — пол _OP_FLOOR. На живой странице это один evaluate за единицы
         # миллисекунд, так что 0.2с хватает с запасом; на мёртвой off-zone уже ничего не решает.
-        await _apply_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+        await apply_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
 
 
 # ── Композит кадра OTC (глобус-файл + прозрачный канвас + ярлык пары + QR) ────────────────────────────
@@ -1231,7 +1231,7 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
 # ── off-zone оптимизация CPU (~40→~22%): скрыть UI вне зоны скрина ─────────────────────────────────
 # Весь UI вне канваса (правое торговое меню, аккаунт-бар, сайдбар) рендерится зря (в кадр через
 # toDataURL не попадает) — прячем `visibility:hidden`, экономия ~17 пт. В БЕЛОМ СПИСКЕ остаются
-# видимыми #setup_settings_open (по нему _ui_loaded детектит отвал кук в рантайме — НЕЛЬЗЯ прятать!)
+# видимыми #setup_settings_open (по нему ui_loaded детектит отвал кук в рантайме — НЕЛЬЗЯ прятать!)
 # и ярлык пары (нужен для вырезки + это кнопка открытия модалки). Применяем после выбора пары и в
 # init_otc; СНИМАЕМ на время select_otc_pair (модалка выбора — вне зоны, под off-zone не кликается).
 _OFFZONE_STYLE_ID = '__offzone_style'
@@ -1250,11 +1250,11 @@ _HIDE_OFFZONE_JS = r"""
   const keep = (el) => { if (el) el.setAttribute(keepAttr, ''); return el; };
   keep(cv);
   // Селекторы белого списка приходят из БД (settings.binodex_settings) — теми же значениями,
-  // по которым работают _ui_loaded и выбор пары. Раньше они были зашиты здесь литералами:
+  // по которым работают ui_loaded и выбор пары. Раньше они были зашиты здесь литералами:
   // второй источник истины, и смена id в БД (как при переезде на #id) оставила бы кнопку
-  // настроек скрытой → _ui_loaded=False → otc_session_dead на каждом цикле → бесконечное
+  // настроек скрытой → ui_loaded=False → otc_session_dead на каждом цикле → бесконечное
   // пересоздание браузера при исправном сайте.
-  keep(document.querySelector(settingsSel));               // детект кук (_ui_loaded) — обязательно видим
+  keep(document.querySelector(settingsSel));               // детект кук (ui_loaded) — обязательно видим
   const pl = keep(document.querySelector(pairSel));        // ярлык пары (вырезка + кнопка модалки)
   if (pl && pl.parentElement) keep(pl.parentElement);      // обрамление ярлыка — нужно для вырезки
   let style = document.getElementById(styleId);
@@ -1287,7 +1287,7 @@ _CLEAR_OFFZONE_JS = r"""
 """
 
 
-async def _apply_offzone(page: Page, cap: float | None = None) -> None:
+async def apply_offzone(page: Page, cap: float | None = None) -> None:
     """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары.
 
     `cap` — потолок (секунды) для вызова под бюджетом ремонта. На живой странице это один
@@ -1306,7 +1306,7 @@ async def _apply_offzone(page: Page, cap: float | None = None) -> None:
 
 async def _clear_offzone(page: Page, cap: float | None = None) -> None:
     """Вернуть весь UI (на время выбора пары — модалка выбора под off-zone не кликается).
-    `cap` — как в _apply_offzone: потолок для вызова под бюджетом ремонта."""
+    `cap` — как в apply_offzone: потолок для вызова под бюджетом ремонта."""
     try:
         await _eval(page, _CLEAR_OFFZONE_JS,
                     {'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR},
@@ -1477,7 +1477,7 @@ async def _verify_otc_ready(page: Page) -> None:
         await page.locator(otc_select_pair).first.wait_for(state='visible', timeout=TIMEOUT_LONG)
     except (Exception,):
         await _raise_ui_dead(page, 'кнопка выбора пары не появилась')
-    if not await _ui_loaded(page, UI_READY_TIMEOUT):
+    if not await ui_loaded(page, UI_READY_TIMEOUT):
         await _raise_ui_dead(page, 'нет кнопки настроек аккаунта (завис на сплеше)')
     # Авторитетная перепроверка ПОСЛЕ оседания UI: Privy за время загрузки мог очистить протухший
     # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
@@ -1488,7 +1488,7 @@ async def _verify_otc_ready(page: Page) -> None:
     await apply_chart_scale(page)
     await apply_chart_indicators(page)
     # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
-    await _apply_offzone(page)
+    await apply_offzone(page)
     # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.
     tracker = get_price_tracker()
     for _ in range(20):
@@ -1609,7 +1609,7 @@ async def _reload_otc_once(page: Page) -> bool:
     except (Exception,):
         logger.warning('OTC: после reload не появилась кнопка выбора пары (завис на сплеше)')
         return False
-    if not await _ui_loaded(page, UI_READY_TIMEOUT):
+    if not await ui_loaded(page, UI_READY_TIMEOUT):
         logger.warning('OTC: после reload нет кнопки настроек аккаунта (завис на сплеше)')
         return False
     return True
@@ -1619,7 +1619,7 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
     """Перезагрузка binodex перед каждым новым опционом (вызов из main_app). binodex
     периодически выкатывает новую версию фронта и показывает баннер «Доступна новая версия.
     Обновите страницу», зависая на сплеше при ЖИВЫХ URL (/trade держится), UI и WS — отвал-кук-
-    детект (on_trade/_ui_loaded/feed_dead) такое НЕ ловит. Регулярный reload подхватывает новую
+    детект (on_trade/ui_loaded/feed_dead) такое НЕ ловит. Регулярный reload подхватывает новую
     версию заранее, до того как чарт зависнет. WS-перехват НЕ переустанавливаем: page.on('websocket')
     переживает reload (повторная подписка задвоила бы хендлеры), старый WS закроется → новый
     откроется → трекер сам перецепится.
@@ -1673,7 +1673,7 @@ async def otc_session_dead(manager: "BrowserManager") -> tuple[bool, str]:
             pass
         # На живом графике кнопка настроек видна сразу (нет ложняка); нет её весь
         # UI_DEAD_CONFIRM — страница реально свалилась на сплеш.
-        if not await _ui_loaded(page, UI_DEAD_CONFIRM):
+        if not await ui_loaded(page, UI_DEAD_CONFIRM):
             return True, 'торговый UI пропал — завис на сплеше (нет кнопки настроек, storage_state протух)'
     if get_price_tracker().feed_dead(OTC_WS_SILENCE_LIMIT):
         return True, f'WS-фид котировок мёртв (закрыт, нет тика > {OTC_WS_SILENCE_LIMIT}с)'

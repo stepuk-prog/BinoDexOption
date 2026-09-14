@@ -27,4 +27,7 @@ otc_qr_y = 757
 # configure — под подчёркиванием, чтобы не уезжать в этот `import *`; сам вызов живёт в
 # apps/app.py: звать его отсюда нельзя, settings импортируется раньше logs (круг импортов).
 from binocore.images import load_rgba, paste_overlay  # noqa: F401
-from binocore.images import configure as _configure  # noqa: F401
+# Реэкспорт под ПУБЛИЧНЫМ именем: функцию зовёт apps/app.py, а имя с подчёркиванием
+# означает «модульная деталь, снаружи не трогать» — и IDE справедливо ругалась
+# «Access to a protected member _configure of a module» на каждом потребителе.
+from binocore.images import configure as configure_images  # noqa: F401

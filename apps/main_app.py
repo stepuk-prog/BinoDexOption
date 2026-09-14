@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from apps.app import exit_main, screenshot, find_point, find_option_data, check_cookies_price, sleep_or_stop
 from apps.my_exeptions import send_photo_safe
 from apps.otc_app import (parce_otc, screenshot_otc, reload_otc_page, select_otc_pair,
-                          ensure_chart_setup, _ui_loaded, _apply_offzone, UI_DEAD_CONFIRM)
+                          ensure_chart_setup, ui_loaded, apply_offzone, UI_DEAD_CONFIRM)
 from logs import init_logger
 from messages.message import (first_message, second_message, dogon_message, third_message, prepare_dogon_message,
                               dop_dogon_message, minus_dogon_message)
@@ -95,7 +95,7 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     if binary or stop_event.is_set():
         return
     page = manager.pages['main']
-    if await _ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
+    if await ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
         return
     logger.warning('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
                    'не прерывая опцион')  # рутина → файл, не канал
@@ -107,7 +107,7 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
         # Отмена могла оборвать select_otc_pair на полуслове, вместе с его finally, который
         # возвращает off-zone. Без off-zone остаток опциона рендерится на полном CPU — ставим
         # его обратно явно (сама по себе неудача ремонта это не чинит, но CPU не жжёт).
-        await _apply_offzone(page)
+        await apply_offzone(page)
 
 
 async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
