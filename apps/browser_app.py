@@ -262,8 +262,16 @@ async def click_guarded(page: Page, selector: str, timeout: int = 10000) -> None
         return
     except (Exception,) as first_error:
         if await _close_overlay(page, selector):
-            await page.locator(selector).first.click(timeout=timeout)
-            return
+            # Повтор после снятия помехи — ТОЖЕ под try: голым он пропускал исключение наружу
+            # МИМО dispatch_event, если помеху сняли, а клик всё равно не прошёл (помеха была не
+            # одна, элемент уехал, свой же таймаут). Ветка «оверлей снят» выходила хуже ветки
+            # «не снят», хотя докстринг обещает обратное: наружу только когда не помогло вообще
+            # ничего. Найдено аудитом BinodexScreens 14-09-2026 (Новое-3).
+            try:
+                await page.locator(selector).first.click(timeout=timeout)
+                return
+            except (Exception,):
+                pass                     # не вышло и после чистки → последний довод ниже
         try:
             await page.locator(selector).first.dispatch_event('click')
             await page.wait_for_timeout(300)
