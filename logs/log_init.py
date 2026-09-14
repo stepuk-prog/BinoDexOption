@@ -97,6 +97,22 @@ async def close_telegram_bot():
 TG_MESSAGE_LIMIT = 3900
 _TRUNCATED_MARK = '\n\n…[обрезано, полный текст — в error.log]'
 
+# Состояние анти-спама — на уровне МОДУЛЯ, а не экземпляра хендлера. init_logger вешает СВОЙ
+# TelegramBotHandler на каждый модульный логгер (их полтора десятка), так что на полях экземпляра
+# и дедуп, и потолок частоты считались бы на модуль: фактический потолок выходил
+# TG_RATE_LIMIT × число модулей ≈ 180 сообщений/мин в один чат — то есть защиты от лимита
+# Telegram не было вовсе, а одинаковая запись из двух модулей не дедуплицировалась.
+# Найдено аудитом BinodexScreens 14-09-2026 (п. 5).
+_LAST_SENT: dict[tuple, float] = {}                # ключ записи -> когда ушла
+_SUPPRESSED: dict[tuple, tuple[int, float]] = {}   # ключ записи -> (сколько подавлено, метка)
+_SENT_AT: dict = {}                                # адрес -> отметки отправок в окне частоты
+
+# Ссылка на главный event loop — чтобы логи ИЗ ТРЕДОВ доходили до Telegram. emit() вызывается и
+# из asyncio.to_thread, а там get_running_loop() бросает RuntimeError, и запись молча терялась
+# для канала, оставаясь только в файле. Найдено тем же аудитом (п. 6).
+_MAIN_LOOP = None
+
+
 
 # --- Анти-спам TG-хендлера ---------------------------------------------------------------
 # У самого хендлера защиты не было вовсе, хотя именно он упирается в лимит Telegram (~20
@@ -126,9 +142,6 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
         # Анти-спам: когда запись с таким ключом уходила последний раз и сколько её повторов
         # подавлено с тех пор (счётчик — вместе со своей меткой времени, см. _note_suppressed);
         # плюс окно частоты, своё на каждый адрес.
-        self._last_sent: dict[tuple, float] = {}
-        self._suppressed: dict[tuple, tuple[int, float]] = {}
-        self._sent_at: dict[tuple, deque] = {}
 
     async def _send_message(self, chat_id: int, text: str, thread_id: int | None = None):
         """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно).
@@ -177,8 +190,8 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
         """Учесть подавленный повтор. Счётчик хранится ВМЕСТЕ с меткой времени: ключ,
         срезанный потолком частоты, в `_last_sent` не попадает вовсе (там только реально
         отправленные), поэтому прунинг по чужой метке такую запись не видел бы никогда."""
-        count, _ = self._suppressed.get(key, (0, now))
-        self._suppressed[key] = (count + 1, now)
+        count, _ = _SUPPRESSED.get(key, (0, now))
+        _SUPPRESSED[key] = (count + 1, now)
 
     def _anti_spam(self, record: LogRecord, dest: tuple) -> str | None:
         """Пропустить запись в TG или подавить. Возвращает суффикс к тексту (пустой или
@@ -191,17 +204,17 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
         # Ключи почти всегда уникальны (в тексте пары, цены, строки исключений), а процесс
         # живёт неделями — без прунинга словари росли бы всё это время. Чистим КАЖДЫЙ по его
         # СОБСТВЕННОЙ метке.
-        for stale in [k for k, ts in self._last_sent.items() if now - ts > TG_DEDUP_WINDOW]:
-            del self._last_sent[stale]
-        for stale in [k for k, (_, ts) in self._suppressed.items() if now - ts > TG_DEDUP_WINDOW]:
-            del self._suppressed[stale]
+        for stale in [k for k, ts in _LAST_SENT.items() if now - ts > TG_DEDUP_WINDOW]:
+            del _LAST_SENT[stale]
+        for stale in [k for k, (_, ts) in _SUPPRESSED.items() if now - ts > TG_DEDUP_WINDOW]:
+            del _SUPPRESSED[stale]
 
-        last = self._last_sent.get(key)
+        last = _LAST_SENT.get(key)
         if last is not None and now - last < TG_DEDUP_WINDOW:
             self._note_suppressed(key, now)
             return None
 
-        bucket = self._sent_at.setdefault(dest, deque())
+        bucket = _SENT_AT.setdefault(dest, deque())
         while bucket and now - bucket[0] > TG_RATE_WINDOW:
             bucket.popleft()
         if len(bucket) >= TG_RATE_LIMIT:
@@ -210,18 +223,29 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             self._note_suppressed(key, now)
             return None
 
-        self._last_sent[key] = now
+        _LAST_SENT[key] = now
         bucket.append(now)
-        skipped, _ = self._suppressed.pop(key, (0, now))
+        skipped, _ = _SUPPRESSED.pop(key, (0, now))
         if not skipped:
             return ''
         return f'\n\n(+{skipped} таких же за {TG_DEDUP_WINDOW // 60} мин — см. лог инстанса)'
 
     def emit(self, record: LogRecord):
+        global _MAIN_LOOP
         try:
             loop = asyncio.get_running_loop()
+            _MAIN_LOOP = loop
         except RuntimeError:
-            # Нет запущенного event loop - пропускаем отправку
+            loop = _MAIN_LOOP
+            if loop is None or loop.is_closed():
+                return                 # лупа нет вовсе (import-time/shutdown) — запись в файле
+            try:
+                # Повторяем ВЫЗОВ В ЛУПЕ: там get_running_loop() уже сработает, и дальше всё
+                # пойдёт обычным путём (анти-спам + create_task). Так логи из asyncio.to_thread
+                # (например, отказ локального прокси-релея) перестают теряться для канала.
+                loop.call_soon_threadsafe(self.emit, record)
+            except (Exception,):
+                pass                   # луп закрылся между проверкой и вызовом — файл уже есть
             return
 
         route = self._route(record)
