@@ -753,6 +753,54 @@ async def _indicators_menu_open(page: Page, cap: float | None = None) -> bool:
         return False
 
 
+# Где искать чипы легенды: 'box' — только контейнер графика, 'document' — вся страница.
+# None — ещё не калибровали (сравниваем оба скана, см. ниже).
+# Модульная переменная, а не аргумент: вёрстка binodex в пределах ОДНОЙ загрузки страницы не
+# меняется, а функцию зовут из нескольких мест. Сбрасывается в init_otc вместе с прочими кэшами
+# страницы: новая версия фронта могла перенести легенду, а залипшая область означала бы
+# «чипов нет» → клик по пункту меню ВЫКЛЮЧИЛ бы работающие индикаторы (клик ТОГГЛИТ).
+_legend_scope: str | None = None
+
+# Метка контейнера легенды: при калибровке помечаем найденный узел атрибутом и дальше
+# сканируем по нему. Держать ссылку на узел между вызовами нельзя (каждый evaluate — свой
+# контекст), а атрибут переживает вызовы и исчезает вместе с перерисовкой узла — тогда
+# scope='box' вернёт null, и Python перекалибруется (см. _missing_indicators).
+_LEGEND_ROOT_ATTR = 'data-legend-root'
+
+# Сколько уровней вверх от канваса пробуем при поиске контейнера легенды. Родитель канваса не
+# подошёл на живом binodex (14-09: калибровка на всех трёх инстансах дала 'document'), а вот
+# общий предок графика и легенды — на несколько уровней выше. Потолок нужен, чтобы не дойти до
+# body: «контейнер» размером со страницу не экономит ничего.
+_LEGEND_ROOT_MAX_UP = 6
+
+_LEGEND_SCAN_JS = (
+    "(arg) => { const scan = (root) => { const found = [];"
+    "   for (const el of root.querySelectorAll('div,span')) {"
+    "     const t = (el.textContent || '').trim();"
+    "     if (arg.badges.includes(t) && !found.includes(t)) found.push(t); }"
+    "   return found; };"
+    " if (arg.scope === 'box') {"
+    "   const root = document.querySelector('[' + arg.rootAttr + ']');"
+    "   return {near: root ? scan(root) : null}; }"
+    " if (arg.scope === 'document') return {all: scan(document)};"
+    # Калибровка: документ сканируем всегда (его результат и есть ответ), контейнер ищем
+    # ТОЛЬКО при полном наборе — по неполному о раскладке судить нельзя, а лишний обход в
+    # сценарии ремонта сделал бы хуже, чем было до оптимизации.
+    " const all = scan(document);"
+    " if (!arg.badges.every(b => all.includes(b))) return {all, near: null};"
+    # Ищем МИНИМАЛЬНОГО предка канваса, внутри которого видны все чипы: родитель канваса на
+    # живом binodex их не содержит, легенда лежит выше. Найденный узел метим атрибутом.
+    " for (const el of document.querySelectorAll('[' + arg.rootAttr + ']'))"
+    "   el.removeAttribute(arg.rootAttr);"
+    " let node = document.querySelector(arg.zone);"
+    " for (let i = 0; node && i <= arg.maxUp; i++, node = node.parentElement) {"
+    "   const near = scan(node);"
+    "   if (arg.badges.every(b => near.includes(b))) {"
+    "     node.setAttribute(arg.rootAttr, '');"
+    "     return {all, near, up: i}; } }"
+    " return {all, near: null}; }")
+
+
 async def _missing_indicators(page: Page, cap: float | None = None) -> list[tuple[str, str]] | None:
     """Какие индикаторы сейчас ВЫКЛЮЧЕНЫ — по чипам-легендам на графике (элемент с ТОЧНЫМ текстом,
     напр. 'VOL'). Детект по тексту, а не по классу: CSS-хэши binodex (_badge_XXXX) плавают между
@@ -762,17 +810,41 @@ async def _missing_indicators(page: Page, cap: float | None = None) -> list[tupl
     как «выключено всё» — клик по пункту меню ТОГГЛИТ, и одно неудачное чтение ВЫКЛЮЧИЛО бы уже
     включённые индикаторы. Вызывающий на None просто ничего не трогает (следующий опцион
     перечитает), и состояние не может стать хуже."""
+    global _legend_scope
     badges = [badge for _, badge in OTC_CHART_INDICATORS]
+    scope = _legend_scope or 'calibrate'
     try:
-        present = await _eval(page,
-            "(badges) => { const found = [];"
-            " for (const el of document.querySelectorAll('div,span')) {"
-            "   const t = (el.textContent || '').trim();"
-            "   if (badges.includes(t) && !found.includes(t)) found.push(t); }"
-            " return found; }", badges, cap=cap)
+        res = await _eval(page, _LEGEND_SCAN_JS,
+                          {'badges': badges, 'zone': screen_zone_otc, 'scope': scope,
+                           'rootAttr': _LEGEND_ROOT_ATTR, 'maxUp': _LEGEND_ROOT_MAX_UP}, cap=cap)
     except (Exception,) as err:
-        logger.info(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
+        logger.debug(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
         return None
+    if not isinstance(res, dict):
+        return None
+
+    near, whole = res.get('near'), res.get('all')
+    if scope == 'box':
+        # Контейнер уже признан валидным; пропал (сменилась вёрстка) — считаем, что не знаем.
+        if near is None:
+            _legend_scope = None      # перекалибруемся на следующем вызове
+            return None
+        present = near
+    elif scope == 'document':
+        present = whole
+    else:
+        present = whole if whole is not None else []
+        # Только ПОЛНЫЙ набор: по одному-двум горящим чипам судить о раскладке нельзя (см.
+        # докстринг). Неполное наблюдение оставляет scope=None — перекалибруемся на след. вызове.
+        # А вот при полном наборе решение принимается ВСЕГДА, в том числе когда контейнер не
+        # нашёлся (near=None: канваса нет в DOM либо легенда лежит дальше _LEGEND_ROOT_MAX_UP).
+        # Иначе калибровка — а это скан документа плюс подъём по предкам — повторялась бы на
+        # КАЖДОМ вызове, то есть вышло бы дороже простого обхода документа.
+        if isinstance(whole, list) and set(whole) == set(badges):
+            _legend_scope = 'box' if near is not None and set(near) == set(whole) else 'document'
+            up = res.get('up')
+            logger.info(f'OTC: область поиска чипов легенды — {_legend_scope}'
+                        + (f' (предок канваса +{up})' if _legend_scope == 'box' and up is not None else ''))
     if not isinstance(present, list):
         return None
     present = set(present)
@@ -1470,6 +1542,11 @@ async def init_otc(manager: "BrowserManager") -> bool:
     page = manager.pages['main']
     get_price_tracker().reset()   # новая сессия: цены/история/liveness прошлой — невалидны
     _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
+    # И область поиска чипов легенды: новая версия фронта могла перенести легенду,
+    # а залипшая область означала бы «чипов нет» → клик по пункту меню ВЫКЛЮЧИЛ бы
+    # работающие индикаторы (клик ТОГГЛИТ). Реестр: legend-scan-scope.
+    global _legend_scope
+    _legend_scope = None
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
     # URL — из binodex_settings.trade_url (browser_config.otc_trade_url) с дефолтом на уровне
