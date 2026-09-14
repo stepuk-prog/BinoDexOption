@@ -1069,13 +1069,24 @@ def _load_globe(size) -> Image.Image | None:
     return load_rgba(globe_otc_path, size=size)
 
 
-async def _canvas_alpha(element) -> Image.Image:
-    """Пиксели канваса с альфой (toDataURL), приведённые к CSS-боксу (ресайз при DPR)."""
-    d = await _eval(element, _CANVAS_ALPHA_JS)
+def _decode_canvas(d: dict) -> Image.Image:
+    """base64 → RGBA + приведение к CSS-боксу. Синхронная часть _canvas_alpha, вынесена
+    отдельной функцией, чтобы уходить в поток (см. ниже)."""
     img = Image.open(BytesIO(base64.b64decode(d['url'].split(',', 1)[1]))).convert('RGBA')
     if (d['w'], d['h']) != (d['cssw'], d['cssh']):
         img = img.resize((d['cssw'], d['cssh']), Image.Resampling.LANCZOS)
     return img
+
+
+async def _canvas_alpha(element) -> Image.Image:
+    """Пиксели канваса с альфой (toDataURL), приведённые к CSS-боксу (ресайз при DPR).
+
+    Декод — в отдельном потоке: base64 кадра плюс возможный LANCZOS-ресайз держали event loop
+    по 100–300 мс, а кадров несколько на опцион. В эти окна не разбирались WS-фреймы котировок
+    (страдал last_tick, по которому считается feed_dead) и не отрабатывал обработчик SIGTERM.
+    Реестр BinoCore: frame-io-thread (14-09-2026)."""
+    d = await _eval(element, _CANVAS_ALPHA_JS)
+    return await asyncio.to_thread(_decode_canvas, d)
 
 
 def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int = 10) -> Image.Image:
@@ -1306,7 +1317,13 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                                f"{CANVAS_READY_SECONDS:.0f}с (свечи не отрисованы) для {asset}")
                 continue
             if reads:
-                price = statistics.median(reads)
+                # median_low, а НЕ median: серия чтений ЧЁТНАЯ (CHART_READS_BEFORE + _AFTER),
+                # и обычная медиана вернула бы среднее двух центральных — цену, которой на ярлыке
+                # не было ни в один момент. А она уходит в пост и участвует в определении исхода
+                # (возврат ловится ТОЧНЫМ равенством цен). median_low всегда отдаёт реально
+                # прочитанное значение, и это верно при любой длине серии — часть чтений отсеивает
+                # фильтр по symbol. Реестр BinoCore: frame-price-median-low (14-09-2026).
+                price = statistics.median_low(reads)
                 # Неполный брекет = часть сэмплов не собралась. Опасен не сам недобор, а
                 # ПЕРЕКОС: если целиком отвалилась серия «до кадра», медиана считается только
                 # по пост-кадровым чтениям, то есть по цене, которой на ярлыке ещё не было.

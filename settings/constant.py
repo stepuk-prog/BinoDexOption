@@ -1,13 +1,28 @@
 import os
 
-qr110_path = f'{os.getcwd()}/pictures/qr-code_110.png'
-qr85_path = f'{os.getcwd()}/pictures/qr-code_85.png'
+
+# Корень проекта — от МЕСТА ЭТОГО ФАЙЛА, а не от os.getcwd(). Половина путей здесь строилась
+# через getcwd(), половина лежала относительными литералами — и обе половины держались на одном
+# негласном условии: процесс запущен ИЗ корня. systemd его выполняет (WorkingDirectory), а вот
+# запуск скрипта из scripts/ или из-под другого cwd ронял ровно половину картинок, причём
+# по-разному: getcwd-пути давали «файла нет», относительные — тихо ничего не находили.
+# Реестр BinoCore: paths-from-root (13-09-2026).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PICTURES = os.path.join(ROOT, 'pictures')
+
+
+def pic(*parts: str) -> str:
+    """Путь к файлу внутри pictures/ — единственный способ собрать его в этом модуле."""
+    return os.path.join(PICTURES, *parts)
+
+qr110_path = pic('qr-code_110.png')
+qr85_path = pic('qr-code_85.png')
 # OTC использует собственный QR (один на скрине) — остальное (позиция otc_qr_x/y и т.д.) без изменений
-otc_qr110_path = f'{os.getcwd()}/pictures/otc_qr-code_110.png'
+otc_qr110_path = pic('otc_qr-code_110.png')
 # Статичный глобус (фон графика OTC) для композита кадра: глобус на binodex ВЫКЛЕН за аккаунтом
 # (экономия CPU, docs/BINODEX_CPU.md), а в пост подкладывается из этого файла под прозрачный
 # канвас. Заготовлен разово офлайн (земля одна на все пары). Размер = бокс canvas (~1470x870).
-globe_otc_path = f'{os.getcwd()}/pictures/globe_otc.png'
+globe_otc_path = pic('globe_otc.png')
 bear_color = '225'  # цвет медвежьей свечи
 bull_color = '219'  # цвет бычьей свечи.
 find_time = 2  # максимальное время поиска точки входа в минутах

@@ -27,7 +27,7 @@ from settings.browser_config import move_field, price_field, screen_zone
 from settings.config import (option_data, binary, program_id, timeframe,
                             shot_path, screenshot_path, database,
                             main_cycle_pause_min, main_cycle_pause_max)
-from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time
+from settings.constant import qr110_path, qr85_path, otc_qr110_path, bear_color, bull_color, find_time, pic
 from settings.timing import CHECK_PLUS_DELAY, POST_SCREENSHOT_DELAY, TIMEOUT_MEDIUM
 from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 from settings.screenshot_set import load_rgba
@@ -168,7 +168,7 @@ async def exit_main(channel_mess: bool,
         # из-за картинки выход незачем.
         try:
             ok, err = await asyncio.wait_for(
-                send_photo_safe('pictures/bug.png', main_bug_message(),
+                send_photo_safe(pic('bug.png'), main_bug_message(),
                                 mes_type='сообщение о сбое программы'),
                 timeout=BUG_PHOTO_TOTAL_TIMEOUT)
         except (Exception,) as error:   # в т.ч. TimeoutError общего потолка
