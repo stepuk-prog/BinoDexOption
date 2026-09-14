@@ -52,6 +52,18 @@ EXIT_BROWSER = 10
 EXIT_COOKIES = 11
 EXIT_SETUP = 12
 EXIT_USERBOT = 13
+# 20 — RESTART_REQUESTED в контракте диспетчера: «не краш, прошу перезапуск на месте» (GD
+# рестартит ту же ноду без CB/relocate/ALARM). Нужен потому, что 401 бывает двух сортов, и
+# только один из них зовёт человека: RPC-ответ Telegram с ID ([401 AUTH_KEY_UNREGISTERED],
+# [401 SESSION_REVOKED], [401 USER_DEACTIVATED_BAN]) — ключ отозван → код 13; голый
+# [401 Unauthorized] без ID — транспортная ошибка MTProto 404, то есть авторизацию потеряло
+# СОЕДИНЕНИЕ, а не аккаунт → код 20. Инцидент 14-09-2026 (тестовая ForumTrade 738): pyrogram
+# уронил recv_worker таким 401, Session.restart() умерла внутри stop() (await recv_task), не
+# дойдя до start(), и юзербот висел 1 ч 51 мин — а рестарт процесса БЕЗ смены session_string
+# вылечил всё с первой попытки. Здесь ту же природу голого 401 знали и раньше (session_dead()
+# в apps/my_exeptions.py — проба get_me), но только на пути ОТПРАВКИ: отвал в фоновой задаче
+# pyrogram не ловился ничем.
+EXIT_RESTART = 20
 BROWSER_MAX_ATTEMPTS = 3    # подъёмов браузера подряд; больше биться смысла нет → exit(EXIT_BROWSER)
 
 # Таблицы таймфреймов (перенесены из Data_set.py). Ключ search_tf снят 2026-08-15 вместе с

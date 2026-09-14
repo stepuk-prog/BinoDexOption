@@ -6,7 +6,7 @@ from pyrogram.errors import Unauthorized
 
 from logs import init_logger
 from settings.timing import LOGGER_FLUSH_DELAY, SHUTDOWN_STEP_TIMEOUT, STATUS_WRITE_TIMEOUT
-from settings.constant import EXIT_USERBOT
+from settings.constant import EXIT_RESTART, EXIT_USERBOT
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -43,6 +43,32 @@ def session_recoverable(error: BaseException) -> bool:
     """Отвал session восстановим сам собой (конкурентный доступ к ключу, не его смерть) →
     на старте ретраить перед фаталом, а не хоронить сразу. См. _SESSION_RECOVERABLE_MARKERS."""
     return any(m in str(error).upper() for m in _SESSION_RECOVERABLE_MARKERS)
+
+
+def session_lost(error: BaseException) -> bool:
+    """Это потеря СОЕДИНЕНИЯ (лечится перезапуском), а не отзыв ключа (нужен оператор)?
+
+    Отличить одно от другого можно точно, по типу ошибки pyrogram:
+    - настоящий отвал АККАУНТА приходит RPC-ответом Telegram и несёт `ID`:
+      AUTH_KEY_UNREGISTERED, AUTH_KEY_INVALID, SESSION_REVOKED, SESSION_EXPIRED,
+      USER_DEACTIVATED(_BAN)... — в строке видно как `[401 AUTH_KEY_UNREGISTERED]`;
+    - потеря СОЕДИНЕНИЯ — это транспортная ошибка MTProto 404, которую `recv_worker`
+      превращает в ГОЛЫЙ `Unauthorized(...)` без ID, и в строке стоит `[401 Unauthorized]`.
+      Текст «Auth key not found in the system. You must delete your session file» — фраза
+      САМОГО pyrogram, вшитая в этот raise, а не ответ Telegram (инцидент 14-09-2026: ключ был
+      цел, рестарт процесса всё вылечил).
+
+    Ровно ту же природу голого 401 знает `session_dead()` в apps/my_exeptions (проба get_me),
+    но она применима только там, где можно сходить в сеть. В обработчике исключений лупа
+    сходить некуда — там решает этот, синхронный, признак.
+
+    Строковые маркеры (_SESSION_FAIL_MARKERS) тоже означают мёртвый аккаунт, поэтому
+    проверяются как «НЕ потеря соединения»."""
+    if not isinstance(error, Unauthorized):
+        return False
+    if getattr(error, 'ID', None):      # RPC-ответ Telegram → аккаунт, не соединение
+        return False
+    return not any(m in str(error).upper() for m in _SESSION_FAIL_MARKERS)
 
 
 async def write_status_offline(program_id: int):
@@ -141,7 +167,7 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     sys.exit(status)
 
 
-async def session_dead_shutdown(error, reason: str = ''):
+async def session_dead_shutdown(error, reason: str = '', manager=None):
     """
     session юзербота недоступна → стоп с кодом EXIT_USERBOT: ошибка в error-канал, критичный
     алерт в ВЫДЕЛЕННЫЙ session-канал (НЕ cookies — иначе поток cookies похоронит алерт, §3.3),
@@ -152,5 +178,22 @@ async def session_dead_shutdown(error, reason: str = ''):
     suffix = f" ({reason})" if reason else ''
     logger.error(f"Недоступна session юзербота{suffix}: {error}")
     logger.session(f"🔒 Отвал юзербота — session недоступна{suffix}, требуется реавторизация. Останавливаюсь.")
-    await close_program(manager=None, status=EXIT_USERBOT,
+    await close_program(manager=manager, status=EXIT_USERBOT,
                         text=f"Отвал юзербота (session) 🔒 (код {EXIT_USERBOT})")
+
+
+async def session_lost_shutdown(error, reason: str = '', manager=None):
+    """
+    Юзербот потерял авторизацию СОЕДИНЕНИЯ (голый 401 без ID — см. session_lost) → стоп с кодом
+    EXIT_RESTART: диспетчер перезапустит на месте, без CB/relocate/ALARM. Переавторизация не
+    нужна — ключ, как правило, цел (инцидент 14-09-2026). Если он всё же отозван, следующий
+    старт упрётся в 401 при подъёме юзербота и уйдёт через session_dead_shutdown с кодом 13.
+    status НЕ трогаем — судьбу процесса решает диспетчер по коду выхода.
+    """
+    suffix = f" ({reason})" if reason else ''
+    logger.error(f"Юзербот потерял авторизацию соединения{suffix}: {error} — ухожу на "
+                 f"перезапуск (код {EXIT_RESTART}), переавторизация НЕ требуется")
+    logger.session(f"🔁 Юзербот потерял авторизацию соединения{suffix} (ключ, вероятно, цел) — "
+                   f"перезапуск на месте.")
+    await close_program(manager=manager, status=EXIT_RESTART,
+                        text=f"Потеря авторизации соединения юзербота 🔁 (код {EXIT_RESTART})")

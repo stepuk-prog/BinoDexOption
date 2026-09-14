@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from apps.app import get_water, time_sleep, request_shutdown, sleep_or_stop
 from apps.browser_app import init_load
 from apps.exit_app import (close_program, session_dead_shutdown, session_failed,
-                           session_recoverable, write_status_offline)
+                           session_lost, session_lost_shutdown, session_recoverable,
+                           write_status_offline)
 from apps.main_app import main
 from apps.my_exeptions import send_photo_safe
 from apps.premium_watch import check_premium
@@ -57,6 +58,10 @@ _otc_recover_cycles = 0
 # Событие остановки (SIGTERM/SIGINT). Глобально — чтобы cookies-backoff (до 300с) в
 # _init_with_retry прерывался сигналом, а не ждал SIGKILL. Ставится в bot() ДО первого init.
 _stop_event: asyncio.Event | None = None
+# Отвал юзербота, пойманный в ФОНОВОЙ задаче pyrogram (см. _install_session_guard). Хранится
+# до финального close_program: сворачиваемся мы штатно, через stop_event, а КОД выхода
+# выбирается уже на выходе — по session_lost().
+_session_dead_error: BaseException | None = None
 # OTC: прокси-фолбэк. False = прямой режим (дефолт). Включается, когда прямой режим не поднял
 # front-end binodex (SetupError mounted=False — напр. отравленный CDN-эдж); прокси из
 # settings.proxy_data через локальный релей. НЕ sticky навсегда: после PROXY_REPROBE_AFTER неудач
@@ -342,6 +347,61 @@ async def weekly_post(kind: str, photo: str, caption: str, mes_type: str,
         await database.release_week_post(program_id, kind, week_start)
 
 
+def _loop_exception_handler(loop, context: dict) -> None:
+    """Обработчик необработанных исключений event loop'а.
+
+    Нас интересует ровно одно: отвал юзербота из ФОНОВЫХ задач pyrogram. Он не долетает ни до
+    одного нашего except: pyrogram роняет Unauthorized ВНУТРИ Session.restart(), эту задачу
+    никто не ждёт («Task exception was never retrieved» в journald), а наши вызовы не падают, а
+    ВИСЯТ и обрываются собственными таймаутами. Так тестовая ForumTrade 738 крутилась вхолостую
+    1 ч 51 мин 14-09-2026 — ни одного поста и ни одного 🔒-алерта. Всё прочее отдаём дефолтному
+    обработчику: глушить чужие ошибки нельзя."""
+    error = context.get('exception')
+    if isinstance(error, Exception) and session_failed(error):
+        _note_session_dead(error)
+        return
+    loop.default_exception_handler(context)
+
+
+def _note_session_dead(error: BaseException) -> None:
+    """Запомнить отвал и свернуть работу ШТАТНО — через тот же stop_event, что и SIGTERM.
+
+    Выходить прямо отсюда нельзя (обработчик лупа синхронный, а close_program — корутина, да и
+    уборка не отработала бы), поэтому просто просим цикл закончиться; код выхода подставит
+    _shutdown_on_session_event на выходе. Сообщаем один раз: pyrogram переподключается по кругу
+    и способен уронить десяток одинаковых задач подряд."""
+    global _session_dead_error
+    if _session_dead_error is not None:
+        return
+    _session_dead_error = error
+    logger.error(f'Отвал юзербота в фоновой задаче pyrogram: {type(error).__name__}: {error} — '
+                 f'сворачиваю работу')
+    if _stop_event is not None:
+        _stop_event.set()
+    request_shutdown()   # это не «сбой цикла» — главный алерт уйдёт из shutdown ниже
+
+
+def _install_session_guard(loop) -> None:
+    """Повесить обработчик на луп. Ставится в bot() сразу после подъёма юзербота."""
+    loop.set_exception_handler(_loop_exception_handler)
+
+
+async def _shutdown_on_session_event(manager) -> bool:
+    """Закрыться нужным кодом, если сторож поймал отвал. True — выход сделан (дальше не идём).
+
+    Код РАЗНЫЙ, и различает их session_lost: голый `[401 Unauthorized]` без ID — потеря
+    авторизации соединения → 20 (перезапуск на месте); `[401 с ID]` (AUTH_KEY_UNREGISTERED,
+    SESSION_REVOKED, USER_DEACTIVATED…) — ключ реально отозван → 13 (оператор)."""
+    if _session_dead_error is None:
+        return False
+    reason = 'фоновая задача pyrogram'
+    if session_lost(_session_dead_error):
+        await session_lost_shutdown(_session_dead_error, reason=reason, manager=manager)
+    else:
+        await session_dead_shutdown(_session_dead_error, reason=reason, manager=manager)
+    return True
+
+
 async def bot():
     """Запуск бота"""
     logger.report('🚀 Стартую')
@@ -421,6 +481,10 @@ async def bot():
     _stop_event = stop_event
     loop = asyncio.get_running_loop()
 
+    # Сторож юзербота — ПОСЛЕ создания stop_event: он сворачивает работу именно через него,
+    # а до этого момента разбудить цикл было бы нечем. Юзербот к этой строке уже поднят.
+    _install_session_guard(loop)
+
     def _on_stop_signal():
         stop_event.set()
         request_shutdown()  # подавить main_bug_message — это штатная остановка, не сбой
@@ -439,12 +503,16 @@ async def bot():
     # (apps/binodex_feed.binodex_ready) и стартуем, только когда и фид, и API вернутся.
     if not binary and not await binodex_ready():
         if not await _await_binodex_feed(at_start=True):
+            if await _shutdown_on_session_event(None):
+                return
             await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
             return
 
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
     manager = await _init_with_retry()
     if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
+        if await _shutdown_on_session_event(None):
+            return
         await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
         return
 
@@ -526,6 +594,11 @@ async def bot():
                 await write_status_offline(program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
                 return
+
+    # Отвал юзербота, пойманный сторожем лупа: цикл вышел не по сигналу, а по нему — код
+    # выхода тогда 13 или 20, а не 0 (иначе диспетчер счёл бы это штатной остановкой).
+    if await _shutdown_on_session_event(manager):
+        return
 
     # Сюда — только по SIGTERM/SIGINT: чисто закрываемся с кодом 0 (штатная остановка извне).
     # status НЕ трогаем (инвариант: status=false выставляет только плановый weekend-выход binary;
