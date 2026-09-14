@@ -310,6 +310,38 @@ async def _await_binodex_feed(at_start: bool) -> bool:
     return True
 
 
+async def weekly_post(kind: str, photo: str, caption: str, mes_type: str,
+                      now: datetime | None = None) -> None:
+    """Недельный пост (приветственный/выходной) — РОВНО ОДИН за неделю на программу.
+
+    Повтор отсекает отметка в БД (`settings.week_post`: program_id + kind + понедельник этой
+    недели), а не время старта. До 14-09-2026 защитой от дубля служило узкое окно
+    `понедельник 3:00–3:25`, и оно промахивалось мимо реальности: крон диспетчера поднимает
+    FIN в 4:55 (`55 4 * * 0`), так что приветственный пост не уходил ВООБЩЕ — ни у русской
+    пары, ни у английской. Выходной пост той защиты не имел вовсе: рестарт вечером пятницы
+    слал его второй раз.
+
+    Отметка ставится ДО отправки (см. claim_week_post); если отправка не удалась — снимается,
+    и следующий подъём попробует снова.
+    """
+    now = now or datetime.now()
+    week_start = (now - timedelta(days=now.isoweekday() - 1)).date()   # понедельник этой недели
+    claimed = await database.claim_week_post(program_id, kind, week_start)
+    if claimed is False:
+        # Спросить БД не смогли. Молчим: лишний пост подписчикам виден, пропущенный — нет.
+        logger.warning('%s: отметка недели недоступна (сбой БД) — пост не отправляю', mes_type)
+        return
+    if claimed is None:
+        logger.info('%s на этой неделе (%s) уже отправлено — пропускаю', mes_type, week_start)
+        return
+    # Через send_photo_safe, а не голый send_photo: у транспорта есть проба доставки и повтор
+    # при обрыве — ровно тот сценарий (таймаут при потере SYN), ради которого он и написан.
+    ok, err = await send_photo_safe(photo, caption, mes_type=mes_type)
+    if not ok:
+        logger.error(f'Ошибка отправки: {mes_type} - {err}')
+        await database.release_week_post(program_id, kind, week_start)
+
+
 async def bot():
     """Запуск бота"""
     logger.report('🚀 Стартую')
@@ -364,25 +396,18 @@ async def bot():
 
     if binary:
         now = datetime.now()  # один снимок времени — иначе возможен переход минуты/часа между вызовами
-        if now.isoweekday() == 1 and now.hour == 3 and now.minute < 25:
-            # Через send_photo_safe, а не голый send_photo: у транспорта есть проба доставки и
-            # повтор при обрыве — ровно тот сценарий (таймаут при потере SYN), ради которого он и
-            # написан. Прямой вызов означал, что пост молча терялся.
-            ok, err = await send_photo_safe('pictures/start_week.png', start_message(),
-                                            mes_type='стартовое сообщение')
-            if not ok:
-                logger.error(f'Ошибка отправки стартового сообщения - {err}')
         if (now + timedelta(hours=2)).weekday() >= 5:
-            # Через send_photo_safe (см. выше). Здесь потеря особенно заметна: следом идёт
-            # write_status_offline + выход, то есть подписчики остались бы без сообщения о
-            # закрытии недели, а программа при этом честно ушла в офлайн.
-            ok, err = await send_photo_safe('pictures/end_week.png', weekend_message(),
-                                            mes_type='сообщение о выходных')
-            if not ok:
-                logger.error(f'Ошибка отправки сообщения о выходных - {err}')
+            # Выходные: прощаемся и уходим. Приветственный пост в этой ветке НЕ трогаем —
+            # иначе подъём в субботу дал бы «начало недели» и следом «до понедельника».
+            await weekly_post('end', 'pictures/end_week.png', weekend_message(),
+                              'сообщение о выходных', now)
             await write_status_offline(program_id)
             await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
+        # Приветствие — на ПЕРВОМ за неделю подъёме в рабочие дни (по плану это понедельник
+        # 4:55 по крону; если старт задержался — уйдёт при том подъёме, который случился).
+        await weekly_post('start', 'pictures/start_week.png', start_message(),
+                          'стартовое сообщение', now)
 
     water_naked = get_water()
     qr = water_naked[1] if water_naked[0] else None
@@ -496,13 +521,8 @@ async def bot():
                     # Прерываемый сон (как выше) — иначе SIGTERM завис бы тут на 100–150с
                     await sleep_or_stop(stop_event, await time_sleep())
                     continue
-                # Через send_photo_safe (проба доставки + повтор): голый send_photo терял пост
-                # на таймауте, а следом идёт write_status_offline и выход — подписчики остались
-                # бы без сообщения о закрытии недели.
-                ok, err = await send_photo_safe('pictures/end_week.png', weekend_message(),
-                                                mes_type='сообщение о выходных')
-                if not ok:
-                    logger.error(f'Ошибка отправки сообщения о выходных - {err}')
+                await weekly_post('end', 'pictures/end_week.png', weekend_message(),
+                                  'сообщение о выходных')
                 await write_status_offline(program_id)
                 await close_program(manager=manager, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
                 return

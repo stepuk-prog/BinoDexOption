@@ -28,6 +28,15 @@
 - `INSERT … (program_id, timeframe, otc, plus, minus) VALUES ($1,$2,$3,1,0) ON CONFLICT (program_id) DO UPDATE SET plus = counter.plus + 1, minus = 0 RETURNING plus` (и зеркально для минусов).
 - Это **UPSERT**, а не `UPDATE` (12-09-2026). Голый `UPDATE` без строки счётчика не задевал ничего и возвращал пусто, а вызывающий трактовал это как «строки ещё нет, нормально» — серия у новой программы не начиналась НИКОГДА, ни одной вехи за всё время. Теперь первый плюс сам заводит строку.
 
+### `settings.week_post`
+Отметка «недельный пост за эту неделю уже отправлен». `claim_week_post` / `release_week_post`.
+
+- Колонки: `program_id` + `kind` (**PK**), `week_start` (понедельник недели, `date`), `sent_at`. `kind` — `'start'` (приветственный пост) или `'end'` (прощание перед выходными), CHECK по списку.
+- Заводится 14-09-2026. До неё повтор отсекался временем старта (`понедельник 3:00–3:25`), а крон диспетчера поднимает FIN в **4:55** — приветственный пост не уходил ВООБЩЕ, ни здесь, ни в английской паре; у выходного поста защиты не было вовсе, и рестарт вечером пятницы слал его второй раз.
+- `claim_week_post` — `INSERT … ON CONFLICT (program_id, kind) DO UPDATE SET week_start = EXCLUDED.week_start, sent_at = now() WHERE week_post.week_start < EXCLUDED.week_start RETURNING week_start`: дата = застолбили (пост отправляем), `None` = на этой неделе уже отправляли, `False` = сбой БД (тогда пост НЕ шлём — дубль виден подписчикам, пропуск нет). `WHERE … <` держит отметку только вперёд.
+- Отметка ставится **до** отправки; если отправка не удалась, `release_week_post` снимает ровно свою неделю и следующий подъём попробует снова.
+- Таблица общая для русской и английской пары — строки разводит `program_id`.
+
 ### `settings.option_setting`
 Базовые настройки экземпляра (на старте через `bootstrap_fetch`).
 
@@ -101,6 +110,7 @@ TV-cookies для авторизации TradingView (`get_tv_cookies`). Пло�
 |-----------------------------------------|---------|-----------------------------------------------------|
 | `option_data_tv` / `option_data_pocket` | binodex | `option_data.binary_data_view` / `otc_data_view`    |
 | `plus_counter` / `minus_counter`        | binodex | `option_data.counter`                               |
+| `claim_week_post` / `release_week_post` | binodex | `settings.week_post`                                |
 | `get_forum_message` / `save_forum_message` | binodex | `settings.forum_message`                         |
 | `option_setting` (bootstrap)            | binodex | `settings.option_setting`                           |
 | `binodex_selectors` (+ bootstrap)       | binodex | `settings.binodex_settings`                         |

@@ -95,6 +95,41 @@ class Database(BaseDatabase):
         return await self.execute_query(sql, program_id, timeframe, otc, fetch_mode='row',
                                         func='minus_counter', db='binodex')
 
+    async def claim_week_post(self, program_id: int, kind: str, week_start):
+        """Застолбить недельный пост (kind='start'/'end') за неделю week_start (понедельник).
+
+        Возвращает дату недели — если столбить удалось, то есть на этой неделе такой пост
+        программа ещё НЕ отправляла; None — уже отправляла; False — сбой БД (контракт
+        execute_query, 'val' различает «строки нет» и «не смогли спросить»).
+
+        Отметка ставится ДО отправки, а не после: программу поднимают по нескольку раз в
+        неделю (рестарт диспетчера, failover, аварийный выход), и «сначала пошлём, потом
+        запишем» означало бы дубль ровно в те моменты, когда что-то пошло не так. Если
+        отправка не удалась, вызывающий снимает отметку release_week_post.
+
+        WHERE week_start < EXCLUDED — отметка только ВПЕРЁД: запрос из прошлой недели
+        (переведённые назад часы, ручной прогон) не должен переоткрывать уже отправленный пост."""
+        sql = '''
+            INSERT INTO settings.week_post (program_id, kind, week_start)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (program_id, kind) DO UPDATE
+            SET week_start = EXCLUDED.week_start, sent_at = now()
+            WHERE settings.week_post.week_start < EXCLUDED.week_start
+            RETURNING week_start
+        '''
+        return await self.execute_query(sql, program_id, kind, week_start, fetch_mode='val',
+                                        func='claim_week_post', db='binodex')
+
+    async def release_week_post(self, program_id: int, kind: str, week_start):
+        """Снять отметку недельного поста — отправка не удалась, пусть следующий старт повторит.
+
+        Снимаем ИМЕННО свою неделю (week_start в условии): если отметку успел обновить кто-то
+        ещё, чужую запись не трогаем."""
+        sql = ('DELETE FROM settings.week_post '
+               'WHERE program_id = $1 AND kind = $2 AND week_start = $3')
+        return await self.execute_query(sql, program_id, kind, week_start, fetch_mode='execute',
+                                        func='release_week_post', db='binodex')
+
     async def get_forum_message(self, forum_id: int, topic_id: int):
         """Строка последней пересылки в тему topic_id форума forum_id (binodex.settings.forum_message).
         Нужна, чтобы удалить ПЕРЕД новой пересылкой И веху (message_id), И доп-партнёрское сообщение

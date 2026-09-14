@@ -20,7 +20,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 
 ## Две БД (через PgBouncer, asyncpg)
 - **Program** (`DATABASE`) — настройки браузера/cookies, юзербот-креды (`telegram.telegram`), статус (`program.programdata`), `cookies.pages`, `settings.tv_settings`/`pocket_settings`.
-- **binodex** (`DATABASE_FIN`) — сигналы (`option_data.binary_data_view`/`otc_data_view`), счётчики (`option_data.counter`), настройки экземпляра (`settings.option_setting`), `settings.binodex_settings` (OTC-селекторы), cookies binodex.
+- **binodex** (`DATABASE_FIN`) — сигналы (`option_data.binary_data_view`/`otc_data_view`), счётчики (`option_data.counter`), `settings.week_post` (недельные посты start/end — один за неделю, `claim_week_post`), настройки экземпляра (`settings.option_setting`), `settings.binodex_settings` (OTC-селекторы), cookies binodex.
 - Старт читается синхронно (`settings/_bootstrap.py`) до подъёма пулов; рантайм — `database/database.py` (`Database`, пулы program+binodex). Подробно: **`docs/DATABASE.md`**.
 
 ## env (.env — gitignored; пример в `.env.example`)
