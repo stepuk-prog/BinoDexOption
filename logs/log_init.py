@@ -139,9 +139,9 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             f'‼️Сбой {frame}\n\n %(filename)s [LINE:%(lineno)d] '
             '#%(levelname)-8s [%(asctime)s] %(message)s')
         self.msg_fmt = logging.Formatter(f'📫{frame}\n\n %(message)s')
-        # Анти-спам: когда запись с таким ключом уходила последний раз и сколько её повторов
-        # подавлено с тех пор (счётчик — вместе со своей меткой времени, см. _note_suppressed);
-        # плюс окно частоты, своё на каждый адрес.
+        # Состояния анти-спама у экземпляра НЕТ намеренно — оно общее на процесс
+        # (_LAST_SENT / _SUPPRESSED / _SENT_AT выше): хендлер создаётся на каждый модульный
+        # логгер, и на полях экземпляра дедуп с потолком частоты считались бы на модуль.
 
     async def _send_message(self, chat_id: int, text: str, thread_id: int | None = None):
         """Асинхронная отправка сообщения (с таймаутом, чтобы не висеть вечно).
