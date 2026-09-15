@@ -24,6 +24,50 @@ from asyncpg.exceptions import (CannotConnectNowError, ConnectionDoesNotExistErr
 
 _logger = logging.getLogger(__name__)
 
+
+# Ошибки, которые лечатся повтором, а не падением: PgBouncer перезапускается/флапает, Patroni
+# переключает лидера, сеть моргает. Один список на пул и на одиночный коннект — политика должна
+# быть одна, иначе получается то, что нашли 15-09-2026: рантайм блип переживает, а старт от того
+# же блипа умирает.
+_CONNECT_RETRYABLE = (CannotConnectNowError, ConnectionRefusedError, OSError,
+                      TimeoutError, asyncio.TimeoutError)
+
+
+async def connect_with_retry(retries: int = 5, delay: float = 2.0, init=None,
+                             on_retry=None, **dsn):
+    """Одиночный `asyncpg.connect` с той же политикой ретраев, что и у пулов.
+
+    Зачем отдельно от пула: стартовое чтение конфига (settings/_bootstrap) идёт ДО asyncio.run и
+    до логгера, пулов ещё нет — а PgBouncer в этот момент точно так же может флапнуть. Раньше там
+    стояла одна попытка: блип на старте убивал процесс на ИМПОРТЕ (в logs/ ни строки, видно
+    только в journald), тогда как тот же блип в рантайме переживался молча. Поймано живым запуском
+    15-09-2026 — четыре падения за сессию. Реестр: bootstrap-connect-retry.
+
+    `init` — корутина донастройки соединения (у семьи это json/jsonb-кодек), зовётся после
+    успешного connect. `on_retry(attempt, retries, error)` — уведомление о повторе: на стартовом
+    пути логгер программы ещё не сконфигурирован, поэтому вызывающий обычно передаёт print в
+    stderr (его забирает journald). По умолчанию — _logger.warning, как у пулов.
+
+    Задержка растёт линейно (delay * attempt), как в _connect_pool: суммарно ~30 с на пять
+    попыток. Больше не нужно — PgBouncer поднимается за секунды, а юнит под systemd всё равно
+    будет перезапущен, если не поднялись мы.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            conn = await asyncpg.connect(**dsn)
+            if init is not None:
+                await init(conn)
+            return conn
+        except _CONNECT_RETRYABLE as error:
+            if attempt >= retries:
+                raise
+            if on_retry is not None:
+                on_retry(attempt, retries, error)
+            else:
+                _logger.warning(_msg('pool_attempt', attempt=attempt, retries=retries,
+                                     name='bootstrap', error=error))
+            await asyncio.sleep(delay * attempt)
+
 # Подстроки ошибок PgBouncer/Patroni, которые лечатся ретраем, а не падением.
 _PGBOUNCER_RECOVERABLE = (
     "got result for unknown protocol state",
@@ -121,8 +165,7 @@ class BaseDatabase:
                 _logger.info(_msg('pool_created', name=name, db_name=db_name,
                                   min_size=self.min_size, max_size=self.max_size))
                 return
-            except (CannotConnectNowError, ConnectionRefusedError, OSError,
-                    TimeoutError, asyncio.TimeoutError) as error:
+            except _CONNECT_RETRYABLE as error:
                 _logger.warning(_msg('pool_attempt', attempt=attempt, retries=retries,
                                      name=name, error=error))
                 if attempt < retries:

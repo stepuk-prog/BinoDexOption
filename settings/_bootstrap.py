@@ -12,19 +12,32 @@ settings/browser_config.py (tv_settings/pocket_settings) — общий хелп
 дублей. Намеренно НЕ импортирует logs/config — иначе циклический импорт.
 """
 import asyncio
+import sys
 
-import asyncpg
+from binocore.db import connect_with_retry
 
 from settings.database_config import (DB_NAMES, init_json_codec, pg_host,
                                       pg_password, pg_port, pg_user)
 
 
+def _retry_note(attempt: int, retries: int, error: Exception) -> None:
+    """Сообщить о повторе стартового коннекта.
+
+    print, а не logger: сюда попадают ДО настройки логирования (bootstrap зовётся с импорта
+    settings), поэтому в logs/ такая строка не легла бы вовсе. stdout юнита читает journald —
+    там её и видно. Реестр BinoCore: bootstrap-connect-retry.
+    """
+    print(f'bootstrap: БД недоступна, попытка {attempt}/{retries} ({error}) — повтор',
+          file=sys.stderr)
+
+
 async def _connect(db: str):
-    conn = await asyncpg.connect(
+    conn = await connect_with_retry(
         user=pg_user, password=pg_password, host=pg_host, port=pg_port,
         database=DB_NAMES[db], statement_cache_size=0,
         timeout=10,           # таймаут установки соединения
         command_timeout=15,   # таймаут самого запроса — не зависнуть на старте навсегда
+        on_retry=_retry_note,   # повтор виден в journald: логгера тут ещё нет
     )
     await init_json_codec(conn)
     return conn
