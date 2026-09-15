@@ -52,21 +52,31 @@ async def connect_with_retry(retries: int = 5, delay: float = 2.0, init=None,
     попыток. Больше не нужно — PgBouncer поднимается за секунды, а юнит под systemd всё равно
     будет перезапущен, если не поднялись мы.
     """
-    for attempt in range(1, retries + 1):
+    # max(1, ...): при retries <= 0 цикл не выполнился бы ни разу, и функция ВЕРНУЛА БЫ None —
+    # вызывающий получил бы «коннект» вместо ошибки и упал бы позже и не там (на .fetch у None).
+    # Один проход — минимум осмысленного: «не ретраить» это одна попытка, а не ноль.
+    attempts = max(1, retries)
+    last_error: Exception = RuntimeError('connect_with_retry: не было ни одной попытки')
+    for attempt in range(1, attempts + 1):
         try:
             conn = await asyncpg.connect(**dsn)
             if init is not None:
                 await init(conn)
             return conn
         except _CONNECT_RETRYABLE as error:
-            if attempt >= retries:
-                raise
+            last_error = error
+            if attempt >= attempts:
+                break
             if on_retry is not None:
-                on_retry(attempt, retries, error)
+                on_retry(attempt, attempts, error)
             else:
-                _logger.warning(_msg('pool_attempt', attempt=attempt, retries=retries,
+                _logger.warning(_msg('pool_attempt', attempt=attempt, retries=attempts,
                                      name='bootstrap', error=error))
             await asyncio.sleep(delay * attempt)
+    # Выход из цикла означает исчерпанные попытки — отдаём последнюю ошибку наружу. raise ЗДЕСЬ,
+    # а не внутри except: иначе у функции остаётся путь «дошли до конца и вернули None», и это
+    # видит не только проверяющий типов, но и рантайм при retries <= 0.
+    raise last_error
 
 # Подстроки ошибок PgBouncer/Patroni, которые лечатся ретраем, а не падением.
 _PGBOUNCER_RECOVERABLE = (
