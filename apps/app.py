@@ -394,17 +394,16 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
         return False, error_text
 
 
-async def find_point(manager: "BrowserManager", resume: str) -> tuple[bool, str]:
+async def find_point(manager: "BrowserManager", buy: bool) -> tuple[bool, str]:
     """
     Поиск точки входа
     :param manager: менеджер браузера
-    :param resume: направление сигнала
+    :param buy: направление сигнала (True — покупка). ФЛАГОМ, а не текстом resume: источник
+        истины один и тот же по всему коду, и правка текста (редактура, перевод) не развернёт
+        ожидание цвета молча. Реестр BinoCore: direction-from-flag.
     :return: (success, error_message)
     """
-    if 'ПОКУПАТЬ' in resume:
-        color = bull_color
-    else:
-        color = bear_color
+    color = bull_color if buy else bear_color
 
     while_time = (datetime.now() + timedelta(minutes=find_time))
     page = manager.pages['price']

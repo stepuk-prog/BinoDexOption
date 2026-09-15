@@ -36,7 +36,9 @@ def second_message():
     asset_label = _asset_label()
     sila = '<emoji id="5292142381531931487">🐻</emoji>'
     txt_str = 'продажу'
-    if 'ПОКУПАТЬ' in option_data.resume:  # формирование строки вывода для пары Активно покупать
+    # Сторона — флагом, а не текстом resume (реестр BinoCore: direction-from-flag): строка
+    # редактируется, флаг — нет, а от него зависит и слово, и эмодзи силы.
+    if option_data.buy:
         txt_str = 'покупку'
         sila = '<emoji id="5289500525673325056">🐂</emoji>'
     # option_data.name мутируется в otc_app.py до 'AUD/CAD OTC' для скриншота; для текста нужен голый "AUD/CAD"

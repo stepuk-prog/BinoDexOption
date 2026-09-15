@@ -128,7 +128,7 @@ async def _capture(manager: "BrowserManager", qr, *, seek_point: bool):
     :return: кортеж (ok, price|error) от screenshot/screenshot_otc."""
     if binary:
         if seek_point:
-            fp_ok, fp_err = await find_point(manager, option_data.resume)
+            fp_ok, fp_err = await find_point(manager, option_data.buy)
             if not fp_ok:
                 logger.warning("find_point не нашёл точку входа (%s) — продолжаю по текущей цене", fp_err)
         return await screenshot(manager=manager, take_shot=True, qr=qr)
