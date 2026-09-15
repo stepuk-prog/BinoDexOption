@@ -711,7 +711,16 @@ async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
     for opener, item, name in ((otc_candle_scale, otc_candle_scale_item, 'свеча 30S'),
                                (otc_chart_scale, otc_chart_scale_item, 'график H1')):
         try:
-            await page.locator(opener).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+            try:
+                await page.locator(opener).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+            except (Exception,):
+                # Бэкдроп модалки не ушёл: открываем дропдаун DOM-событием, как и его пункт ниже.
+                # Модалку binodex рисует ПОРТАЛОМ в body, backdrop (MuiBackdrop-root) растянут на
+                # весь вьюпорт и забирает pointer events — обычный клик выжигает таймаут и не
+                # доходит, оба масштаба дают «0 из 2» → SetupError при живых куках, сайте и WS.
+                # Не теория: 11-09-2026 в 20:21–20:31 так погасли 25 пар BinodexScreens на шести
+                # нодах разом (восстановились сами через ~13 мин). Реестр: scale-opener-guard.
+                await page.locator(opener).first.dispatch_event('click')
             item_loc = page.locator(item).first
             await item_loc.wait_for(state='visible', timeout=_left_ms(deadline, TIMEOUT_SHORT))
             # Контейнер-дропдаун binodex (.profile_add_wrap_selected_wrap_options) перехватывает
