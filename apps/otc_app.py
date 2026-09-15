@@ -761,6 +761,19 @@ async def _indicators_menu_open(page: Page, cap: float | None = None) -> bool:
 # «чипов нет» → клик по пункту меню ВЫКЛЮЧИЛ бы работающие индикаторы (клик ТОГГЛИТ).
 _legend_scope: str | None = None
 
+
+def reset_legend_scope() -> None:
+    """Забыть откалиброванную область поиска чипов легенды — DOM пересоздан.
+
+    Зовут из двух мест: новая страница (init_otc) и reload перед опционом (reload_otc_page).
+    Метка _LEGEND_ROOT_ATTR живёт на узле СТАРОГО дерева и исчезает вместе с ним, а залипший
+    scope='box' сканировал бы по ней и возвращал null — то есть «чипы не прочитались», и
+    ensure_chart_setup на ЭТОМ опционе оформление не проверял. На живых логах 15-09 это дало
+    калибровку ЧЕРЕЗ опцион: половина опционов прошла без проверки масштабов и индикаторов."""
+    global _legend_scope
+    _legend_scope = None
+
+
 # Метка контейнера легенды: при калибровке помечаем найденный узел атрибутом и дальше
 # сканируем по нему. Держать ссылку на узел между вызовами нельзя (каждый evaluate — свой
 # контекст), а атрибут переживает вызовы и исчезает вместе с перерисовкой узла — тогда
@@ -1545,8 +1558,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
     # И область поиска чипов легенды: новая версия фронта могла перенести легенду,
     # а залипшая область означала бы «чипов нет» → клик по пункту меню ВЫКЛЮЧИЛ бы
     # работающие индикаторы (клик ТОГГЛИТ). Реестр: legend-scan-scope.
-    global _legend_scope
-    _legend_scope = None
+    reset_legend_scope()
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
 
     # URL — из binodex_settings.trade_url (browser_config.otc_trade_url) с дефолтом на уровне
@@ -1641,6 +1653,9 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
             await asyncio.sleep(RELOAD_RETRY_PAUSE)
     else:
         return False  # все попытки впустую — реальный отвал/сплеш, наверх (пересоздание браузера)
+    # DOM пересоздан — метка контейнера легенды ушла со старым деревом (почему это важно —
+    # в reset_legend_scope). Реестр: legend-scope-reload.
+    reset_legend_scope()
     tracker = get_price_tracker()
     for _ in range(20):  # ждём переподключения WS-котировок (до 10 сек), как в init_otc
         if tracker.ws_connected and tracker.prices:
