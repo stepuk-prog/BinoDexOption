@@ -142,7 +142,10 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     :param text: текст, отправляемый с завершением/ошибкой
     """
     # 1. Браузер (на ранних выходах manager может отсутствовать)
-    if manager is not None:
+    # `if manager`, а не `is not None`: init отдаёт либо BrowserManager, либо FALSE.
+    # Проверка на None пропускала False, и `False.close()` падал AttributeError ВНУТРИ
+    # аварийной уборки — там, где падение дороже всего. Реестр BinoCore: close-driver-falsy.
+    if manager:
         try:
             await asyncio.wait_for(manager.close(), timeout=SHUTDOWN_STEP_TIMEOUT)
         except (Exception,) as e:

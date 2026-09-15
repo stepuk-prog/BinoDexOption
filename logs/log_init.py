@@ -319,7 +319,12 @@ def _get_file_handlers() -> list[logging.Handler]:
             )
             handler.setFormatter(formatter)
             handler.setLevel(level)
-            handler.addFilter(_ExactLevelFilter(level))
+            # error.log — самый верхний файл, он забирает свой уровень И ВЫШЕ. Точный фильтр тут
+            # терял CRITICAL (50): разбиение построено на совпадении уровня, а список кончается
+            # на ERROR — самый громкий уровень не сохранялся НИ В ОДНОМ файле. Проверено запуском
+            # 15-09-2026. Реестр BinoCore: critical-to-file.
+            if level != logging.ERROR:
+                handler.addFilter(_ExactLevelFilter(level))
             _file_handlers.append(handler)
     return _file_handlers
 
