@@ -222,8 +222,28 @@ class BaseDatabase:
 
         Пул должен быть поднят: проверка на стороне вызывающего — `await ensure_pool(db)`.
         Обёртки ретраев здесь НЕТ — кто берёт соединение напрямую, тот сам отвечает за
-        обработку обрыва."""
-        return self._pools[db].acquire(timeout=timeout)
+        обработку обрыва.
+
+        Две РАЗНЫЕ беды, и типы у них разные:
+
+        * имени нет в конфиге — опечатка в коде, чинится правкой вызова, не ретраем: KeyError,
+          как у любого обращения к словарю по несуществующему ключу;
+        * пул известен, но не поднят (после неудачного _recreate_pool; между ensure_pool у
+          вызывающего и этим вызовом есть окно) — состояние рантайма: ConnectionError.
+
+        Раньше второй случай давал невнятный AttributeError ('NoneType' object has no
+        attribute 'acquire'), который долетал до фоновой задачи и уходил в канал как
+        загадочный сбой. Правка 0.3.2 назвала его своим типом, но заодно проглотила первый:
+        `.get()` отдаёт None и на неизвестное имя — опечатка начала маскироваться под
+        «пул не поднят». Поймано тестом test_acquire_uses_named_pool."""
+        if db not in self._pools:
+            raise KeyError(f"Нет пула '{db}': известные — {', '.join(sorted(self._pools))}")
+        pool = self._pools[db]
+        if pool is None:
+            raise ConnectionError(
+                f"Пул '{db}' не поднят (предыдущее пересоздание не удалось) — "
+                f"перед acquire() нужен успешный ensure_pool('{db}')")
+        return pool.acquire(timeout=timeout)
 
     async def set_account_premium(self, id_telegram: int, premium: bool) -> bool:
         """Отметка Premium у аккаунта юзербота: `telegram.telegram.premium` (БД Program).
