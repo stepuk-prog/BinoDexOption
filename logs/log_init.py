@@ -333,9 +333,14 @@ def init_logger(name):  # инициализация логера
     logger.addHandler(TelegramBotHandler())
 
     # Stream handler (консоль)
+    # Уровень консоли — REPORT, а не порог логгера: stdout юнита читает journald, и INFO из
+    # горячего цикла забивал системный журнал дублем того, что и так лежит в info.log. Замер на
+    # живом юните (en-binodex-1m-otc, сутки): 2137 строк INFO из 2140, то есть 99.9% журнала.
+    # В journald остаются старт/стоп, паузы и ошибки; падения до инициализации логгера идут
+    # трейсбеком в stderr и этой границей не режутся. Реестр BinoCore: console-report-only.
     sh = logging.StreamHandler()
     sh.setFormatter(logging.Formatter(LOG_FORMAT))
-    sh.setLevel(_BASE_LEVEL)
+    sh.setLevel(REPORT_LEVEL)
     logger.addHandler(sh)
 
     # File handlers (синглтон): по одному файлу на уровень
