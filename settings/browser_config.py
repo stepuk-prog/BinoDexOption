@@ -1,7 +1,6 @@
-import sys
-
 from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
+from settings.fatal import fatal_exit
 
 
 def find_par(data, par):
@@ -17,12 +16,12 @@ def find_par(data, par):
     получали невнятный ImportError."""
     result = next((item['par_value'] for item in data if item['par_name'] == par), None)
     if result is None:
-        # Логгер импортируем ЛЕНИВО: на import-time settings ещё не должен тянуть logs
-        # (тот сам читает settings.logger_config — получился бы новый цикл). К моменту
-        # реальной ошибки всё уже инициализировано.
-        from logs import init_logger
-        init_logger(__name__).error(f'Не найден параметр {par} для браузера')
-        sys.exit(1)
+        # Через settings.fatal, а НЕ через логгер: это import-time, лупа ещё нет, и TG-хендлер
+        # логгера молчит по построению (emit кладёт отправку в create_task) — отказ остался бы
+        # виден только в файле. fatal_exit шлёт синхронно и отдаёт код 12 «нужен человек»
+        # вместо 1 «краш, рестартани меня». Реестр BinoCore: fatal-config-alert.
+        fatal_exit(f'Не найден параметр {par} для браузера (settings.tv_settings / '
+                   f'settings.binodex_settings)')
     return result
 
 
@@ -31,7 +30,7 @@ def find_par(data, par):
 # определяем как None, чтобы импорт FIN-модулей не падал (их код в OTC-режиме не исполняется).
 #
 # ЧИТАЕМ ТОЛЬКО ТО, ЧТО РЕАЛЬНО ИСПОЛЬЗУЕТСЯ (2026-08-15). find_par при отсутствии строки делает
-# sys.exit(1), поэтому каждый лишний параметр здесь — жёсткая стартовая зависимость от строки в
+# fatal_exit, поэтому каждый лишний параметр здесь — жёсткая стартовая зависимость от строки в
 # БД: удаление НИКЕМ не используемого селектора роняло бы бот на импорте. Снято отсюда как
 # мёртвое: vib_kat, close_tool_win, fxcm, search_kat, find_kat, find_val (старый флоу выбора
 # котировки через окно категорий; сейчас символ ставится через #symbol + data-symbol-name).
@@ -42,7 +41,7 @@ if binary:
     # Записи `pop-up`, `pop_up2`, `pop_up3` больше не читаем (10-09-2026): их значения —
     # конкретные имена классов TV, которые протухают при каждой выкатке фронта. Оверлеи
     # снимает close_dom_popups по факту перекрытия точки клика. Строки в БД НЕ удалять,
-    # пока не выкачены ВСЕ программы семьи: find_par на отсутствие делает sys.exit(1).
+    # пока не выкачены ВСЕ программы семьи: find_par на отсутствие делает fatal_exit.
     search_val = find_par(data=vib_all_kat, par='search_val')
     # Меню выбора таймфрейма
     tf_menu = find_par(data=vib_all_kat, par='tf_menu')
@@ -86,7 +85,7 @@ else:
 otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_settings")
 # Открытие/закрытие окна выбора актива (одна кнопка-переключатель)
 # URL/Origin binodex — единый источник (binodex_settings.trade_url/landing_url/ws_origin),
-# меняется в одном месте. next()+дефолт, а НЕ find_par (тот sys.exit при отсутствии) — чтобы
+# меняется в одном месте. next()+дефолт, а НЕ find_par (тот fatal_exit при отсутствии) — чтобы
 # старая БД без этих строк не валила старт.
 otc_trade_url = next((i['par_value'] for i in otc_setting if i['par_name'] == 'trade_url'), 'https://binodex.app/trade')
 # NB: landing_url отсюда не читаем — логин-флоу берёт его из своего sel-словаря
@@ -104,7 +103,7 @@ otc_input_pair = find_par(data=otc_setting, par='input_pair')
 # Элемент пары в списке модалки (текст: '<pair> OTC <payout>%')
 otc_modal_pair_item = find_par(data=otc_setting, par='modal_pair_item')
 # NB: tek_val (текущая пара в сайдбаре) отсюда снят (2026-08-15) — не используется нигде, а
-# через find_par (sys.exit(1) при отсутствии строки) держал бот заложником лишней строки в БД.
+# через find_par (fatal_exit при отсутствии строки) держал бот заложником лишней строки в БД.
 # Зона графика для скриншота (canvas)
 screen_zone_otc = find_par(data=otc_setting, par='screen_zone')
 # Кнопка настроек аккаунта (тулбар) — есть ТОЛЬКО при полностью прогруженном UI; на сплеше

@@ -7,6 +7,7 @@ from classes.Option_class import Option
 from logs import init_logger
 from settings._bootstrap import bootstrap_fetch, bootstrap_fetch_many
 from settings.env import parse_bool, req_int, opt_int, req_str  # единые безопасные парсеры env
+from settings.fatal import fatal_exit
 from settings.logger_config import file_suffix          # единый суффикс {tf}_{bin|otc}
 
 load_dotenv(override=False)  # Не перезаписывать переменные окружения из системы/PyCharm
@@ -33,7 +34,7 @@ binary = parse_bool(os.getenv("BINARY", "0"))
 # режиму (binary) не трогает.
 browser_engine = os.getenv("BROWSER", "auto").lower()
 if browser_engine not in ("auto", "firefox", "chromium"):
-    raise ValueError(f"BROWSER='{browser_engine}' не поддерживается (auto|firefox|chromium)")
+    fatal_exit(f"BROWSER='{browser_engine}' не поддерживается (auto|firefox|chromium)")
 # Ключ программы — фильтр своих строк в общей settings.option_setting.
 prog_key = os.getenv("PROG_KEY")
 
@@ -48,7 +49,7 @@ option = bootstrap_fetch(
     'WHERE timeframe = $1 AND "binary" = $2 AND program = $3',
     timeframe, binary, prog_key, fetch_mode='row')
 if option is None:
-    raise ValueError(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
+    fatal_exit(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
 test = parse_bool(os.getenv("TEST", "0"))
 overlap = opt_int("OVERLAP", 0)
 program_id = option['program_id']
@@ -88,15 +89,15 @@ else:
     channel_id = option['channel_id']
     creds = _program_rows['creds']
     if not creds:
-        raise ValueError(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
+        fatal_exit(f"Не найден юзербот id_telegram={option['user_bot']} в telegram.telegram")
     api_id = creds['api_id']
     api_hash = creds['api_hash']
     # Прод (§2): только session_string из БД (in_memory, без .session на диске). Пустой
     # session_string → явная ошибка на старте (нужна переавторизация и заливка строки в БД).
     session_string = creds['session_string']
     if not session_string:
-        raise ValueError(f"Пустой session_string для юзербота id_telegram={option['user_bot']} "
-                         f"в telegram.telegram — нужна переавторизация и заливка строки в БД")
+        fatal_exit(f"Пустой session_string для юзербота id_telegram={option['user_bot']} "
+                   f"в telegram.telegram — нужна переавторизация и заливка строки в БД")
     session_file = None  # прод не использует файловую session (только TEST=1)
 prog_name = option['prog_name']
 # id аккаунта юзербота: по нему ведётся отметка Premium в telegram.telegram
@@ -119,7 +120,7 @@ if cook_otc_override and not binary:
         'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',
         int(cook_otc_override), fetch_mode='val')
     if not cookies:
-        raise ValueError(f"COOK_OTC={cook_otc_override}: storage_state не найден в cookies.binodex_cookies")
+        fatal_exit(f"COOK_OTC={cook_otc_override}: storage_state не найден в cookies.binodex_cookies")
     logger.info("COOK_OTC override: загружены куки для user_id=%s", cook_otc_override)
 
 # user_id владельцев кук — для рантайм-перечитывания из БД на каждом init (Survive §4.3:
@@ -177,15 +178,15 @@ _dogon = option['dogon']
 if (not isinstance(_dogon, (list, tuple)) or not _dogon
         or not all(isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0
                    for d in _dogon)):
-    raise ValueError(f"Некорректный option_setting.dogon={_dogon!r} — ожидается непустой "
-                     f"массив положительных чисел (минуты перекрытий)")
+    fatal_exit(f"Некорректный option_setting.dogon={_dogon!r} — ожидается непустой "
+               f"массив положительных чисел (минуты перекрытий)")
 option_data = Option(tf=timeframe, dogon=list(_dogon))
 # translocation — пара [start_random, end_random] из jsonb БД. Проверяем явно, иначе
 # NULL/короткий массив дал бы TypeError/IndexError на импорте (краш до подъёма логгера).
 translocation = option['translocation']
 if not isinstance(translocation, (list, tuple)) or len(translocation) < 2:
-    raise ValueError(f"Некорректный option_setting.translocation={translocation!r} — "
-                     f"ожидается массив [start_random, end_random]")
+    fatal_exit(f"Некорректный option_setting.translocation={translocation!r} — "
+               f"ожидается массив [start_random, end_random]")
 # Нормализуем порядок: перевёрнутая пара (start > end) дала бы неверные уровни ПС в Option.levels().
 _start_random, _end_random = sorted((translocation[0], translocation[1]))
 option_data.start_random = _start_random

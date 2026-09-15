@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 from pyrogram.errors import Unauthorized
 
 from logs import init_logger
-from settings.timing import LOGGER_FLUSH_DELAY, SHUTDOWN_STEP_TIMEOUT, STATUS_WRITE_TIMEOUT
+from settings.timing import (LOGGER_FLUSH_DELAY, SHUTDOWN_DB, SHUTDOWN_LOGGER,
+                             SHUTDOWN_MODERATOR, SHUTDOWN_STEP_TIMEOUT, STATUS_WRITE_TIMEOUT)
 from settings.constant import EXIT_RESTART, EXIT_USERBOT
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ async def _close_database():
     """Закрытие пулов БД (единый async-интерфейс settings.config.database)."""
     try:
         from settings.config import database  # lazy — избегаем циклических импортов
-        await database.close()
+        await asyncio.wait_for(database.close(), timeout=SHUTDOWN_DB)
     except (Exception,) as e:
         logger.warning(f"Ошибка закрытия пулов БД: {e}")
 
@@ -118,7 +119,7 @@ async def _close_moderator_bot():
     """Закрытие aiogram-сессии бота-модератора (пересылка вех в темы форума), если создавался."""
     try:
         from apps.forum_forward import close_moderator_bot
-        await close_moderator_bot()
+        await asyncio.wait_for(close_moderator_bot(), timeout=SHUTDOWN_MODERATOR)
     except (Exception,) as e:
         logger.warning(f"Ошибка закрытия бота-модератора: {e}")
 
@@ -128,7 +129,9 @@ async def _close_telegram_logger():
     try:
         from logs.log_init import close_telegram_bot
         await asyncio.sleep(LOGGER_FLUSH_DELAY)  # дать aiogram дослать pending-сообщения (последний report)
-        await close_telegram_bot()               # aiogram 3.x: закрываем aiohttp-сессию (если бот создан)
+        # Потолок обязателен: без него зависшая отправка держала бы процесс до SIGKILL от
+        # systemd, и весь бюджет уборки (SHUTDOWN_TOTAL_BUDGET) стал бы неверен.
+        await asyncio.wait_for(close_telegram_bot(), timeout=SHUTDOWN_LOGGER)
     except (Exception,) as e:
         print(f"Ошибка закрытия aiogram-бота: {e}")  # logger уже могут быть погашены
 

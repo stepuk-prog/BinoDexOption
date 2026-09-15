@@ -20,6 +20,7 @@ from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, binary, database, program_id, cook_name_otc
 from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, USERBOT_CONNECT_TIMEOUT)
+from settings.timing import SHUTDOWN_TOTAL_BUDGET, SYSTEMD_STOP_TIMEOUT
 from settings.constant import EXIT_BROWSER, EXIT_COOKIES, EXIT_SETUP, BROWSER_MAX_ATTEMPTS
 
 logger = init_logger(__name__)
@@ -402,8 +403,24 @@ async def _shutdown_on_session_event(manager) -> bool:
     return True
 
 
+def _check_shutdown_budget() -> None:
+    """Предупредить, если сумма потолков уборки не влезает в TimeoutStopSec юнита.
+
+    Тихий рассинхрон здесь стоит дорого и виден только по факту: systemd убивает процесс
+    SIGKILL'ом посреди закрытия браузера, Playwright оставляет висячий lock в общем кэше
+    ms-playwright, и следующий запуск на этой ноде уже не поднимает браузер. Проверка
+    бесплатная и делается один раз на старте. Слагаемые — в settings/timing.py.
+    Реестр BinoCore: shutdown-budget-match."""
+    if SHUTDOWN_TOTAL_BUDGET >= SYSTEMD_STOP_TIMEOUT:
+        logger.error(f'Бюджет остановки {SHUTDOWN_TOTAL_BUDGET:.0f}с не влезает в '
+                     f'TimeoutStopSec={SYSTEMD_STOP_TIMEOUT}с (systemd/binodex-*.service) — systemd успеет '
+                     f'прислать SIGKILL посреди уборки. Поднимите TimeoutStopSec или урежьте '
+                     f'потолки SHUTDOWN_*')
+
+
 async def bot():
     """Запуск бота"""
+    _check_shutdown_budget()
     logger.report('🚀 Стартую')
 
     # Поднимаем пулы БД (program + binodex) до первого запроса. Раньше get_app/
