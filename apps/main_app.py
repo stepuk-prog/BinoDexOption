@@ -118,8 +118,13 @@ async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
     lead = min(float(HEALTH_LEAD), seconds) if not binary else 0.0
     await sleep_or_stop(stop_event, seconds - lead)
     if lead and not stop_event.is_set():
+        # Лид — это окно ДО экспирации, а не пауза ПОСЛЕ проверки. Восстановление UI может занять
+        # весь свой потолок, и безусловный сон на весь лид добавлял бы это время ПОВЕРХ экспирации:
+        # итоговый кадр снимался бы с ценой чужого момента — ровно то, от чего страхует бюджет
+        # кадра. Поэтому досыпаем только ОСТАТОК лида (в норме проверка мгновенна и остаток полный).
+        started = time.monotonic()
         await _ensure_otc_alive(manager, stop_event)
-        await sleep_or_stop(stop_event, lead)
+        await sleep_or_stop(stop_event, max(0.0, lead - (time.monotonic() - started)))
 
 
 async def _capture(manager: "BrowserManager", qr, *, seek_point: bool):
