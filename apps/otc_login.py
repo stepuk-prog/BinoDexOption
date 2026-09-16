@@ -203,7 +203,21 @@ async def otc_inline_login(page: Page, context: BrowserContext,
         if not on_trade(page.url):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
             return False
-        await _imap_thread(_purge_privy, imap)
+        # ВСЁ, что ниже, — уборка, а не часть входа: вход уже доказан (privy:token в
+        # localStorage + мы на /trade). Поэтому её сбой НЕ должен превращаться в «релогин не
+        # удался»: раньше _purge_privy стоял голым, и подвисший IMAP уводил поток в ветку
+        # таймаута/ошибки ниже → return False → вызывающий не сохранял свежий storage_state в БД
+        # → init_otc перевозбуждал CookiesExpired → счётчик RECOVER_ATTEMPTS останавливал
+        # программу «куки не восстановлены». При том, что куки восстановлены и лежат в живом
+        # контексте. Цена уборки одноразовых кодов — не остановка программы.
+        try:
+            await _imap_thread(_purge_privy, imap)
+        except (Exception,) as err:
+            # Флага пропуска logout здесь НЕТ намеренно (в отличие от пары Gold/AITrade): в этой
+            # программе logout в finally и так идёт под своим потолком и своим except, поэтому
+            # гонка с потоком-сиротой выльется в проглоченное исключение, а не в зависание.
+            logger.warning(f'OTC inline-логин: уборка писем Privy не удалась ({err}) '
+                           f'— вход состоялся, письма останутся в ящике')
         logger.report('OTC: inline-релогин binodex успешен')
         return True
     except (Exception,) as err:
