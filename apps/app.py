@@ -459,6 +459,15 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
         await close_program(manager=manager, status=1,
                             text='Сбой БД при чтении пар (option_data_tv) — перезапуск')
         return False  # close_program вызывает sys.exit, но на всякий случай
+    if not active_binary_list and used_val:
+        # Второй проход, как у OTC: свежих пар не осталось (пул активных сузился до дедуп-окна) —
+        # игнорируем окно и повторяем по ПОЛНОМУ списку. Без него выборка остаётся пустой НАВСЕГДА
+        # до рестарта, как только активных пар станет не больше окна: БД исправна, браузер исправен,
+        # диспетчер видит живой юнит, а постов нет. `used_val` в условии — чтобы на первом заходе
+        # (окно пустое) не гонять тот же запрос дважды.
+        logger.warning('FIN: свежих пар не осталось — игнорирую дедуп-окно, повторяю по полному списку')
+        active_binary_list = await database.option_data_tv(
+            tf=log_data.find_timeframe, exclude_ids=[]) or []
     if not active_binary_list:  # пустой список — реально нет валютных пар для опциона
         await close_program(manager=manager, status=1, text='Не найдено валютных пар для опциона')
         return False  # close_program вызывает sys.exit, но на всякий случай
