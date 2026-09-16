@@ -411,14 +411,19 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
     модалки, ожидание пункта, ожидание WS-котировки) — на двух десятках пар это десятки минут
     при формально живом юните. Бюджет вышел — отдаём False, вызывающий переждёт штатно."""
     page = manager.pages['main']
-    active_otc_list = await database.option_data_pocket(exclude_ids=valute, tf=log_data.find_timeframe)
-    if active_otc_list is False:  # ошибка пула (контракт execute_query) — не «нет пар»
+    # Один запрос вместо двух: тянем ПОЛНЫЙ список по ТФ, а недавние пары исключаем в памяти —
+    # порядок вьюхи срез сохраняет, а прежний второй SELECT (на «пары исчерпаны исключением»)
+    # был ровно тем же запросом без фильтра.
+    full = await database.option_data_pocket(exclude_ids=[], tf=log_data.find_timeframe)
+    if full is False:  # ошибка пула (контракт execute_query) — не «нет пар»
         return False
-    if not active_otc_list:  # пусто после исключения → разрешаем повтор недавних пар
-        logger.info("OTC: активные пары исчерпаны исключением недавних — повторяю запрос с разрешением повтора")
-        active_otc_list = await database.option_data_pocket(exclude_ids=[], tf=log_data.find_timeframe)
-    if not active_otc_list:  # пусто и без исключения (нет активных пар на ТФ) либо ошибка пула
+    if not full:  # нет активных пар на этом ТФ
         return False
+    recent = set(valute)
+    active_otc_list = [row for row in full if row['val_id'] not in recent]
+    if not active_otc_list:  # все активные пары — недавние → разрешаем повтор
+        logger.info('OTC: активные пары исчерпаны исключением недавних — разрешаю повтор')
+        active_otc_list = full
     for idx, otc in enumerate(active_otc_list):
         if deadline is not None and time.monotonic() >= deadline:
             logger.warning(f'OTC: бюджет подбора пары исчерпан — перебрал {idx} из '
