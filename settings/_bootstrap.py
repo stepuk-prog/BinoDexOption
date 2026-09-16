@@ -13,8 +13,9 @@ settings/browser_config.py (tv_settings/pocket_settings) — общий хелп
 """
 import asyncio
 import sys
+from typing import NoReturn
 
-from binocore.db import connect_with_retry
+from binocore.db import CONNECT_RETRYABLE, connect_with_retry
 
 from settings.database_config import (DB_NAMES, init_json_codec, pg_host,
                                       pg_password, pg_port, pg_user)
@@ -59,6 +60,35 @@ async def _fetch_many(db: str, queries):
         await conn.close()
 
 
+def _fatal_bootstrap(db: str, error: Exception) -> NoReturn:
+    """Отказ СТАРТОВОГО чтения конфига: сообщить оператору и выйти осмысленным кодом.
+
+    Зачем здесь, а не на местах вызова: чтений на импорте несколько (селекторы TV, селекторы
+    binodex, инстанс-настройки, креды бота), и обёртка по одной на вызов себя уже показала —
+    ревизия 16-09-2026 нашла обёрнутым ОДНО чтение из четырёх, а остальные падали голым
+    traceback мимо settings/fatal.py: код 1, диспетчер поднимает, падает снова, и ни одной
+    строки оператору. Здесь точка одна на все чтения, сколько бы их ни добавили потом.
+
+    Код выхода разный, потому что отказы разной природы:
+      • БД недоступна (CONNECT_RETRYABLE — тот же список, по которому коннект уже отретраил
+        пять раз): PgBouncer флапнул, Patroni переключил лидера. Это рассосётся само, поэтому
+        код 1 «краш, рестартани меня» — так же, как рантайм отвечает на ту же беду
+        (ProgramRestart), и диспетчер поднимет процесс заново;
+      • подключились, но запрос не прошёл (нет таблицы/колонки, синтаксис, права) — само не
+        поправится: fatal_exit → EXIT_SETUP (12) «нужен человек», диспетчер ждать не станет.
+
+    Импорт fatal ЛОКАЛЬНЫЙ, а не модульный: нас зовут из середины импорта settings, и
+    settings.fatal тянет settings.constant — модульный импорт замкнул бы круг.
+    """
+    from settings.fatal import fatal_exit, notify_fatal
+    where = f'стартовое чтение конфига из БД «{db}»'
+    if isinstance(error, CONNECT_RETRYABLE):
+        notify_fatal(f'{where}: БД недоступна после повторов — {type(error).__name__}: {error}. '
+                     f'Выхожу кодом 1: отказ транзиентный, диспетчер поднимет заново')
+        raise SystemExit(1)
+    fatal_exit(f'{where} не удалось — {type(error).__name__}: {error}')
+
+
 def bootstrap_fetch_many(db: str, queries):
     """Несколько стартовых запросов к ОДНОЙ базе за ОДИН коннект.
 
@@ -70,6 +100,8 @@ def bootstrap_fetch_many(db: str, queries):
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(_fetch_many(db, list(queries)))
+    except (Exception,) as error:
+        _fatal_bootstrap(db, error)   # не возвращается: SystemExit 1 либо 12
     finally:
         loop.close()
 

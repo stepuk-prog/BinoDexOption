@@ -29,8 +29,12 @@ _logger = logging.getLogger(__name__)
 # переключает лидера, сеть моргает. Один список на пул и на одиночный коннект — политика должна
 # быть одна, иначе получается то, что нашли 15-09-2026: рантайм блип переживает, а старт от того
 # же блипа умирает.
-_CONNECT_RETRYABLE = (CannotConnectNowError, ConnectionRefusedError, OSError,
-                      TimeoutError, asyncio.TimeoutError)
+# Публичное имя: этот же список нужен стартовому чтению конфига (settings/_bootstrap) —
+# по нему отличают «БД недоступна» (транзиент, код выхода 1, диспетчер поднимет заново) от
+# «схема/данные не те» (нужен человек, код 12). Второй такой список в программе означал бы
+# второй источник истины: расширили здесь — там бы молча осталось старое.
+CONNECT_RETRYABLE = (CannotConnectNowError, ConnectionRefusedError, OSError,
+                     TimeoutError, asyncio.TimeoutError)
 
 
 async def connect_with_retry(retries: int = 5, delay: float = 2.0, init=None,
@@ -63,7 +67,7 @@ async def connect_with_retry(retries: int = 5, delay: float = 2.0, init=None,
             if init is not None:
                 await init(conn)
             return conn
-        except _CONNECT_RETRYABLE as error:
+        except CONNECT_RETRYABLE as error:
             last_error = error
             if attempt >= attempts:
                 break
@@ -175,7 +179,7 @@ class BaseDatabase:
                 _logger.info(_msg('pool_created', name=name, db_name=db_name,
                                   min_size=self.min_size, max_size=self.max_size))
                 return
-            except _CONNECT_RETRYABLE as error:
+            except CONNECT_RETRYABLE as error:
                 _logger.warning(_msg('pool_attempt', attempt=attempt, retries=retries,
                                      name=name, error=error))
                 if attempt < retries:
