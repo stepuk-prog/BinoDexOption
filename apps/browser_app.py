@@ -363,9 +363,59 @@ _ZONE_CLEAR_JS = with_close_config(r"""
     try { btn.click(); return {state: 'closed', by: txt || 'close-attr'}; } catch (e) {}
   }
 
-  // 2) Диагностика: чего не увидели. Верхние элементы в пяти точках зоны — по ним видно,
+  // 2) Окно БЕЗ закрывашки — удаляем узел. Так устроено промо TV «Попробуйте анализировать
+  // графики с помощью AI Copilot» (16-09-2026, разведка на живом TV): DIV БЕЗ КЛАССА вовсе,
+  // position:fixed, z-index:auto, 320×199 в правом нижнем углу зоны, и единственная кнопка
+  // внутри — «Попробовать», то есть CTA. Нажимать нечего: клик открыл бы Copilot, а окно
+  // уезжало в кадр подписчику. Наблюдатель попапов (TV_POPUP_SUPPRESS_JS) его тоже не берёт —
+  // он требует в классе modal-|dialog-|toast, а класса нет.
+  //
+  // Условия сужены так, чтобы не снести UI самого графика:
+  //   • пересекает зону кадра и НЕ является её частью (zone.contains → это чарт, не окно);
+  //   • плавающий по тем же правилам, что и в ветке 1 (fixed без z-index / absolute с z>0);
+  //   • меньше 30% площади зоны — карточка, а не подложка во весь экран;
+  //   • есть текст (≥10 символов) — пустые распорки и хэндлы панелей не трогаем;
+  //   • закрывашки внутри НЕТ — если она есть, это дело ветки 1, а не удаления;
+  //   • берём САМЫЙ ВЕРХНИЙ такой узел, иначе удалили бы внутреннюю обёртку, а карточка осталась.
+  const removable = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (!visible(el)) continue;
+    const cs = getComputedStyle(el);
+    const floats = cs.position === 'fixed' ||
+        (cs.position === 'absolute' && (parseInt(cs.zIndex) || 0) > 0);
+    if (!floats) continue;
+    const r = el.getBoundingClientRect();
+    if (!hits(r) || zone.contains(el) || el.contains(zone)) continue;
+    if (r.width * r.height > z.width * z.height * 0.3) continue;
+    const txt = (el.innerText || '').trim();
+    if (txt.length < 10) continue;
+    let hasClose = false;
+    for (const b of el.querySelectorAll(CANDIDATES)) {
+      const t = label(b);
+      if (WORDS.includes(t) || ATTR_RE.test(b.getAttribute('data-name') || '') ||
+          ATTR_RE.test(b.getAttribute('aria-label') || '')) { hasClose = true; break; }
+    }
+    if (hasClose) continue;
+    removable.push(el);
+  }
+  const outer = removable.filter(el => !removable.some(o => o !== el && o.contains(el)));
+  if (outer.length) {
+    const el = outer[0];
+    const box = el.getBoundingClientRect();
+    const info = {cls: (el.className || '').toString().slice(0, 60),
+                  text: (el.innerText || '').trim().slice(0, 60).replace(/\s+/g, ' '),
+                  rect: [Math.round(box.x), Math.round(box.y),
+                         Math.round(box.width), Math.round(box.height)]};
+    try { el.remove(); return Object.assign({state: 'removed'}, info); } catch (e) {}
+  }
+
+  // 3) Диагностика: чего не увидели. Верхние элементы в девяти точках зоны — по ним видно,
   // что реально лежит поверх графика, без гадания по скриншоту.
-  const pts = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+  // Точки берём и по углам зоны, а не только 25/50/75%: промо-карточка AI Copilot
+  // начиналась на 78% ширины, и прежняя сетка не дотягивалась до неё двух процентов —
+  // окно уехало в кадр, а в логе не было НИ СТРОКИ.
+  const pts = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+               [0.08, 0.08], [0.92, 0.08], [0.08, 0.92], [0.92, 0.92]];
   const seen = [];
   for (const [fx, fy] of pts) {
     const el = document.elementFromPoint(z.x + z.width * fx, z.y + z.height * fy);
@@ -392,8 +442,11 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
     требования z-index, либо absolute с z-index > 0), иначе можно попасть по кнопке самого
     графика.
 
-    Не нашли — пишем в лог, ЧТО лежит поверх зоны (проба в пяти точках): иначе следующий такой
-    случай снова придётся разбирать по скриншоту. Кадр снимаем в любом случае: лучше кадр с
+    Окно БЕЗ закрывашки (промо TV «AI Copilot»: DIV без класса, единственная кнопка
+    «Попробовать») снимаем УДАЛЕНИЕМ узла: нажимать там нечего, а клик по CTA открыл бы Copilot.
+
+    Не нашли ничего — пишем в лог, ЧТО лежит поверх зоны (проба в девяти точках, включая углы):
+    иначе следующий такой случай снова придётся разбирать по скриншоту. Кадр снимаем в любом случае: лучше кадр с
     модалкой, чем пропущенный опцион."""
     for _ in range(attempts):
         try:
@@ -402,6 +455,15 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
             _overlay_log(f'Проба зоны кадра не выполнилась: {type(error).__name__}: {error}')
             return
         state = res.get('state')
+        if state == 'removed':
+            # Окно снято УДАЛЕНИЕМ узла — у него не было закрывашки (промо TV «AI Copilot»).
+            # Пишем класс, текст и геометрию: класса у карточки может не быть вовсе, и тогда
+            # текст — единственное, по чему её узнают в следующий раз.
+            logger.info(f'Удалено окно в зоне кадра без закрывашки: '
+                        f'class={res.get("cls")!r} rect={res.get("rect")} '
+                        f'текст={res.get("text")!r}')
+            await page.wait_for_timeout(200)
+            continue
         if state == 'closed':
             # info, а не канал: TV показывает онбординг на каждом подъёме браузера, то есть
             # сообщение приходило бы после каждого рестарта у каждого инстанса. Сам факт, что
