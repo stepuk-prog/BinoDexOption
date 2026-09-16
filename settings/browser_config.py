@@ -1,5 +1,6 @@
 from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
+from settings._bootstrap_sql import SQL_BINODEX_SETTINGS, SQL_TV_SETTINGS
 from settings.fatal import fatal_exit
 
 
@@ -35,7 +36,7 @@ def find_par(data, par):
 # мёртвое: vib_kat, close_tool_win, fxcm, search_kat, find_kat, find_val (старый флоу выбора
 # котировки через окно категорий; сейчас символ ставится через #symbol + data-symbol-name).
 if binary:
-    vib_all_kat = bootstrap_fetch('program', "SELECT * FROM settings.tv_settings")
+    vib_all_kat = bootstrap_fetch('program', SQL_TV_SETTINGS)
 
     # поиск поля ввода валют
     # Записи `pop-up`, `pop_up2`, `pop_up3` больше не читаем (10-09-2026): их значения —
@@ -82,7 +83,7 @@ else:
 #---------- Настройки для OTC (binodex) --------------------------------------------------------------------------------
 # Селекторы сайта binodex.app из binodex.settings.binodex_settings (подобраны scripts/binodex_selectors.py).
 # Страница OTC берётся из binodex.cookies.pages (bino_option/otc), не хардкодим.
-otc_setting = bootstrap_fetch('binodex', "SELECT * FROM settings.binodex_settings")
+otc_setting = bootstrap_fetch('binodex', SQL_BINODEX_SETTINGS)
 # Открытие/закрытие окна выбора актива (одна кнопка-переключатель)
 # URL/Origin binodex — единый источник (binodex_settings.trade_url/landing_url/ws_origin),
 # меняется в одном месте. next()+дефолт, а НЕ find_par (тот fatal_exit при отсутствии) — чтобы

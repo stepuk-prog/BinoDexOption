@@ -6,6 +6,7 @@ from pyrogram import Client
 from classes.Option_class import Option
 from logs import init_logger
 from settings._bootstrap import bootstrap_fetch, bootstrap_fetch_many
+from settings._bootstrap_sql import SQL_COOKIES_BINODEX_COOKIES, SQL_COOKIES_TV_COOKIES, SQL_OPTION_SETTING, SQL_OWNER_NAME, SQL_USERBOT_CREDS
 from settings.env import parse_bool, req_int, opt_int, req_str  # единые безопасные парсеры env
 from settings.fatal import fatal_exit
 from settings.logger_config import file_suffix          # единый суффикс {tf}_{bin|otc}
@@ -45,8 +46,7 @@ screenshot_path = f"pictures/screenshot_{file_suffix}.png"
 # settings.option_setting общая для нескольких программ → отбираем свои по program.
 option = bootstrap_fetch(
     'binodex',
-    'SELECT * FROM settings.option_setting '
-    'WHERE timeframe = $1 AND "binary" = $2 AND program = $3',
+    SQL_OPTION_SETTING,
     timeframe, binary, prog_key, fetch_mode='row')
 if option is None:
     fatal_exit(f"Не найдены настройки в БД для TIMEFRAME={timeframe}, BINARY={binary}")
@@ -69,11 +69,10 @@ main_cycle_pause_min, main_cycle_pause_max = sorted((main_cycle_pause_min, main_
 # как и имя владельца OTC-кук: оно зависит от env-оверрайда COOK_OTC, который разбирается дальше.
 _program_queries, _keys = [], []
 if not test:
-    _program_queries.append(('SELECT api_id, api_hash, session_string FROM telegram.telegram '
-                             'WHERE id_telegram = $1', (option['user_bot'],), 'row'))
+    _program_queries.append((SQL_USERBOT_CREDS, (option['user_bot'],), 'row'))
     _keys.append('creds')
 if binary:
-    _program_queries.append(('SELECT cookies FROM cookies.tv_cookies WHERE user_id = $1',
+    _program_queries.append((SQL_COOKIES_TV_COOKIES,
                              (option['cookies_tv'],), 'val'))
     _keys.append('cookies_tv')
 _program_rows = dict(zip(_keys, bootstrap_fetch_many('program', _program_queries)))
@@ -110,14 +109,14 @@ if binary:
     cookies = _program_rows['cookies_tv']   # прочитаны выше, вместе с кредами юзербота
 else:
     cookies = bootstrap_fetch(
-        'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',
+        'binodex', SQL_COOKIES_BINODEX_COOKIES,
         option['cookies_pocket'], fetch_mode='val')
 
 # Test override: подмена OTC storage_state через env COOK_OTC (user_id в binodex_cookies), без правки БД
 cook_otc_override = os.getenv("COOK_OTC")
 if cook_otc_override and not binary:
     cookies = bootstrap_fetch(
-        'binodex', 'SELECT cookies FROM cookies.binodex_cookies WHERE user_id = $1',
+        'binodex', SQL_COOKIES_BINODEX_COOKIES,
         int(cook_otc_override), fetch_mode='val')
     if not cookies:
         fatal_exit(f"COOK_OTC={cook_otc_override}: storage_state не найден в cookies.binodex_cookies")
@@ -133,7 +132,7 @@ cookies_pocket_id = int(cook_otc_override) if (cook_otc_override and not binary)
 cook_name_otc = '?'
 if not binary:
     cook_name_otc = bootstrap_fetch(
-        'program', 'SELECT name FROM telegram.telegram WHERE id_telegram = $1',
+        'program', SQL_OWNER_NAME,
         cookies_pocket_id, fetch_mode='val') or '?'
 
 # Test override: переадресация основных сигналов в другой канал через env SIGNAL_CHANNEL
