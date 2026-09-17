@@ -39,7 +39,8 @@ from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, lo
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
-                                     otc_chart_scale, otc_chart_scale_item, otc_indicators)
+                                     otc_chart_scale, otc_chart_scale_item, otc_indicators,
+                                     otc_theme_open, otc_theme_toggle, otc_wrap_bg)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -1314,6 +1315,75 @@ _CLEAR_OFFZONE_JS = r"""
 """
 
 
+async def chart_bg_on(page: Page) -> bool | None:
+    """Включена ли фоновая подложка чарта. None — спросить не вышло (селектора нет / страница моргнула).
+
+    Признак прямой: `.wrap_bg` ЕСТЬ В DOM = подложка включена. При выключенной настройке binodex
+    этот узел не создаёт вовсе — проверено на живом сайте 17-09-2026 (принудительно включали ключ,
+    узел появлялся с `img/trade/main_bg_2.webp` 1712x990, выключали — исчезал)."""
+    if not otc_wrap_bg:
+        return None
+    try:
+        return bool(await page.locator(otc_wrap_bg).first.count())
+    except (Exception,):
+        return None
+
+
+async def apply_chart_background(page: Page) -> None:
+    """Выключить фоновую подложку чарта (картинка с быком и медведем) — настройкой аккаунта.
+
+    ЗАЧЕМ. Подложку рисует сам binodex во весь вьюпорт (1712x990), и она дорогая. Замер headless
+    на живом сайте 17-09-2026, дельта utime+stime процессов браузера: подложка ВКЛЮЧЕНА — 118.9%
+    CPU, выключена — 63.2% и 57.6% в двух замерах. То есть она стоит примерно СТОЛЬКО ЖЕ, сколько
+    вся остальная страница, и вдвое поднимает нагрузку ноды на ровном месте.
+
+    В кадр подписчику она при этом не попадает вовсе: кадр берётся из `canvas.toDataURL`, куда DOM
+    не входит, а свою подложку (глобус) мы подкладываем композитом из файла (см. screenshot_otc).
+    Значит платить за неё нечем.
+
+    ПОЧЕМУ НАСТРОЙКОЙ, А НЕ localStorage. Ключ `isChartBgVisible` действительно лежит в
+    localStorage и приезжает в storage_state, но писать его напрямую — это второй способ делать
+    то же самое: у семьи в settings.binodex_settings ДАВНО заведены строки `setup_theme`,
+    `setup_theme_toggle` и `wrap_bg` под этот самый переключатель. Эта программа их просто не
+    читала, оттого подложка и рисовалась молча.
+
+    ИДЕМПОТЕНТНОСТЬ. Клик по переключателю ТОГГЛИТ, поэтому сначала смотрим состояние: подложки
+    нет — не трогаем ничего и в UI не лезем вовсе (обычный случай, стоит один `count()`).
+
+    Путь в UI проверен на живом сайте: шестерёнка (`setup_settings_open`) → кнопка «Theme»
+    (`setup_theme`) → переключатель (`setup_theme_toggle`, класс `switch_active` пока фон включён).
+    Ошибки не критичны (подложка — оформление страницы, не данные): логируем и продолжаем."""
+    if not (otc_theme_open and otc_theme_toggle):
+        return                      # старая БД без строк — просто не выключаем
+    if await chart_bg_on(page) is not True:
+        return                      # уже выключена (или не смогли спросить) — не тоггаем вслепую
+    try:
+        await dismiss_modal_backdrop(page)
+        await page.locator(otc_settings_btn).first.click(timeout=TIMEOUT_SHORT)
+        await page.locator(otc_theme_open).first.click(timeout=TIMEOUT_SHORT)
+        toggle = page.locator(otc_theme_toggle).first
+        await toggle.wait_for(state='visible', timeout=TIMEOUT_SHORT)
+        await toggle.click(timeout=TIMEOUT_SHORT)
+        await page.wait_for_timeout(500)
+        if await chart_bg_on(page) is False:
+            # info, а не report: это рутина подъёма, а не событие для служебной темы. У наборов
+            # кук, где binodex включил подложку сам, строка уходила бы в Telegram на КАЖДОМ
+            # холодном старте — и читалась бы там дико, потому что тема общая на весь флот, а
+            # подпись берётся от инстанса (17-09-2026: так и вышло на «Binary Screen EUR/USD»).
+            logger.info('OTC: фоновая подложка чарта выключена настройкой аккаунта '
+                        '(binodex включил её сам) — снимаю лишнюю нагрузку на CPU')
+        else:
+            logger.warning('OTC: переключатель темы нажат, но подложка осталась — '
+                           'проверь selectors setup_theme/setup_theme_toggle в binodex_settings')
+    except (Exception,) as error:
+        logger.warning(f'OTC: не удалось выключить подложку чарта: {error}')
+    finally:
+        # Закрыть меню настроек, иначе оно висит поверх страницы до конца жизни браузера.
+        try:
+            await page.locator(otc_settings_btn).first.click(timeout=TIMEOUT_SHORT)
+        except (Exception,):
+            pass
+
 async def apply_offzone(page: Page, cap: float | None = None) -> None:
     """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары.
 
@@ -1540,6 +1610,9 @@ async def _verify_otc_ready(page: Page) -> None:
     await apply_chart_scale(page)
     await apply_chart_indicators(page)
     # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
+    # Подложку гасим ДО off-zone: off-zone прячет её от отрисовки, но настройка аккаунта при этом
+    # остаётся включённой, и в следующем контексте всё повторится. Здесь выключаем по-настоящему.
+    await apply_chart_background(page)
     await apply_offzone(page)
     # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.
     if await _wait_quotes_ws("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
@@ -1566,6 +1639,11 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     if not await otc_inline_login(page, manager.context, creds['mail'], creds['mail_app_pass'], sel):
         return False
     # Свежую сессию — в БД (переживёт рестарт). Сбой сохранения не критичен: работаем на live-сессии.
+    # Подложку гасим ДО снятия storage_state, а не после. Настройка живёт в localStorage
+    # (`isChartBgVisible`), то есть уезжает в БД ВМЕСТЕ с куками — и тогда она приедет на все ноды
+    # уже выключенной, без лишнего захода в UI на каждом подъёме. Если сделать это после, в БД
+    # ляжет storage_state с включённой подложкой, и каждый холодный старт будет выключать её заново.
+    await apply_chart_background(page)
     try:
         if await database.save_otc_cookies(cookies_pocket_id, await manager.context.storage_state()) is False:
             logger.warning('OTC inline-релогин: storage_state не сохранён в БД (сбой) — продолжаю на live-сессии')

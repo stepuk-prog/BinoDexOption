@@ -110,6 +110,15 @@ screen_zone_otc = find_par(data=otc_setting, par='screen_zone')
 # Кнопка настроек аккаунта (тулбар) — есть ТОЛЬКО при полностью прогруженном UI; на сплеше
 # её нет (хотя кнопка выбора пары присутствует). Маркер «не сплеш» для readiness-gate init_otc.
 otc_settings_btn = find_par(data=otc_setting, par='setup_settings_open')
+# Фоновая подложка чарта (бык с медведем, `img/trade/main_bg_2.webp`). Настройка аккаунта:
+# шестерёнка → «Theme» → переключатель. Строки в общей settings.binodex_settings были заведены
+# семьёй давно, а ЭТА программа их не читала — из-за чего подложка тихо рисовалась (см.
+# apply_chart_background в apps/otc_app.py). next()+None: старая БД без строк не валит старт,
+# просто подложку не выключим.
+otc_theme_open = next((i['par_value'] for i in otc_setting if i['par_name'] == 'setup_theme'), None)
+otc_theme_toggle = next((i['par_value'] for i in otc_setting if i['par_name'] == 'setup_theme_toggle'), None)
+# Сам элемент подложки — им же проверяем состояние: есть в DOM = фон включён.
+otc_wrap_bg = next((i['par_value'] for i in otc_setting if i['par_name'] == 'wrap_bg'), None)
 # Поле ввода почты формы логина Privy. При отвале кук binodex НЕ редиректит со /trade, а
 # всплывает форма логина ПРЯМО на графике → видимость login_email = позитивный признак отвала
 # кук (отличает его от транзиентного сплеша, где формы нет). next()+None: старая БД без строки
