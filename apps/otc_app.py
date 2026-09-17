@@ -1478,6 +1478,31 @@ async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
                                  'отдаю неуспех в политику подъёма')
 
 
+# Ожидание первой котировки по WS: 20 проб по 0.5с = 10 секунд.
+WS_WAIT_ATTEMPTS = 20
+WS_WAIT_STEP = 0.5
+
+
+async def _wait_quotes_ws(timeout_text: str) -> bool:
+    """Подождать первую цену от WS котировок. True — дождались, False — вышло время (текст
+    таймаута уже записан в лог).
+
+    ОДНА реализация на программу. Цикл стоял дважды — в `_verify_otc_ready` (подъём браузера) и
+    в `reload_otc_page` (reload перед опционом): механика одинаковая, тексты разные, и правка
+    одного места другое молча не чинила (ревизия 17-09-2026, п.3.3).
+
+    Ждём НЕ соединения, а первой ЦЕНЫ: `ws_connected` без `prices` означает, что сокет открыт, а
+    данных ещё нет, — по такому признаку фид считался бы живым раньше времени.
+    """
+    tracker = get_price_tracker()
+    for _ in range(WS_WAIT_ATTEMPTS):
+        if tracker.ws_connected and tracker.prices:
+            return True
+        await asyncio.sleep(WS_WAIT_STEP)
+    logger.warning(timeout_text)
+    return False
+
+
 async def _verify_otc_ready(page: Page) -> None:
     """Авторизация + готовность торгового UI на /trade. Возвращается при успехе; иначе raises:
     CookiesExpired (нужен релогин: нет токена / Demo / форма логина), FeedOutage (аутэйдж фида),
@@ -1517,17 +1542,12 @@ async def _verify_otc_ready(page: Page) -> None:
     # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
     await apply_offzone(page)
     # WS-котировки — мягко (источник цены chartData, WS = фолбэк/liveness). Не пошёл → деградация, БЕЗ raise.
-    tracker = get_price_tracker()
-    for _ in range(20):
-        if tracker.ws_connected and tracker.prices:
-            # info, а не report: рутинный успех подъёма браузера (старт, пересоздание,
-            # восстановление сессии) — в служебную тему это шумело на каждом рестарте, как
-            # ранее open_tv_browser finished. Провал подъёма WS ниже остаётся warning.
-            logger.info("✅ binodex: WS котировок подключён")
-            return
-        await asyncio.sleep(0.5)
-    logger.warning("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
-                   "feed_dead-детект деградирован")
+    if await _wait_quotes_ws("binodex: WS котировок не поднялся за 10с — работаю на chartData, "
+                             "feed_dead-детект деградирован"):
+        # info, а не report: рутинный успех подъёма браузера (старт, пересоздание,
+        # восстановление сессии) — в служебную тему это шумело на каждом рестарте, как
+        # ранее open_tv_browser finished. Провал подъёма WS остаётся warning (внутри).
+        logger.info("✅ binodex: WS котировок подключён")
 
 
 async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
@@ -1670,13 +1690,7 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
     # DOM пересоздан — метка контейнера легенды ушла со старым деревом (почему это важно —
     # в reset_legend_scope). Реестр: legend-scope-reload.
     reset_legend_scope()
-    tracker = get_price_tracker()
-    for _ in range(20):  # ждём переподключения WS-котировок (до 10 сек), как в init_otc
-        if tracker.ws_connected and tracker.prices:
-            break
-        await asyncio.sleep(0.5)
-    else:
-        logger.warning("binodex: WS котировок не переподключился за 10с после reload")
+    await _wait_quotes_ws("binodex: WS котировок не переподключился за 10с после reload")
     logger.info('🔄 OTC: страница перезагружена перед опционом — UI готов')
     return True
 

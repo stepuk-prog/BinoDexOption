@@ -166,12 +166,24 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
     ~70с на неудачную, складывались в десятки минут — для диспетчера это неотличимо от
     зависания, а в логе только warning'и."""
     deadline = time.monotonic() + ACQUIRE_TOTAL_BUDGET
+
+    def budget_spent() -> bool:
+        """Бюджет вышел? Тогда пишем причину — вызывающий отдаёт 'timeout'.
+
+        Проверка нужна дважды: в начале каждого круга и после цикла (последний круг мог
+        доесть остаток). Раньше в обоих местах стоял ДОСЛОВНО повторённый warning — правка
+        текста в одном месте оставляла второй как был (ревизия 17-09-2026, п.3.3).
+        """
+        if time.monotonic() < deadline:
+            return False
+        logger.warning(f'OTC: бюджет подбора пары {ACQUIRE_TOTAL_BUDGET:.0f}с исчерпан — '
+                       f'отдаю главному циклу (без рестарта)')
+        return True
+
     for _ in range(NO_PAIRS_RELOADS):
         if stop_event.is_set():
             return 'stopped'
-        if time.monotonic() >= deadline:
-            logger.warning(f'OTC: бюджет подбора пары {ACQUIRE_TOTAL_BUDGET:.0f}с исчерпан — '
-                           f'отдаю главному циклу (без рестарта)')
+        if budget_spent():
             return 'timeout'
         if not await reload_otc_page(manager=manager):
             return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
@@ -188,9 +200,7 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
             return 'stopped'
     if stop_event.is_set():
         return 'stopped'
-    if time.monotonic() >= deadline:
-        logger.warning(f'OTC: бюджет подбора пары {ACQUIRE_TOTAL_BUDGET:.0f}с исчерпан — '
-                       f'отдаю главному циклу (без рестарта)')
+    if budget_spent():
         return 'timeout'
     logger.info('OTC: на binodex нет торговых пар после быстрых reload — отдаю главному циклу '
                 '(браузер-фри ожидание при мёртвом фиде / повтор при живом), без рестарта')
