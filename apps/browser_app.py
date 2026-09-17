@@ -428,10 +428,17 @@ _ZONE_CLEAR_JS = with_close_config(r"""
       if (WORDS.includes(t) || ATTR_RE.test(b.getAttribute('data-name') || '') ||
           ATTR_RE.test(b.getAttribute('aria-label') || '')) { hasClose = true; break; }
     }
+    // Помеченное в ЭТОМ проходе не трогаем ни при каких условиях — см. markedNow. Проверка
+    // стоит ОТДЕЛЬНОЙ строкой, а не внутри условия про hasClose: querySelectorAll ищет только
+    // ПОТОМКОВ, поэтому у узла, который сам и есть закрывашка (fixed-кнопка без обёртки),
+    // hasClose выходил false, всё условие — ложным, и узел удалялся в том же проходе, где по
+    // нему только что кликнули. Проверено на стенде 17-09-2026: один проход отдавал разом и
+    // closed, и removed по одному и тому же узлу.
+    if (markedNow.has(el)) continue;
     // Закрывашка есть, но её жали на ПРОШЛОМ проходе и окно осталось → она не работает,
     // удаляем как окно без закрывашки. Без этого исключения такое окно не снималось НИКОГДА
-    // (аудит 17-09-2026). Помеченное в этом же проходе пропускаем — см. markedNow.
-    if (hasClose && (!el.hasAttribute(TRIED) || markedNow.has(el))) continue;
+    // (аудит 17-09-2026).
+    if (hasClose && !el.hasAttribute(TRIED)) continue;
     removable.push(el);
   }
   const outer = removable.filter(el => !removable.some(o => o !== el && o.contains(el)));
