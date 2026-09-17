@@ -444,15 +444,26 @@ def clear_price(price_str: str) -> str:
     return cleaned_string.replace(',', '.')
 
 
-async def find_option_data(manager: "BrowserManager", log_data: Option, used_val: list):
+# Сколько пар пробуем за один опцион, прежде чем признать заход неудачным, и тормоз между
+# ними. Три, а не одна: промах по одной паре — рутина (актив уехал из выдачи поиска TV,
+# чужая помеха над строкой), и пропустить его дешевле, чем рестартить процесс. Пауза — та же
+# защита от холостого цикла на мёртвом браузере, что INIT_FAIL_PAUSE у квизов.
+FIN_PAIR_ATTEMPTS = 3
+FIN_PAIR_FAIL_PAUSE = 5   # сек
+
+
+async def find_option_data(manager: "BrowserManager", log_data: Option, used_val: list,
+                           stop_event=None) -> bool:
     """
     Поиск данных для опциона
     :param manager: менеджер браузера
     :param used_val: список последних использованных валютных пар
     :param log_data: класс с данными
-    :return: ничего. Данные пишутся в переданный log_data (Option), а на «пар нет»
-             функция сама уходит в close_program → sys.exit — поэтому вызывающему
-             нечего проверять. Прежний докстринг обещал словарь, которого нет.
+    :param stop_event: событие остановки — чтобы пауза между парами не держала SIGTERM
+    :return: True — данные записаны в log_data (Option) и валюта выставлена в браузере;
+             False — ни одна из пар не завелась. Вызывающий (main_app) пропускает опцион, а
+             после FIN_INIT_MAX_FAILS подряд просит рестарт: столько промахов кряду по РАЗНЫМ
+             активам означает, что не работает браузер, а не выдача TV.
     """
     active_binary_list = await database.option_data_tv(tf=log_data.find_timeframe, exclude_ids=used_val)
     if active_binary_list is False:  # сбой пула (контракт execute_query) — это отвал БД, НЕ «нет пар»
@@ -472,13 +483,25 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
         await close_program(manager=manager, status=1, text='Не найдено валютных пар для опциона')
         return False  # close_program вызывает sys.exit, но на всякий случай
 
-    if len(active_binary_list) >= 3:
-        log_data.add_option_data(active_binary_list[random.randint(0, 2)])
-    else:
-        log_data.add_option_data(active_binary_list[0])
-
-    await init_valute_browser(manager, log_data.name.replace('/', ''), log_data.exchange)
-    return True
+    # Кандидаты: те же топ-3 по рангу, что и раньше, но теперь их МОЖНО перебрать. Пара,
+    # которой нет в выдаче поиска TV, больше не убивает процесс — берём следующую (так же
+    # ведёт себя OTC в parce_otc). Порядок случайный, то есть первая попытка равна прежнему
+    # `random.randint(0, 2)`; список короче трёх — работаем с тем, что есть.
+    candidates = active_binary_list[:FIN_PAIR_ATTEMPTS]
+    random.shuffle(candidates)
+    for attempt, pair_data in enumerate(candidates, 1):
+        log_data.add_option_data(pair_data)
+        if await init_valute_browser(manager, log_data.name.replace('/', ''), log_data.exchange):
+            return True
+        if attempt < len(candidates):
+            # Тормоз перед следующей парой — на случай, когда браузер МЁРТВ: Playwright тогда
+            # отбивает клики мгновенно, и перебор превратился бы в холостой цикл на сотни
+            # оборотов в секунду (замер на квизах 16-09-2026: 506 об/с, error.log перетирался
+            # за минуты, CPU в полке). Пока браузер жив, пауза теряется на фоне таймаутов.
+            if await sleep_or_stop(stop_event, FIN_PAIR_FAIL_PAUSE):
+                return False    # остановка сигналом во время паузы
+    logger.error(f'FIN: ни одна из {len(candidates)} пар не завелась в браузере')
+    return False
 
 
 async def dop_plus_message():

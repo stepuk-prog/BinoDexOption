@@ -8,7 +8,6 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 
 from classes.browser_manager import BrowserManager
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
-from apps.exit_app import close_program
 from apps.otc_app import open_otc_browser
 from apps.browser_io import eval_js
 from apps.close_ui import CLOSE_SWEEP_SELECTORS, with_close_config
@@ -874,9 +873,14 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
     # main идёт первой (idx == 0), все скриншоты снимаются с неё.
     list_screen = await database.pages(program=prog_key, mode='tv')
     if not list_screen:  # False (сбой БД) или пусто — без страниц браузер не поднять
-        await close_program(manager=manager, status=1,
-                            text='Не удалось получить страницы браузера из БД')
-        return OperationResult(success=False)
+        # НЕ close_program: open_tv_browser зовётся из init_load → init_with_retry, у которой
+        # своя политика (пауза INIT_RETRY_DELAY, пересоздание, счётчик BROWSER_MAX_ATTEMPTS →
+        # EXIT_BROWSER с провайдер-диверсным переносом). Выход отсюда кодом 1 обрывал
+        # транзиентный сбой до первого же ретрая и прятал его от этих счётчиков: на моргании
+        # TV или блипе PgBouncer получался рестарт с полным переподъёмом браузера. Для OTC это
+        # починено 12-09-2026 (apps/otc_app.py::init_otc), сюда правка не доехала — ревизия
+        # 17-09-2026, п.1.2. Закрытие менеджера и запись ошибки в лог делает init_load.
+        return OperationResult(success=False, error='Не удалось получить страницы браузера из БД')
 
     for idx, page_data in enumerate(list_screen):
         page_name = page_data['description']  # ключ из БД: main, price
@@ -906,9 +910,10 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
 
                 await page.reload(wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
             except (Exception,) as error:
-                await close_program(manager=manager, status=1,
-                                    text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
-                return OperationResult(success=False)
+                # Неуспех — политике подъёма, а не sys.exit (см. комментарий выше).
+                return OperationResult(
+                    success=False,
+                    error=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
 
             # Отвал cookies TV (§4.1/§4.3): после goto+reload остались на /signin → куки
             # мертвы. CookiesExpired → init_load → _init_with_retry (backoff + пересоздание,
@@ -932,9 +937,9 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
                 await page.set_viewport_size({'width': win_x, 'height': win_y})
                 setup_dialog_handler(page)
             except (Exception,) as error:
-                await close_program(manager=manager, status=1,
-                                    text=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
-                return OperationResult(success=False)
+                return OperationResult(
+                    success=False,
+                    error=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
 
         page = manager.pages[page_name]
         await page.bring_to_front()
@@ -950,9 +955,9 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
             await page.locator(f"xpath={tf_menu}").first.click(force=True, timeout=TIMEOUT_MEDIUM)
             await page.locator(f"xpath={tek_frame}").first.click(force=True, timeout=TIMEOUT_MEDIUM)
         except (Exception,) as error:
-            await close_program(manager=manager, status=1,
-                                text=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
-            return OperationResult(success=False)
+            return OperationResult(
+                success=False,
+                error=f'Не могу переключить таймфрейм для страницы {page_data["url"]} - {error}')
 
     # Закрытие попапов + сворачивание правой widget-панели на ВСЕХ страницах.
     # Панель в дефолте лэйаута раскрыта и съедает ~350px ширины чарт-зоны → скрин
@@ -1045,12 +1050,17 @@ async def _click_exchange_pair(page, pair: str, exchange: str) -> bool:
     return False
 
 
-async def init_valute_browser(manager: BrowserManager, valute: str, exchange: str = 'OANDA'):
+async def init_valute_browser(manager: BrowserManager, valute: str, exchange: str = 'OANDA') -> bool:
     """
     Настройка валюты в окне браузера (TradingView).
     :param manager: менеджер браузера
     :param valute: название валютной пары (например 'EURUSD')
     :param exchange: TV-код биржи котировок из БД (assets.binary_assets.exchange), напр. 'OANDA'
+    :return: True — валюта выставлена на всех страницах; False — не вышло, вызывающий берёт
+             следующую пару. Раньше обе ветки неуспеха убивали ПРОЦЕСС (close_program, код 1) —
+             из-за ОДНОЙ ненайденной строки в диалоге поиска TV. У OTC та же ситуация просто
+             берёт следующую пару (parce_otc), и это дешевле рестарта: пара могла уехать из
+             выдачи TV, а браузер при этом полностью исправен (ревизия 17-09-2026, п.1.2).
     """
     pair = valute.replace('/', '').replace(f'{exchange}:', '').upper()
     try:
@@ -1082,14 +1092,16 @@ async def init_valute_browser(manager: BrowserManager, valute: str, exchange: st
             # Клик по строке нужной биржи по data-symbol-name; _click_exchange_pair сам ждёт
             # появления строки (wait_for attached), доп. пауза после ввода не нужна.
             if not await _click_exchange_pair(page, pair, exchange):
-                await close_program(
-                    manager=manager, status=1,
-                    text=f"Ошибка загрузки данных в браузер - не найдена строка {exchange}:{pair}")
-                return
+                logger.warning(f'FIN: строка {exchange}:{pair} не найдена в диалоге поиска TV '
+                               f'(страница {page_name}) — беру следующую пару')
+                return False
 
             logger.info(f"✅ Валюта {exchange}:{pair} установлена на странице {page_name}")
     except (Exception,) as error:
-        await close_program(manager=manager, status=1, text=f"Ошибка загрузки данных в браузер - {error}")
+        logger.warning(f'FIN: не удалось выставить валюту {exchange}:{pair} — {error}')
+        return False
+
+    return True
 
 
 async def init_load(use_proxy: bool = False) -> BrowserManager | bool:

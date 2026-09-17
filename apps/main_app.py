@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 used_val = [0]
 prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
 count_price = 0  # счетчик количества одинаковой цены подряд
+
+# Сколько заходов подряд без заведённой пары признаём отказом БРАУЗЕРА, а не выдачи TV.
+# Счётчик МОДУЛЬНЫЙ: локальный обнулялся бы на каждом опционе, и три промаха кряду никогда
+# бы не накопились — ровно те грабли, на которых стояли счётчики в init_with_retry.
+FIN_INIT_MAX_FAILS = 3
+_init_fails = 0
 logger = init_logger(__name__)
 
 # OTC: binodex периодически (тест-режим) висит БЕЗ единой торговой пары — модалка пар пуста,
@@ -208,7 +214,7 @@ async def main(manager: "BrowserManager", qr, stop_event):
 
 
 async def _run_option(manager: "BrowserManager", qr, stop_event):
-    global prev_price, count_price   # used_val только мутируем (append/del) — global не нужен
+    global prev_price, count_price, _init_fails   # used_val только мутируем (append/del) — global не нужен
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
 
@@ -217,7 +223,23 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
 
     if binary:
         logger.info("🔍 Вызов find_option_data...")
-        await find_option_data(manager=manager, log_data=option_data, used_val=used_val)
+        if not await find_option_data(manager=manager, log_data=option_data,
+                                      used_val=used_val, stop_event=stop_event):
+            # Ни одна пара не завелась. Один такой заход — не повод рестартить: выдача поиска
+            # TV меняется, и пропустить опцион дешевле полного переподъёма браузера. А вот
+            # FIN_INIT_MAX_FAILS подряд по РАЗНЫМ активам означают, что не отвечает браузер —
+            # тогда просим рестарт (fall=True), как это делают квизы на MAX_INIT_FAILS.
+            _init_fails += 1
+            if _init_fails >= FIN_INIT_MAX_FAILS:
+                _init_fails = 0
+                return await exit_main(channel_mess=False, result=False, fall=True,
+                                       bug_text=f'FIN: {FIN_INIT_MAX_FAILS} пары подряд не завелись '
+                                                f'в браузере — он не отвечает',
+                                       check_cookies=count_price)
+            return await exit_main(channel_mess=False, result=False, fall=False,
+                                   bug_text='FIN: пара не завелась — пропускаю опцион',
+                                   check_cookies=count_price)
+        _init_fails = 0
         logger.info("✅ find_option_data завершён")
         logger.info("📸 Вызов screenshot(screen=None)...")
         screen_shot = await screenshot(manager=manager, take_shot=False, qr=qr)
