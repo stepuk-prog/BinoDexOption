@@ -1328,7 +1328,7 @@ async def apply_offzone(page: Page, cap: float | None = None) -> None:
                      'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR},
                     cap=cap)
     except (Exception,) as err:
-        logger.info(f"OTC off-zone apply: {err}")
+        logger.info(f'OTC: скрытие off-zone UI не применилось: {err}')
 
 
 async def _clear_offzone(page: Page, cap: float | None = None) -> None:
@@ -1339,7 +1339,7 @@ async def _clear_offzone(page: Page, cap: float | None = None) -> None:
                     {'styleId': _OFFZONE_STYLE_ID, 'keepAttr': _OFFZONE_KEEP_ATTR},
                     cap=cap)
     except (Exception,) as err:
-        logger.info(f"OTC off-zone clear: {err}")
+        logger.info(f'OTC: возврат off-zone UI не выполнился: {err}')
 
 
 async def _build_label_cutout(page: Page, asset: str) -> None:

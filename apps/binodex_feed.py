@@ -212,7 +212,7 @@ async def feed_alive(pair: str = FEED_PROBE_PAIR, timeout: float = FEED_ALIVE_TI
     try:
         return bool(await asyncio.wait_for(_probe(pair), timeout=timeout))
     except (Exception,) as err:
-        logger.debug(f"binodex feed_alive: {err}")
+        logger.debug(f'binodex: проба market-WS не дала кадра: {err}')
         return False
 
 
@@ -234,7 +234,7 @@ async def api_alive(timeout: float = API_ALIVE_TIMEOUT) -> bool:
                                    timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 return resp.status < 500
     except (Exception,) as err:
-        logger.debug(f"binodex api_alive: {err}")
+        logger.debug(f'binodex: проба auth-API не ответила: {err}')
         return False
 
 
