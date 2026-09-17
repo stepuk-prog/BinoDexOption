@@ -19,6 +19,7 @@ from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
 from settings.config import get_app, binary, database, program_id, cook_name_otc
+from settings.fatal import fatal_exit
 from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, USERBOT_CONNECT_TIMEOUT)
 from settings.timing import SHUTDOWN_TOTAL_BUDGET, SYSTEMD_STOP_TIMEOUT
 from settings.constant import EXIT_BROWSER, EXIT_COOKIES, EXIT_SETUP, BROWSER_MAX_ATTEMPTS
@@ -487,7 +488,15 @@ async def bot():
                           'стартовое сообщение', now)
 
     water_naked = get_water()
-    qr = water_naked[1] if water_naked[0] else None
+    if not water_naked[0]:
+        # QR на кадре — не украшение: это единственная ссылка на бота в посте, её проверяют
+        # отдельно (zbarimg). Не доехавшая на ноду картинка — обычный отказ выкатки — давала
+        # СУТКИ постов без QR: load_rgba отдаёт None, кадр спокойно собирается дальше, а
+        # единственный след (WARNING в файле) в Telegram не уходит по построению.
+        # Останавливаемся с кодом EXIT_SETUP=12 — «нужен человек», диспетчер не будет
+        # перезапускать впустую (ревизия 17-09-2026, п.2.1; паритет с английской парой).
+        fatal_exit('Оверлей QR не загрузился — кадры уходили бы без QR-кода')
+    qr = water_naked[1]
 
     # Graceful shutdown по SIGTERM/SIGINT (systemctl stop / диспетчер) — async-вариант:
     # signal.signal+KeyboardInterrupt в asyncio не ловится внутри корутины, поэтому через
