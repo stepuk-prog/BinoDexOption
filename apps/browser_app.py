@@ -335,6 +335,14 @@ _ZONE_CLEAR_JS = with_close_config(r"""
   const CANDIDATES = ['button', '[role="button"]'].concat(__CLOSE_ATTR_SELECTORS__).join(',');
   // Те же подстроки-признаки, что в селекторах выше, но регуляркой — для уже найденной кнопки.
   const ATTR_RE = new RegExp('__CLOSE_ATTR_PATTERN__', 'i');
+  // Что сделали за ЭТОТ проход. Ветки 1 и 2 обе пишут сюда и обе доигрывают до конца — ни одна
+  // не выходит из функции досрочно. Иначе (а так и было) клик по закрывашке съедал попытку
+  // целиком, и при окне, которое от клика НЕ закрывается, все attempts уходили на него, а до
+  // удаления дело не доходило НИ РАЗУ — проверено на стенде 16-09-2026: карточка с крестиком
+  // отдавала state:'closed' на каждом проходе, промо без крестика так и оставалось в кадре.
+  // Пересечься ветки не могут по построению: первая жмёт ЗАКРЫВАШКУ, вторая трогает только
+  // узлы, у которых закрывашки НЕТ (hasClose → continue), поэтому делить бюджет им незачем.
+  const acted = {closed: null, removed: null};
   for (const btn of document.querySelectorAll(CANDIDATES)) {
     if (!visible(btn) || !hits(btn.getBoundingClientRect())) continue;
     // Кнопка ВНУТРИ самого чарта — не наша: легенда индикаторов TV живёт там же, и стоит
@@ -360,7 +368,9 @@ _ZONE_CLEAR_JS = with_close_config(r"""
       }
     }
     if (!floating) continue;
-    try { btn.click(); return {state: 'closed', by: txt || 'close-attr'}; } catch (e) {}
+    // Жмём ПЕРВУЮ подошедшую и дальше по кнопкам не идём: слепо кликать всё, что похоже на
+    // закрывашку, опаснее, чем оставить второе окно следующему проходу.
+    try { btn.click(); acted.closed = txt || 'close-attr'; break; } catch (e) {}
   }
 
   // 2) Окно БЕЗ закрывашки — удаляем узел. Так устроено промо TV «Попробуйте анализировать
@@ -406,7 +416,14 @@ _ZONE_CLEAR_JS = with_close_config(r"""
                   text: (el.innerText || '').trim().slice(0, 60).replace(/\s+/g, ' '),
                   rect: [Math.round(box.x), Math.round(box.y),
                          Math.round(box.width), Math.round(box.height)]};
-    try { el.remove(); return Object.assign({state: 'removed'}, info); } catch (e) {}
+    try { el.remove(); acted.removed = info; } catch (e) {}
+  }
+
+  // Что-то сняли — вызывающий даст странице осесть и повторит пробу. Один state на оба действия:
+  // за проход может случиться и клик, и удаление (разные окна), и обещать «сняли только это»
+  // было бы неправдой.
+  if (acted.closed !== null || acted.removed !== null) {
+    return {state: 'acted', closed: acted.closed, removed: acted.removed};
   }
 
   // 3) Диагностика: чего не увидели. Верхние элементы в девяти точках зоны — по ним видно,
@@ -444,6 +461,8 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
 
     Окно БЕЗ закрывашки (промо TV «AI Copilot»: DIV без класса, единственная кнопка
     «Попробовать») снимаем УДАЛЕНИЕМ узла: нажимать там нечего, а клик по CTA открыл бы Copilot.
+    Обе ветки работают в ОДНОМ проходе и попыток друг у друга не отнимают — иначе окно, которое
+    от клика не закрывается, выедало бы весь бюджет, а удаление не запускалось бы ни разу.
 
     Не нашли ничего — пишем в лог, ЧТО лежит поверх зоны (проба в девяти точках, включая углы):
     иначе следующий такой случай снова придётся разбирать по скриншоту. Кадр снимаем в любом случае: лучше кадр с
@@ -455,20 +474,21 @@ async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3)
             _overlay_log(f'Проба зоны кадра не выполнилась: {type(error).__name__}: {error}')
             return
         state = res.get('state')
-        if state == 'removed':
-            # Окно снято УДАЛЕНИЕМ узла — у него не было закрывашки (промо TV «AI Copilot»).
-            # Пишем класс, текст и геометрию: класса у карточки может не быть вовсе, и тогда
-            # текст — единственное, по чему её узнают в следующий раз.
-            logger.info(f'Удалено окно в зоне кадра без закрывашки: '
-                        f'class={res.get("cls")!r} rect={res.get("rect")} '
-                        f'текст={res.get("text")!r}')
-            await page.wait_for_timeout(200)
-            continue
-        if state == 'closed':
+        if state == 'acted':
+            # За проход могли сработать ОБЕ ветки (разные окна) — пишем обе, что было.
             # info, а не канал: TV показывает онбординг на каждом подъёме браузера, то есть
             # сообщение приходило бы после каждого рестарта у каждого инстанса. Сам факт, что
             # окно нашлось и снято, — рутина; в тему ошибок ему незачем (11-09-2026).
-            logger.info(f'Снято окно в зоне кадра (кнопка: {res.get("by")!r})')
+            if res.get('closed') is not None:
+                logger.info(f'Снято окно в зоне кадра (кнопка: {res["closed"]!r})')
+            removed = res.get('removed')
+            if removed:
+                # Окно снято УДАЛЕНИЕМ узла — у него не было закрывашки (промо TV «AI Copilot»).
+                # Пишем класс, текст и геометрию: класса у карточки может не быть вовсе, и тогда
+                # текст — единственное, по чему её узнают в следующий раз.
+                logger.info(f'Удалено окно в зоне кадра без закрывашки: '
+                            f'class={removed.get("cls")!r} rect={removed.get("rect")} '
+                            f'текст={removed.get("text")!r}')
             await page.wait_for_timeout(200)
             continue
         if state == 'no-zone':
