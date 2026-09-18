@@ -158,8 +158,13 @@ class BaseDatabase:
         self.command_timeout = command_timeout
         self._pools: dict[str, asyncpg.Pool | None] = {n: None for n in self.db_names}
         self._pool_locks: dict[str, asyncio.Lock] = {n: asyncio.Lock() for n in self.db_names}
-        # Антиспам: error «не удалось восстановить серию» логируем один раз до успеха.
-        self._recovery_error_logged = False
+        # Антиспам: error «не удалось восстановить серию» логируем один раз до успеха — ПО
+        # КАЖДОМУ пулу отдельно. Общий флаг на объект вёл себя ровно наоборот задуманному:
+        # успех ЛЮБОГО пула снимал подавление, поэтому в самом частом сценарии (один пул жив,
+        # другой лёг) антиспам не работал вовсе — каждая исчерпанная серия мёртвого пула снова
+        # писала error. И наоборот: выставленный из-за одного пула флаг проглатывал ПЕРВУЮ
+        # ошибку второго, то есть прятал начало второй поломки.
+        self._recovery_error_logged: set[str] = set()
 
     async def _connect_pool(self, name: str, retries: int = 5, delay: float = 2.0):
         db_name = self.db_names[name]
@@ -349,12 +354,12 @@ class BaseDatabase:
                         res = await conn.fetch(sql, *args)
                     elif fetch_mode == "execute":
                         await conn.execute(sql, *args)
-                        self._recovery_error_logged = False
+                        self._recovery_error_logged.discard(db)
                         return True
                     else:
                         _logger.error(_msg('bad_fetch_mode', fetch_mode=fetch_mode))
                         return False
-                    self._recovery_error_logged = False
+                    self._recovery_error_logged.discard(db)
                     return res
             except (InterfaceError, CannotConnectNowError, ConnectionDoesNotExistError,
                     ReadOnlySQLTransactionError,
@@ -380,14 +385,19 @@ class BaseDatabase:
                 backoff = delay * (2 ** (attempt - 1))
                 await asyncio.sleep(backoff + random.uniform(0, 0.4 * backoff))
                 continue
-            # ретраи исчерпаны — пересоздаём пул для следующих запросов, эту серию валим
-            _logger.error(_msg('recreate_after_retries', func=func, db=db))
+            # Ретраи исчерпаны — пересоздаём пул для следующих запросов, эту серию валим.
+            # warning, а не error: это ДЕЙСТВИЕ, а не итог, и в канал ошибок ему незачем. Итог
+            # для оператора рядом — 'restore_failed' (error, под антиспамом), неудача самого
+            # пересоздания — 'recreate_failed' (error), а каждая попытка уже записана warning'ом
+            # ('connection_dropped'). Прежний error дублировал сигнал и, умноженный на десятки
+            # юнитов семьи, забивал общую тему на каждой исчерпанной серии.
+            _logger.warning(_msg('recreate_after_retries', func=func, db=db))
             try:
                 await self._recreate_pool(db)
             except (Exception,) as pool_error:
                 _logger.error(_msg('recreate_failed', db=db, error=pool_error))
-            if not self._recovery_error_logged:
+            if db not in self._recovery_error_logged:
                 _logger.error(_msg('restore_failed', db=db))
-                self._recovery_error_logged = True
+                self._recovery_error_logged.add(db)
             return False
         return False
