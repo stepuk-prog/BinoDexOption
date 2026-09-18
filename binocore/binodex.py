@@ -58,7 +58,27 @@ URL_TRADE = 'https://binodex.app/trade'
 
 GOTO_TIMEOUT = 30000   # мс на попытку навигации: на логине страница лёгкая
 GOTO_ATTEMPTS = 3      # попыток goto — транзиентный обрыв навигации у binodex обычное дело
+GOTO_PAUSE = 1.5       # сек между попытками
 EVAL_TIMEOUT = 15      # сек на evaluate внутри логина
+
+# Сбои навигации, которые лечатся повтором. Список собран на живом флоте: первым идёт гонка
+# редиректа (фронт сам уводит страницу на загрузке, и Firefox рвёт навигацию), дальше сетевые и
+# CDN-сбои. Всё остальное повторять смысла нет — отдаём наверх сразу.
+RETRYABLE_GOTO_ERRORS = (
+    'NS_BINDING_ABORTED',                # редирект на загрузке → Firefox рвёт навигацию
+    'NS_ERROR_FAILURE',                  # общий сетевой сбой (ловился перед binodex.app/Cloudflare)
+    'NS_ERROR_NET_RESET',
+    'NS_ERROR_NET_TIMEOUT',
+    'NS_ERROR_NET_INTERRUPT',
+    'NS_ERROR_CONNECTION_REFUSED',
+    'NS_ERROR_PROXY_CONNECTION_REFUSED',
+    'NS_ERROR_UNKNOWN_HOST',             # транзиентный сбой DNS
+    'ERR_CONNECTION_RESET',              # то же самое в Chromium
+    'ERR_CONNECTION_CLOSED',
+    'ERR_NAME_NOT_RESOLVED',
+    'ERR_ABORTED',
+    'Timeout',                           # таймаут самого goto (домен не ответил за timeout)
+)
 
 _log = logging.getLogger('binocore.binodex')
 
@@ -72,16 +92,26 @@ class LoginInterrupted(Exception):
 # Модуль работает БЕЗ настройки: разложили ядро скриптом — логин поехал. У программ семьи есть
 # свои обёртки над goto и evaluate (с ретраями, потолками и своим префиксом в логе), и они
 # по-прежнему передаются параметрами; но там, где их нет, ядро не должно требовать их написать.
-async def default_goto(page, url: str) -> None:
-    """page.goto с ретраями на транзиентном обрыве навигации."""
+async def default_goto(page, url: str, log=None) -> None:
+    """page.goto с повторами на ТРАНЗИЕНТНЫХ сбоях навигации. Прочие ошибки — сразу наверх:
+    ретраить, скажем, битый URL бессмысленно, а три попытки съедят время перед ожиданием кода.
+
+    `log` — логгер программы: без него повторы ушли бы в безымянный логгер ядра, то есть мимо
+    файловых логов программы, и в журнале осталась бы дыра ровно в интересный момент."""
+    log = log or _log
     last = None
     for attempt in range(1, GOTO_ATTEMPTS + 1):
         try:
             await page.goto(url, wait_until='domcontentloaded', timeout=GOTO_TIMEOUT)
             return
         except (Exception,) as err:
+            if not any(mark in str(err) for mark in RETRYABLE_GOTO_ERRORS):
+                raise
             last = err
-            _log.warning(f'binodex: goto {url} — обрыв навигации (попытка {attempt}/{GOTO_ATTEMPTS})')
+            log.warning(f'binodex: goto {url} — транзиентный сбой ({attempt}/{GOTO_ATTEMPTS}): '
+                        f'{str(err).splitlines()[0]}')
+            if attempt < GOTO_ATTEMPTS:
+                await asyncio.sleep(GOTO_PAUSE)
     raise last
 
 
@@ -326,8 +356,10 @@ async def apply_chart_background(page, *, settings_btn: str | None, theme_open: 
     logger = logger or _log
     if not (theme_open and theme_toggle):
         return                      # старая БД без строк — просто не выключаем
-    if await chart_bg_on(page, wrap_bg) is not True:
-        return                      # уже выключена (или не смогли спросить) — не тоггаем вслепую
+    if not await chart_bg_on(page, wrap_bg):
+        # False — подложка уже выключена, None — спросить не вышло. В обоих случаях в UI не
+        # лезем: клик по переключателю ТОГГЛИТ, и вслепую мы бы её включили.
+        return
     try:
         if dismiss is not None:
             await dismiss(page)
@@ -375,9 +407,9 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
       `on_trade(url) -> bool` — детект торговой страницы; по умолчанию хвост «/trade»;
       `stop_wait(seconds) -> bool` — прерываемая пауза ожидания кода (см. wait_for_code).
     """
-    goto = goto or default_goto
-    eval_js = eval_js or default_eval_js
     logger = logger or _log
+    goto = goto or (lambda pg, link: default_goto(pg, link, log=logger))
+    eval_js = eval_js or default_eval_js
     missing = [k for k in REQUIRED_SELECTORS if not sel.get(k)]
     if missing:
         logger.error(f'OTC inline-логин: нет обязательных селекторов {missing}')
