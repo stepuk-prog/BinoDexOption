@@ -342,16 +342,20 @@ def _report(logger, message: str) -> None:
 
 
 # ── куки сессии ───────────────────────────────────────────────────────────────────────────────
-def has_session(state: Mapping, keys=SESSION_KEYS) -> bool:
+def has_session(state: Mapping[str, object], keys=SESSION_KEYS) -> bool:
     """Есть ли в снимке storage_state признак живой сессии.
 
     Снимок без него в БД писать нельзя: 18-09-2026 такой и записался — вход прошёл, но binodex
     погасил сессию сразу после него, и вместо рабочих кук в БД легли служебные ключи. Следующий
     подъём начинал с заведомо мёртвого набора, то есть программа своей же рукой портила
     последние живые куки."""
-    # Mapping, а не dict: playwright отдаёт из storage_state() тип StorageState — TypedDict, в
-    # рантайме обычный dict, но по PEP 589 с `dict` НЕ совместим, и вызывающему пришлось бы
-    # оборачивать снимок в dict() ради проверки типов (так и вышло в ForumTradeEnglish 18-09).
+    # Mapping[str, object], а не dict и не голый Mapping. playwright отдаёт из storage_state()
+    # тип StorageState — TypedDict, в рантайме обычный dict, но по PEP 589 с `dict` НЕ совместим,
+    # и вызывающему пришлось бы оборачивать снимок в dict() ради проверки типов (так и вышло в
+    # ForumTradeEnglish 18-09). ПАРАМЕТРЫ обязательны: PEP 589 гарантирует совместимость
+    # TypedDict именно с `Mapping[str, object]`, а неаннотированный `Mapping` — это
+    # `Mapping[Any, Any]`, и на нём проверяющие типов (PyCharm) ругаются «Expected type
+    # 'Mapping', got 'StorageState' instead» прямо на вызове (ForumTrade, otc_app:1331).
     names = {item.get('name') for origin in (state or {}).get('origins', [])
              for item in origin.get('localStorage', [])}
     return bool(names & set(keys))
