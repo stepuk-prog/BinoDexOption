@@ -1,0 +1,473 @@
+"""Слой binodex: вход на binodex.app по одноразовому коду с почты (email-OTP).
+
+Зачем в ядре. Логин жил двенадцатью копиями `apps/otc_login.py`, и 18-09-2026 это вышло боком:
+binodex раскатал СВОЮ модалку входа вместо виджета Privy, письмо с кодом начал слать сам
+(`account@mail.binodex.io`, код в ТЕМЕ письма) и кладёт в localStorage другой признак сессии —
+после чего релогин перестал работать разом у всех. Одну и ту же правку пришлось бы вносить
+двенадцать раз; здесь она вносится один раз и раскладывается `sync.py`.
+
+Оба механизма живут ОДНОВРЕМЕННО: что покажут — решает флаг `my.ownAuth` из
+`api.binodex.app/config`, и он НЕ по стране (18-09-2026 две ноды в PL дали разные значения, две
+в DE тоже — то есть раскат идёт по A/B и переключиться может на любой ноде в любой момент).
+Поэтому модуль всюду держит ОБА пути: два вида отправителя письма, код и в теме и в теле, два
+ключа сессии, два набора селекторов (они приходят из `settings.binodex_settings`).
+
+Работает сразу после раскладки. Ни один параметр-зависимость не обязателен: нет своего
+`goto`/`eval_js`/логгера — берутся дефолты ядра (`default_goto`, `default_eval_js`,
+`logging.getLogger`). Программе достаточно разложить ядро скриптом и позвать `inline_login` с
+селекторами из БД. Передавать своё стоит там, где у программы уже есть проверенная обёртка: у
+копий они разные (`goto_retry` против `goto_with_retry`, `eval_js` с `cap=` против `timeout=`),
+и терять их ретраи и префиксы в логе незачем.
+
+Чего здесь нет намеренно. Playwright не импортируется: `page`/`context` берутся уткой. Так
+модуль ставится и тестируется без браузера, а слой не привязан к версии Playwright программы.
+
+Настройки читаются из `settings.binodex_settings` (словарь `sel`), а не из кода: адрес
+отправителя и разметку меняет binodex, и гонять ради этого раскатку по флоту незачем.
+Константы ниже — дефолт на случай старой БД без нужных строк.
+"""
+import asyncio
+import email
+import imaplib
+import logging
+import re
+import time
+from email.header import decode_header, make_header
+
+# Отправители письма с кодом: Privy (no-reply@privy.io, no-reply@mail.privy.io) и сам binodex
+# (account@mail.binodex.io). Фильтр по домену, потому что адрес внутри домена они уже меняли.
+MAIL_FROM = ('privy.io', 'binodex.io')
+# Подстрока темы — отсекает прочую почту тех же отправителей. Подходит обоим письмам:
+# «Your login code for BinoDex» (Privy) и «Your BinoDex sign-in code: 123456» (binodex).
+MAIL_SUBJECT_HINT = 'code'
+# Ключи localStorage, по любому из которых сессия считается живой: privy:token — вход через
+# Privy, ownAuthSession — собственная авторизация binodex (рядом с ней кладётся accessToken).
+SESSION_KEYS = ('privy:token', 'ownAuthSession')
+# Проба сессии для evaluate: принимает список ключей, возвращает True, если хоть один на месте.
+SESSION_PROBE_JS = 'keys => keys.some(k => !!localStorage.getItem(k))'
+
+CODE_WAIT_SECONDS = 120
+CODE_POLL_EVERY = 3
+IMAP_OP_TIMEOUT = 30   # сек на одну IMAP-операцию в потоке (connect-таймаут покрывает лишь connect)
+
+REQUIRED_SELECTORS = ('login_open', 'login_email', 'login_submit', 'login_code_inputs')
+
+URL_LANDING = 'https://binodex.app/'
+URL_TRADE = 'https://binodex.app/trade'
+
+
+GOTO_TIMEOUT = 30000   # мс на попытку навигации: на логине страница лёгкая
+GOTO_ATTEMPTS = 3      # попыток goto — транзиентный обрыв навигации у binodex обычное дело
+EVAL_TIMEOUT = 15      # сек на evaluate внутри логина
+
+_log = logging.getLogger('binocore.binodex')
+
+
+class LoginInterrupted(Exception):
+    """Вход прерван остановкой процесса, а не сбоем. Разница важна: ложное «релогин не удался»
+    и врёт в журнале, и зря тратит попытку счётчика."""
+
+
+# ── хелперы по умолчанию ──────────────────────────────────────────────────────────────────────
+# Модуль работает БЕЗ настройки: разложили ядро скриптом — логин поехал. У программ семьи есть
+# свои обёртки над goto и evaluate (с ретраями, потолками и своим префиксом в логе), и они
+# по-прежнему передаются параметрами; но там, где их нет, ядро не должно требовать их написать.
+async def default_goto(page, url: str) -> None:
+    """page.goto с ретраями на транзиентном обрыве навигации."""
+    last = None
+    for attempt in range(1, GOTO_ATTEMPTS + 1):
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=GOTO_TIMEOUT)
+            return
+        except (Exception,) as err:
+            last = err
+            _log.warning(f'binodex: goto {url} — обрыв навигации (попытка {attempt}/{GOTO_ATTEMPTS})')
+    raise last
+
+
+async def default_eval_js(page, js: str, *args):
+    """page.evaluate под потолком: у evaluate своего таймаута нет, и зависший рендерер иначе
+    подвесил бы логин навсегда."""
+    return await asyncio.wait_for(page.evaluate(js, *args), timeout=EVAL_TIMEOUT)
+
+
+# ── настройки из binodex_settings ─────────────────────────────────────────────────────────────
+def mail_froms(sel: dict) -> tuple[str, ...]:
+    """Домены отправителей кода (`login_mail_from`, через запятую). Пусто → дефолт MAIL_FROM."""
+    raw = (sel.get('login_mail_from') or '').strip()
+    froms = tuple(d.strip().lower() for d in raw.split(',') if d.strip())
+    return froms or MAIL_FROM
+
+
+def subject_hint(sel: dict) -> str:
+    """Подстрока темы письма с кодом (`login_mail_subject`), в нижнем регистре."""
+    return (sel.get('login_mail_subject') or MAIL_SUBJECT_HINT).strip().lower()
+
+
+def session_keys(sel: dict) -> tuple[str, ...]:
+    """Ключи localStorage — признаки живой сессии (`session_keys`, через запятую).
+
+    Нужны не только логину: тем же списком программа проверяет сессию в рантайме (редирект с
+    /trade, уход в Demo), поэтому список один на оба сюжета и лежит в БД."""
+    raw = (sel.get('session_keys') or '').strip()
+    keys = tuple(k.strip() for k in raw.split(',') if k.strip())
+    return keys or SESSION_KEYS
+
+
+# ── IMAP / код из письма (sync — звать через imap_thread: to_thread + потолок) ────────────────
+def imap_connect(mail: str, app_pass: str) -> imaplib.IMAP4_SSL:
+    imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=20)
+    imap.login(mail, app_pass)
+    imap.select('INBOX')
+    return imap
+
+
+def code_uids(imap, froms: tuple[str, ...] = MAIL_FROM) -> list[int]:
+    """UID писем от ЛЮБОГО из отправителей кода. Поиск идёт отдельным запросом на домен, а не
+    одним «OR ...»: вложенный OR разные IMAP-серверы разбирают по-своему, а лишний round-trip
+    здесь ничего не стоит (в ящике единицы писем)."""
+    uids: set[int] = set()
+    for sender in froms:
+        # noinspection PyTypeChecker
+        _, data = imap.uid('search', None, f'(FROM "{sender}")')  # None — charset (валидно для IMAP)
+        if data and data[0]:
+            uids.update(int(x) for x in data[0].split())
+    return sorted(uids)
+
+
+def extract_code(imap, uid: int, hint: str = MAIL_SUBJECT_HINT) -> str | None:
+    """Шестизначный код из письма или None, если письмо не про вход.
+
+    Тема читается ПЕРВОЙ: у собственной авторизации binodex код стоит прямо в ней, и тело тогда
+    разбирать незачем. У Privy тема без кода — код лежит в теле, как было раньше."""
+    _, md = imap.uid('fetch', str(uid), '(RFC822)')
+    if not md or not md[0]:
+        return None
+    msg = email.message_from_bytes(md[0][1])
+    subject = str(make_header(decode_header(msg.get('Subject', ''))))
+    if hint not in subject.lower():
+        return None
+    match = re.search(r'\b(\d{6})\b', subject)
+    if match:
+        return match.group(1)
+    for part in (msg.walk() if msg.is_multipart() else [msg]):
+        if part.get_content_type() in ('text/plain', 'text/html'):
+            body = part.get_payload(decode=True)
+            if not body:
+                continue
+            try:
+                txt = body.decode(part.get_content_charset() or 'utf-8', 'ignore')
+            except (Exception,):
+                continue
+            match = re.search(r'\b(\d{6})\b', txt)
+            if match:
+                return match.group(1)
+    return None
+
+
+def wait_for_code(imap, baseline: set[int], froms: tuple[str, ...] = MAIL_FROM,
+                  hint: str = MAIL_SUBJECT_HINT, stop_wait=None) -> str:
+    """Первое письмо с кодом ПОСЛЕ запроса (uid не из baseline) — старые коды игнорируем.
+    Блокирующий поллинг IMAP до CODE_WAIT_SECONDS — звать через imap_thread.
+
+    `stop_wait(seconds) -> bool` — пауза между опросами, которая умеет прерваться по остановке
+    процесса (True = пора уходить). Программе это не роскошь: отмена таска по SIGTERM
+    освобождает async-сторону мгновенно, а ЭТОТ поток живёт дальше, и asyncio.run на выходе
+    ждёт потоки пула без таймаута (3.11) — сигнал, пришедший в окно ожидания кода, держал
+    процесс до двух минут уже после teardown, что при TimeoutStopSec=120 означало SIGKILL.
+    Без параметра поведение прежнее: обычный time.sleep."""
+    pause = stop_wait or (lambda seconds: bool(time.sleep(seconds)))
+    deadline = time.monotonic() + CODE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        imap.noop()
+        for uid in sorted(set(code_uids(imap, froms)) - baseline, reverse=True):
+            code = extract_code(imap, uid, hint)
+            if code:
+                return code
+        if pause(CODE_POLL_EVERY):
+            raise LoginInterrupted('остановка процесса — ожидание кода прервано')
+    raise RuntimeError(f'код входа не пришёл за {CODE_WAIT_SECONDS}с '
+                       f'(искал письма от {", ".join(froms)})')
+
+
+def purge_code_mail(imap, froms: tuple[str, ...] = MAIL_FROM) -> None:
+    """Удалить письма с одноразовыми кодами. Gmail: ярлык \\Trash."""
+    uids = code_uids(imap, froms)
+    if not uids:
+        return
+    uid_set = ','.join(str(u) for u in uids)
+    for store in (('+X-GM-LABELS', '\\Trash'), ('+FLAGS', '\\Deleted')):
+        try:
+            imap.uid('STORE', uid_set, *store)
+        except (Exception,):
+            pass
+    try:
+        imap.expunge()
+    except (Exception,):
+        pass
+
+
+def safe_logout(imap) -> None:
+    try:
+        imap.logout()
+    except (Exception,):
+        pass
+
+
+async def imap_thread(fn, *args, timeout: int = IMAP_OP_TIMEOUT):
+    """IMAP-операция в потоке под жёстким потолком: зависший сервер в середине сессии не вешает
+    async-флоу навсегда (поток-сирота добьётся сокет-таймаутом). asyncio.to_thread сам не
+    отменяем, но await вернётся по таймауту → флоу не залипает."""
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout)
+
+
+# ── шаги в браузере (page/context — утки, хелперы приходят от программы) ──────────────────────
+async def _clear_session(page, context, eval_js) -> None:
+    """Сбросить старую (битую) сессию перед логином — чтобы протухшие ключи не путали фронт.
+    Логинимся «как с чистого листа», но в том же браузере."""
+    try:
+        await context.clear_cookies()
+    except (Exception,):
+        pass
+    try:
+        await eval_js(page, '() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e){} }')
+    except (Exception,):
+        pass
+
+
+async def _wait_code_inputs(page, selector: str, timeout: int) -> None:
+    """Дождаться появления ≥6 полей ввода OTP-кода (в обеих модалках их ровно шесть)."""
+    await page.wait_for_function('s => document.querySelectorAll(s).length >= 6',
+                                 arg=selector, timeout=timeout)
+
+
+async def _enter_code(page, selector: str, code: str) -> None:
+    cells = page.locator(selector)
+    if await cells.count() < 6:
+        raise RuntimeError(f'ожидал 6 ячеек кода, нашёл {await cells.count()}')
+    await cells.first.click()
+    await page.keyboard.type(code, delay=60)            # OTP-виджет сам раскидает цифры
+    if await cells.first.input_value() != code[0]:      # фолбэк: по цифре в ячейку
+        for i, ch in enumerate(code):
+            await cells.nth(i).fill(ch)
+
+
+async def _alert_text(page, sel: dict, eval_js) -> str:
+    """Текст отказа, который модалка показала вместо экрана кода («слишком много запросов»,
+    «неверный e-mail»). Пусто — модалка молчит, значит причина не в её ответе.
+
+    Без этого в логе оставался безликий Playwright-таймаут: 18-09-2026 binodex отвечал «too many
+    requests» после серии релогинов, а в журнале стояло только «Timeout 15000ms»."""
+    selector = sel.get('login_alert')
+    if not selector:
+        return ''
+    try:
+        texts = await eval_js(page, "s => Array.from(document.querySelectorAll(s))"
+                                    ".map(e => (e.innerText || '').trim()).filter(Boolean)", selector)
+    except (Exception,):
+        return ''
+    return ' / '.join(texts)[:200] if texts else ''
+
+
+def _report(logger, message: str) -> None:
+    """Успех входа — в отчётный уровень программы, если он у неё есть (у семьи это `report`)."""
+    getattr(logger, 'report', logger.info)(message)
+
+
+# ── куки сессии ───────────────────────────────────────────────────────────────────────────────
+def has_session(state: dict, keys=SESSION_KEYS) -> bool:
+    """Есть ли в снимке storage_state признак живой сессии.
+
+    Снимок без него в БД писать нельзя: 18-09-2026 такой и записался — вход прошёл, но binodex
+    погасил сессию сразу после него, и вместо рабочих кук в БД легли служебные ключи. Следующий
+    подъём начинал с заведомо мёртвого набора, то есть программа своей же рукой портила
+    последние живые куки."""
+    names = {item.get('name') for origin in (state or {}).get('origins', [])
+             for item in origin.get('localStorage', [])}
+    return bool(names & set(keys))
+
+
+# ── чарт: фоновая подложка ────────────────────────────────────────────────────────────────────
+async def chart_bg_on(page, wrap_bg: str | None) -> bool | None:
+    """Включена ли фоновая подложка чарта. None — спросить не вышло (нет селектора, страница
+    моргнула). Признак прямой: узел `.wrap_bg` ЕСТЬ в DOM = подложка включена; при выключенной
+    настройке binodex его не создаёт вовсе."""
+    if not wrap_bg:
+        return None
+    try:
+        return bool(await page.locator(wrap_bg).first.count())
+    except (Exception,):
+        return None
+
+
+async def apply_chart_background(page, *, settings_btn: str | None, theme_open: str | None,
+                                 theme_toggle: str | None, wrap_bg: str | None, logger=None,
+                                 click_timeout: int = 5000, dismiss=None,
+                                 settle_ms: int = 500) -> None:
+    """Выключить фоновую подложку чарта (картинка с быком и медведем) — настройкой аккаунта.
+
+    ЗАЧЕМ. Подложку рисует сам binodex во весь вьюпорт, и она дорогая: замер на живом сайте
+    17-09-2026 дал 118.9% CPU с ней против 63.2% и 57.6% без неё — то есть она стоит примерно
+    столько же, сколько вся остальная страница. В кадр подписчику она при этом не попадает
+    вовсе (кадр берётся из canvas.toDataURL, куда DOM не входит), так что платить за неё нечем.
+
+    ПОЧЕМУ НАСТРОЙКОЙ, А НЕ localStorage. Ключ `isChartBgVisible` действительно лежит в
+    localStorage и уезжает в storage_state, но писать его напрямую — второй способ делать то же
+    самое: в settings.binodex_settings давно заведены строки `setup_theme`, `setup_theme_toggle`
+    и `wrap_bg` под этот самый переключатель.
+
+    ИДЕМПОТЕНТНОСТЬ. Клик по переключателю ТОГГЛИТ, поэтому сначала смотрим состояние: подложки
+    нет — в UI не лезем вовсе (один `count()`).
+
+    Путь в UI: шестерёнка (`settings_btn`) → «Theme» (`theme_open`) → переключатель
+    (`theme_toggle`). Ошибки не критичны (подложка — оформление страницы, не данные): лог и дальше.
+    `dismiss` — колбэк программы, гасящий модалку binodex поверх страницы (её бэкдроп
+    перехватывает клики)."""
+    logger = logger or _log
+    if not (theme_open and theme_toggle):
+        return                      # старая БД без строк — просто не выключаем
+    if await chart_bg_on(page, wrap_bg) is not True:
+        return                      # уже выключена (или не смогли спросить) — не тоггаем вслепую
+    try:
+        if dismiss is not None:
+            await dismiss(page)
+        await page.locator(settings_btn).first.click(timeout=click_timeout)
+        await page.locator(theme_open).first.click(timeout=click_timeout)
+        toggle = page.locator(theme_toggle).first
+        await toggle.wait_for(state='visible', timeout=click_timeout)
+        await toggle.click(timeout=click_timeout)
+        await page.wait_for_timeout(settle_ms)
+        if await chart_bg_on(page, wrap_bg) is False:
+            # info, а не report: это рутина подъёма, а не событие для служебной темы. У наборов
+            # кук, где binodex включил подложку сам, строка уходила бы в Telegram на КАЖДОМ
+            # холодном старте, а тема общая на весь флот.
+            logger.info('OTC: фоновая подложка чарта выключена настройкой аккаунта '
+                        '(binodex включил её сам) — снимаю лишнюю нагрузку на CPU')
+        else:
+            logger.warning('OTC: переключатель темы нажат, но подложка осталась — '
+                           'проверь selectors setup_theme/setup_theme_toggle в binodex_settings')
+    except (Exception,) as error:
+        logger.warning(f'OTC: не удалось выключить подложку чарта: {error}')
+    finally:
+        # Закрыть меню настроек, иначе оно висит поверх страницы до конца жизни браузера.
+        try:
+            await page.locator(settings_btn).first.click(timeout=click_timeout)
+        except (Exception,):
+            pass
+
+
+async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
+                       goto=None, eval_js=None, logger=None, on_trade=None, stop_wait=None) -> bool:
+    """Залогиниться в binodex.app по email-OTP прямо в текущем (живом) браузере.
+
+    True — вход удался (признак сессии в localStorage и мы на /trade). False — любой сбой
+    (лог + откат): вызывающий тогда не сохраняет куки и считает попытки сам.
+
+    Шаги: чистим сессию → страница авторизации → login_open → e-mail → код из почты (IMAP) →
+    ввод → ждём признак сессии → /trade. Селекторы и URL — из `sel` (binodex_settings).
+
+    Все зависимости НЕОБЯЗАТЕЛЬНЫ: без них берутся дефолты ядра, то есть модуль работает сразу
+    после раскладки sync.py. Передают их там, где у программы есть своя обёртка (у копий они
+    разные — goto_retry против goto_with_retry, eval_js с `cap=` против `timeout=`):
+      `goto(page, url)` — навигация с ретраями программы (иначе default_goto);
+      `eval_js(page, js, *args)` — evaluate под потолком программы (иначе default_eval_js);
+      `logger` — логгер программы (иначе logging.getLogger('binocore.binodex'));
+      `on_trade(url) -> bool` — детект торговой страницы; по умолчанию хвост «/trade»;
+      `stop_wait(seconds) -> bool` — прерываемая пауза ожидания кода (см. wait_for_code).
+    """
+    goto = goto or default_goto
+    eval_js = eval_js or default_eval_js
+    logger = logger or _log
+    missing = [k for k in REQUIRED_SELECTORS if not sel.get(k)]
+    if missing:
+        logger.error(f'OTC inline-логин: нет обязательных селекторов {missing}')
+        return False
+    landing = sel.get('landing_url') or URL_LANDING
+    trade = sel.get('trade_url') or URL_TRADE
+    froms = mail_froms(sel)
+    hint = subject_hint(sel)
+    keys = list(session_keys(sel))
+    is_trade = on_trade or (lambda url: url.rstrip('/').endswith('/trade'))
+    try:
+        imap = await imap_thread(imap_connect, mail, app_pass)
+    except (Exception,) as err:
+        logger.error(f'OTC inline-логин: не подключиться к почте (IMAP) — {err}')
+        return False
+    imap_timed_out = False
+    try:
+        baseline = set(await imap_thread(code_uids, imap, froms))   # старые коды — игнор
+        await goto(page, landing)
+        await _clear_session(page, context, eval_js)
+        await goto(page, landing)  # перезагрузка начисто
+        await page.click(sel['login_open'], timeout=15000)
+        await page.fill(sel['login_email'], mail, timeout=15000)
+        await page.locator(sel['login_email']).first.press('Enter')  # отправка надёжнее через Enter
+        try:
+            await _wait_code_inputs(page, sel['login_code_inputs'], 8000)
+        except (Exception,):
+            await page.locator(sel['login_submit']).first.click(timeout=8000)
+            try:
+                await _wait_code_inputs(page, sel['login_code_inputs'], 15000)
+            except (Exception,):
+                # Экран кода не открылся. Прежде чем отдать наверх голый таймаут, спросим саму
+                # модалку: чаще всего она прямо пишет причину, и это НЕ наша поломка (лимит
+                # запросов кода, отвергнутый адрес). Это единственное, что отличает «binodex
+                # отказал» от «селекторы протухли».
+                alert = await _alert_text(page, sel, eval_js)
+                if alert:
+                    logger.warning(f'OTC inline-логин: binodex отказал на шаге e-mail — «{alert}»')
+                    return False
+                raise
+        code = await imap_thread(wait_for_code, imap, baseline, froms, hint, stop_wait,
+                                 timeout=CODE_WAIT_SECONDS + IMAP_OP_TIMEOUT)
+        await _enter_code(page, sel['login_code_inputs'], code)
+        # Ключ сессии зависит от механизма входа, который binodex выбирает сам — ждём ЛЮБОЙ из
+        # списка. Пока ждали именно privy:token, вход по новой модалке проходил, а мы считали
+        # его провалом по таймауту и не сохраняли свежие куки (18-09-2026).
+        await page.wait_for_function(SESSION_PROBE_JS, arg=keys, timeout=30000)
+        await goto(page, trade)
+        if not is_trade(page.url):
+            logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
+            return False
+        # ВСЁ, что ниже, — уборка, а не часть входа: вход уже доказан (признак сессии в
+        # localStorage + мы на /trade). Поэтому её сбой НЕ должен превращаться в «релогин не
+        # удался»: раньше уборка стояла голой, и подвисший IMAP уводил поток в ветку ошибки
+        # ниже → return False → вызывающий не сохранял свежий storage_state в БД → программа
+        # останавливалась с «куки не восстановлены», притом что куки восстановлены и лежат в
+        # живом контексте. Цена уборки одноразовых кодов — не остановка программы.
+        try:
+            await imap_thread(purge_code_mail, imap, froms)
+        except (TimeoutError, asyncio.TimeoutError) as err:
+            # Тот же гонка-опасный случай, что и в ветке ниже: поток-сирота может ещё держать
+            # сокет imaplib, а он не thread-safe → logout в finally пропускаем.
+            imap_timed_out = True
+            logger.warning(f'OTC inline-логин: уборка писем с кодами не уложилась в потолок ({err}) '
+                           f'— вход состоялся, письма останутся в ящике')
+        except (Exception,) as err:
+            logger.warning(f'OTC inline-логин: уборка писем с кодами не удалась ({err}) '
+                           f'— вход состоялся, письма останутся в ящике')
+        _report(logger, 'OTC: inline-релогин binodex успешен')
+        return True
+    except LoginInterrupted as stop:
+        # Нас останавливают — это НЕ сбой логина: ложное «релогин не удался» и врёт в журнале, и
+        # зря тратит попытку счётчика. Пишем фактом, уровнем info.
+        logger.info(f'OTC inline-логин прерван остановкой процесса: {stop}')
+        return False
+    except (TimeoutError, asyncio.TimeoutError) as err:
+        # imap_thread упёрся в потолок wait_for: поток-сирота, возможно, ещё держит imap (сам
+        # умрёт по сокет-таймауту соединения, ≤20с). Звать safe_logout на ТОМ ЖЕ imap из finally
+        # нельзя — параллельная работа двух потоков на сокете imaplib (он не thread-safe) даёт гонку.
+        imap_timed_out = True
+        logger.warning(f'OTC inline-логин: IMAP-операция превысила потолок — {err}')
+        return False
+    except (Exception,) as err:
+        logger.warning(f'OTC inline-логин не удался: {err}')
+        return False
+    finally:
+        # logout пропускаем, если была гонка-опасная отмена по таймауту (см. выше) — мёртвое
+        # соединение всё равно закроется, когда поток-сирота добьётся сокет-таймаутом.
+        if not imap_timed_out:
+            try:
+                await imap_thread(safe_logout, imap, timeout=15)
+            except (Exception,):
+                pass  # logout под потолком; зависший сервер не должен держать выход из флоу

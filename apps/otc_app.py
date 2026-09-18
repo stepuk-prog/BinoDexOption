@@ -26,6 +26,9 @@ from playwright.async_api import Page, WebSocket, FloatRect
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
+from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
+                              apply_chart_background as binodex_chart_background,
+                              has_session as binodex_has_session)
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
 from apps.otc_login import otc_inline_login
@@ -40,7 +43,7 @@ from settings.browser_config import (otc_trade_url, otc_select_pair, otc_categor
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
                                      otc_chart_scale, otc_chart_scale_item, otc_indicators,
-                                     otc_theme_open, otc_theme_toggle, otc_wrap_bg)
+                                     otc_theme_open, otc_theme_toggle, otc_wrap_bg, otc_session_keys)
 
 if TYPE_CHECKING:
     from classes.browser_manager import BrowserManager
@@ -528,7 +531,7 @@ async def _privy_token_alive(page: Page, *, on_error: bool) -> bool:
                 (гнать релогин впустую) на нём нельзя.
     """
     try:
-        return bool(await _eval(page, "() => !!localStorage.getItem('privy:token')", cap=5))
+        return bool(await _eval(page, BINODEX_SESSION_PROBE_JS, list(otc_session_keys), cap=5))
     except (Exception,):
         return on_error
 
@@ -576,7 +579,7 @@ async def _raise_off_trade(detail: str, authed: bool, check_backend: bool = True
     if authed:
         raise SetupError(f'binodex OTC: {detail} при живой авторизации — аутэйдж фронта binodex '
                          f'(boot-recovery), не куки', mounted=False)
-    raise CookiesExpired(f'binodex OTC: {detail}, нет privy:token — сессия протухла')
+    raise CookiesExpired(f'binodex OTC: {detail}, нет признака сессии — она протухла')
 
 
 async def _raise_ui_dead(page: Page, detail: str) -> None:
@@ -585,7 +588,7 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     браузер-фри, апп-шелл там не смонтирован → mounted=False). Всегда бросает:
       • видна форма логина → CookiesExpired (отвал кук → релогин);
       • формы нет, market-WS молчит браузер-фри (feed_alive=False) → FeedOutage (аутэйдж фида);
-      • формы нет, фид ЖИВ, нет privy:token (Privy очистил → Demo) → CookiesExpired (сессия мертва, релогин);
+      • формы нет, фид ЖИВ, нет признака сессии (binodex очистил → Demo) → CookiesExpired (сессия мертва, релогин);
       • формы нет, фид ЖИВ, токен ЕСТЬ, error-boundary «Something went wrong» → SetupError(mounted=False):
         front-end аутэйдж (JS-бандл/чанк не загрузился, напр. отравленный CDN-кэш) — релогин бесполезен,
         выживаем с бэкоффом, без выхода;
@@ -614,7 +617,7 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
     # Проверяем ДО error-boundary: иначе «Something went wrong» поверх мёртвой сессии увёл бы в
     # выживание-без-релогина вместо восстановления кук.
     if not authed:
-        raise CookiesExpired(f'binodex OTC: {detail} + нет privy:token (Demo) — сессия протухла')
+        raise CookiesExpired(f'binodex OTC: {detail} + нет признака сессии (Demo) — она протухла')
     # Токен ЖИВ, но апп упал с error-boundary «Something went wrong» — это НЕ битая сессия (релогин
     # её не чинит: логинится успешно, апп падает снова), а front-end аутэйдж: JS-бандл/ленивый чанк
     # не загрузился (напр. отравленный CDN-кэш отдаёт index.html вместо .js — был такой инцидент на
@@ -1315,75 +1318,17 @@ _CLEAR_OFFZONE_JS = r"""
 """
 
 
-async def chart_bg_on(page: Page) -> bool | None:
-    """Включена ли фоновая подложка чарта. None — спросить не вышло (селектора нет / страница моргнула).
-
-    Признак прямой: `.wrap_bg` ЕСТЬ В DOM = подложка включена. При выключенной настройке binodex
-    этот узел не создаёт вовсе — проверено на живом сайте 17-09-2026 (принудительно включали ключ,
-    узел появлялся с `img/trade/main_bg_2.webp` 1712x990, выключали — исчезал)."""
-    if not otc_wrap_bg:
-        return None
-    try:
-        return bool(await page.locator(otc_wrap_bg).first.count())
-    except (Exception,):
-        return None
-
-
 async def apply_chart_background(page: Page) -> None:
-    """Выключить фоновую подложку чарта (картинка с быком и медведем) — настройкой аккаунта.
+    """Выключить фоновую подложку чарта — вызов ядра с нашими селекторами из БД.
 
-    ЗАЧЕМ. Подложку рисует сам binodex во весь вьюпорт (1712x990), и она дорогая. Замер headless
-    на живом сайте 17-09-2026, дельта utime+stime процессов браузера: подложка ВКЛЮЧЕНА — 118.9%
-    CPU, выключена — 63.2% и 57.6% в двух замерах. То есть она стоит примерно СТОЛЬКО ЖЕ, сколько
-    вся остальная страница, и вдвое поднимает нагрузку ноды на ровном месте.
-
-    В кадр подписчику она при этом не попадает вовсе: кадр берётся из `canvas.toDataURL`, куда DOM
-    не входит, а свою подложку (глобус) мы подкладываем композитом из файла (см. screenshot_otc).
-    Значит платить за неё нечем.
-
-    ПОЧЕМУ НАСТРОЙКОЙ, А НЕ localStorage. Ключ `isChartBgVisible` действительно лежит в
-    localStorage и приезжает в storage_state, но писать его напрямую — это второй способ делать
-    то же самое: у семьи в settings.binodex_settings ДАВНО заведены строки `setup_theme`,
-    `setup_theme_toggle` и `wrap_bg` под этот самый переключатель. Эта программа их просто не
-    читала, оттого подложка и рисовалась молча.
-
-    ИДЕМПОТЕНТНОСТЬ. Клик по переключателю ТОГГЛИТ, поэтому сначала смотрим состояние: подложки
-    нет — не трогаем ничего и в UI не лезем вовсе (обычный случай, стоит один `count()`).
-
-    Путь в UI проверен на живом сайте: шестерёнка (`setup_settings_open`) → кнопка «Theme»
-    (`setup_theme`) → переключатель (`setup_theme_toggle`, класс `switch_active` пока фон включён).
-    Ошибки не критичны (подложка — оформление страницы, не данные): логируем и продолжаем."""
-    if not (otc_theme_open and otc_theme_toggle):
-        return                      # старая БД без строк — просто не выключаем
-    if await chart_bg_on(page) is not True:
-        return                      # уже выключена (или не смогли спросить) — не тоггаем вслепую
-    try:
-        await dismiss_modal_backdrop(page)
-        await page.locator(otc_settings_btn).first.click(timeout=TIMEOUT_SHORT)
-        await page.locator(otc_theme_open).first.click(timeout=TIMEOUT_SHORT)
-        toggle = page.locator(otc_theme_toggle).first
-        await toggle.wait_for(state='visible', timeout=TIMEOUT_SHORT)
-        await toggle.click(timeout=TIMEOUT_SHORT)
-        await page.wait_for_timeout(500)
-        if await chart_bg_on(page) is False:
-            # info, а не report: это рутина подъёма, а не событие для служебной темы. У наборов
-            # кук, где binodex включил подложку сам, строка уходила бы в Telegram на КАЖДОМ
-            # холодном старте — и читалась бы там дико, потому что тема общая на весь флот, а
-            # подпись берётся от инстанса (17-09-2026: так и вышло на «Binary Screen EUR/USD»).
-            logger.info('OTC: фоновая подложка чарта выключена настройкой аккаунта '
-                        '(binodex включил её сам) — снимаю лишнюю нагрузку на CPU')
-        else:
-            logger.warning('OTC: переключатель темы нажат, но подложка осталась — '
-                           'проверь selectors setup_theme/setup_theme_toggle в binodex_settings')
-    except (Exception,) as error:
-        logger.warning(f'OTC: не удалось выключить подложку чарта: {error}')
-    finally:
-        # Закрыть меню настроек, иначе оно висит поверх страницы до конца жизни браузера.
-        try:
-            await page.locator(otc_settings_btn).first.click(timeout=TIMEOUT_SHORT)
-        except (Exception,):
-            pass
-
+    Сам флоу (идемпотентность, путь в UI, тексты) живёт в `binocore.binodex`: он одинаков у всей
+    семьи, и держать его одиннадцатью копиями не за чем. Отсюда приходит только то, что у
+    программы своё: селекторы из binodex_settings, потолок клика и гашение модалки binodex,
+    бэкдроп которой перехватывает клики у английских аккаунтов."""
+    await binodex_chart_background(
+        page, settings_btn=otc_settings_btn, theme_open=otc_theme_open,
+        theme_toggle=otc_theme_toggle, wrap_bg=otc_wrap_bg, logger=logger,
+        click_timeout=TIMEOUT_SHORT, dismiss=dismiss_modal_backdrop)
 async def apply_offzone(page: Page, cap: float | None = None) -> None:
     """Скрыть off-zone UI (CPU ~40→~22%), оставив в белом списке детект кук и ярлык пары.
 
@@ -1591,7 +1536,7 @@ async def _verify_otc_ready(page: Page) -> None:
     # токен только что восстановлен из storage_state → ранний гейт пропустит; Privy очистит его на
     # буте → ловит авторитетная перепроверка ниже.
     if not authed:
-        raise CookiesExpired('binodex OTC: нет privy:token (нет сессии) — нужен логин')
+        raise CookiesExpired('binodex OTC: нет признака сессии — нужен логин')
     # SPA не обязательно доехала: при сплеше чарт виснет, кнопка выбора пары не появляется.
     # _raise_ui_dead разводит: форма/Demo/error → CookiesExpired; фид мёртв → FeedOutage; токен жив,
     # UI не поднялся → SetupError.
@@ -1604,7 +1549,7 @@ async def _verify_otc_ready(page: Page) -> None:
     # Авторитетная перепроверка ПОСЛЕ оседания UI: Privy за время загрузки мог очистить протухший
     # токен (ранний гейт видел его свежевосстановленным) → апп в Demo.
     if not await _privy_token_alive(page, on_error=False):
-        raise CookiesExpired('binodex OTC: UI поднялся, но privy:token очищен (Demo) — сессия протухла')
+        raise CookiesExpired('binodex OTC: UI поднялся, но признак сессии очищен (Demo) — она протухла')
     # Масштабы графика и индикаторы сбрасываются на дефолт при каждом запуске браузера (новый
     # контекст из storage_state) — выставляем на каждом старте, ДО off-zone (под ним кнопки не кликаются).
     await apply_chart_scale(page)
@@ -1645,7 +1590,14 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     # ляжет storage_state с включённой подложкой, и каждый холодный старт будет выключать её заново.
     await apply_chart_background(page)
     try:
-        if await database.save_otc_cookies(cookies_pocket_id, await manager.context.storage_state()) is False:
+        state = await manager.context.storage_state()
+        if not binodex_has_session(state, otc_session_keys):
+            # Снимок БЕЗ признака сессии в БД не пишем: 18-09-2026 такой записался (вход прошёл,
+            # но binodex погасил сессию сразу после него) и затёр рабочие куки служебными ключами.
+            logger.warning('OTC inline-релогин: в снимке нет признака сессии — в БД НЕ пишу, '
+                           'прежние куки целее')
+            return True
+        if await database.save_otc_cookies(cookies_pocket_id, state) is False:
             logger.warning('OTC inline-релогин: storage_state не сохранён в БД (сбой) — продолжаю на live-сессии')
     except (Exception,) as err:
         logger.warning(f'OTC inline-релогин: сохранение storage_state не удалось ({err}) — продолжаю')

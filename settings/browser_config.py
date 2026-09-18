@@ -1,3 +1,4 @@
+from binocore.binodex import session_keys as binodex_session_keys
 from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
 from settings._bootstrap_sql import SQL_BINODEX_SETTINGS, SQL_TV_SETTINGS
@@ -147,3 +148,14 @@ otc_chart_scale_item = find_par(data=otc_setting, par='setup_chart_scale_item')
 # проверяются перед каждым опционом (otc_app.ensure_chart_setup).
 # next()+None: старая БД без строки не валит старт (индикаторы просто не включатся).
 otc_indicators = next((i['par_value'] for i in otc_setting if i['par_name'] == 'setup_indicators'), None)
+
+# Ключи localStorage, по любому из которых видно ЖИВУЮ сессию binodex. Их два вида, потому что у
+# binodex два механизма входа сразу: Privy (`privy:token`) и собственная авторизация
+# (`ownAuthSession`, рядом кладётся `accessToken`). Какой достанется — решает флаг my.ownAuth из
+# api.binodex.app/config, и это НЕ по стране: 18-09-2026 две ноды в PL дали разные значения, две
+# в DE тоже, то есть раскат идёт по A/B и переключиться может на любой ноде в любой момент.
+# Разбор и дефолт — в ядре (binocore.binodex), чтобы логин и рантайм-детект сессии смотрели на
+# один и тот же список, а не на две его копии.
+otc_session_keys = binodex_session_keys(
+    {'session_keys': next((i['par_value'] for i in otc_setting
+                           if i['par_name'] == 'session_keys'), None)})
