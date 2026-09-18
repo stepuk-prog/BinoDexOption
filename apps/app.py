@@ -1,6 +1,5 @@
 import asyncio
 import random
-import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -18,6 +17,7 @@ from apps.browser_io import eval_js, shot
 from apps.shutdown import (request_shutdown, shutdown_event,  # noqa: F401 (реэкспорт)
                            shutdown_requested, sleep_or_stop)
 from logs import init_logger
+from binocore.price import clean_price, lang_from_url
 from classes.Option_class import Option
 from classes.result_types import MainResult
 from messages import main_bug_message, dop_plus10_message, plus_message
@@ -276,9 +276,8 @@ async def get_price(manager: "BrowserManager") -> tuple[bool, float | str]:
         page = manager.pages['price']
         if not await mouse_move(page, move_field, 1):
             return False, 'Ошибка имитации движения мыши'
-        cleaned = clear_price(strprice)
         try:
-            price = float(cleaned)
+            price = clean_price(strprice, lang_from_url(page.url))
         except ValueError:
             return False, f'Не удалось распарсить цену из {strprice!r}'
         return True, price
@@ -433,34 +432,6 @@ async def find_point(manager: "BrowserManager", buy: bool) -> tuple[bool, str]:
         except (Exception,) as error:
             error_text = f'Ошибка определения входа в опцион - {str(error)}'
             return False, error_text
-
-
-def clear_price(price_str: str) -> str:
-    """Строка цены из DOM TradingView → строка для float(): цифры, один десятичный разделитель.
-
-    Правило одно: ПОСЛЕДНИЙ разделитель — десятичный, всё, что левее, — разряды тысяч. Оно
-    покрывает обе локали сразу, а локаль тут не наша: интерфейс TV английский у этого форка и
-    русский у пары, разделители у них зеркальные.
-
-    Прежняя версия просто меняла запятую на точку, и на цене выше тысячи (английский UI пишет
-    `4,405.785`) получалось `4.405.785` — float бросал ValueError. Не падение: `get_price` её
-    ловит и отдаёт неуспех, но для FIN это `screenshot`=False → `exit_main(fall=True)`, то есть
-    РЕСТАРТ ПРОЦЕССА на каждом опционе такого актива (ревизия 17-09-2026, п.2.3). Дремало, пока
-    `assets.binary_assets` — форекс (максимум ≈198), и просыпалось бы молча при первом же
-    инструменте дороже тысячи.
-
-    ⚠️ Одиночный разделитель считаем ДЕСЯТИЧНЫМ всегда, даже если за ним ровно три цифры:
-    у JPY-пар дробная часть как раз трёхзначная (`149.123`, round=3 в БД), и «три цифры =
-    разряды» сломало бы их. `4,405` без дробной части в форекс-выдаче TV не встречается, а
-    прежний код на нём давал ровно тот же результат — поведение не ухудшено.
-    """
-    cleaned = re.sub(r'[^\d,.]', '', price_str or '')
-    last = max(cleaned.rfind('.'), cleaned.rfind(','))
-    if last == -1:
-        return cleaned                       # разделителя нет вовсе — целое число
-    whole = re.sub(r'[.,]', '', cleaned[:last])
-    frac = re.sub(r'[.,]', '', cleaned[last + 1:])
-    return f'{whole}.{frac}' if frac else whole
 
 
 # Сколько пар пробуем за один опцион, прежде чем признать заход неудачным, и тормоз между

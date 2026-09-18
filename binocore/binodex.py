@@ -32,6 +32,7 @@ import imaplib
 import logging
 import re
 import time
+from collections.abc import Mapping
 from email.header import decode_header, make_header
 
 # Отправители письма с кодом: Privy (no-reply@privy.io, no-reply@mail.privy.io) и сам binodex
@@ -60,6 +61,16 @@ GOTO_TIMEOUT = 30000   # мс на попытку навигации: на ло�
 GOTO_ATTEMPTS = 3      # попыток goto — транзиентный обрыв навигации у binodex обычное дело
 GOTO_PAUSE = 1.5       # сек между попытками
 EVAL_TIMEOUT = 15      # сек на evaluate внутри логина
+CLEAR_COOKIES_TIMEOUT = 15   # сек на context.clear_cookies: CDP-вызов, своего потолка НЕ имеет
+LOGOUT_TIMEOUT = 15          # сек на IMAP-logout в finally
+
+# Потолки шагов модалки (мс). Именованные, а не литералы по месту: их складывает LOGIN_BUDGET,
+# и при правке потолка бюджет обязан ехать следом сам.
+CLICK_TIMEOUT = 15000        # клик «войти» и ввод e-mail
+CODE_INPUTS_FAST = 8000      # быстрая проба: ячейки кода после Enter
+CODE_INPUTS_SLOW = 15000     # длинная проба: после клика по кнопке отправки
+SESSION_WAIT = 30000         # ожидание признака сессии в localStorage
+CELL_FILL_TIMEOUT = 30000    # запасной путь ввода кода: до шести fill по таймауту страницы
 
 # Сбои навигации, которые лечатся повтором. Список собран на живом флоте: первым идёт гонка
 # редиректа (фронт сам уводит страницу на загрузке, и Firefox рвёт навигацию), дальше сетевые и
@@ -79,6 +90,30 @@ RETRYABLE_GOTO_ERRORS = (
     'ERR_ABORTED',
     'Timeout',                           # таймаут самого goto (домен не ответил за timeout)
 )
+
+def login_budget() -> float:
+    """Худший случай всего входа, секунды: СУММА собственных потолков модуля.
+
+    Нужен вызывающему: у `inline_login` внешнего сторожа может не быть, а внутри есть шаги, чей
+    потолок задаёт браузер (fill ячеек идёт по таймауту страницы). Считается ЗДЕСЬ, а не в
+    программах: иначе правка любого потолка в ядре молча расходится с числом, которое программа
+    держит у себя (так и вышло в BinodexScreens 18-09-2026 — выражение на литералах повторяло
+    арифметику ядра). Функция, а не константа: значения потолков можно поднять в рантайме, и
+    бюджет обязан ехать следом."""
+    goto_leg = GOTO_ATTEMPTS * GOTO_TIMEOUT / 1000 + (GOTO_ATTEMPTS - 1) * GOTO_PAUSE
+    return (
+        2 * IMAP_OP_TIMEOUT                                   # connect + baseline uid
+        + 2 * goto_leg                                        # два goto лендинга
+        + CLEAR_COOKIES_TIMEOUT + 2 * EVAL_TIMEOUT            # чистка сессии
+        + 2 * CLICK_TIMEOUT / 1000                            # клик «войти» + ввод e-mail
+        + (CODE_INPUTS_FAST * 2 + CODE_INPUTS_SLOW) / 1000    # проба ячеек → submit → проба
+        + CODE_WAIT_SECONDS + IMAP_OP_TIMEOUT                 # код с почты
+        + 6 * CELL_FILL_TIMEOUT / 1000                        # запасной ввод по ячейкам
+        + SESSION_WAIT / 1000                                 # признак сессии в localStorage
+        + goto_leg                                            # goto /trade
+        + IMAP_OP_TIMEOUT + LOGOUT_TIMEOUT                    # уборка писем + logout
+    )
+
 
 _log = logging.getLogger('binocore.binodex')
 
@@ -256,7 +291,9 @@ async def _clear_session(page, context, eval_js) -> None:
     """Сбросить старую (битую) сессию перед логином — чтобы протухшие ключи не путали фронт.
     Логинимся «как с чистого листа», но в том же браузере."""
     try:
-        await context.clear_cookies()
+        # Потолок обязателен: clear_cookies — CDP-вызов, своего таймаута у него НЕТ, и зависший
+        # рендерер иначе подвешивал бы вход навсегда (у релогина внешнего сторожа может не быть).
+        await asyncio.wait_for(context.clear_cookies(), timeout=CLEAR_COOKIES_TIMEOUT)
     except (Exception,):
         pass
     try:
@@ -305,13 +342,16 @@ def _report(logger, message: str) -> None:
 
 
 # ── куки сессии ───────────────────────────────────────────────────────────────────────────────
-def has_session(state: dict, keys=SESSION_KEYS) -> bool:
+def has_session(state: Mapping, keys=SESSION_KEYS) -> bool:
     """Есть ли в снимке storage_state признак живой сессии.
 
     Снимок без него в БД писать нельзя: 18-09-2026 такой и записался — вход прошёл, но binodex
     погасил сессию сразу после него, и вместо рабочих кук в БД легли служебные ключи. Следующий
     подъём начинал с заведомо мёртвого набора, то есть программа своей же рукой портила
     последние живые куки."""
+    # Mapping, а не dict: playwright отдаёт из storage_state() тип StorageState — TypedDict, в
+    # рантайме обычный dict, но по PEP 589 с `dict` НЕ совместим, и вызывающему пришлось бы
+    # оборачивать снимок в dict() ради проверки типов (так и вышло в ForumTradeEnglish 18-09).
     names = {item.get('name') for origin in (state or {}).get('origins', [])
              for item in origin.get('localStorage', [])}
     return bool(names & set(keys))
@@ -431,15 +471,15 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
         await goto(page, landing)
         await _clear_session(page, context, eval_js)
         await goto(page, landing)  # перезагрузка начисто
-        await page.click(sel['login_open'], timeout=15000)
-        await page.fill(sel['login_email'], mail, timeout=15000)
+        await page.click(sel['login_open'], timeout=CLICK_TIMEOUT)
+        await page.fill(sel['login_email'], mail, timeout=CLICK_TIMEOUT)
         await page.locator(sel['login_email']).first.press('Enter')  # отправка надёжнее через Enter
         try:
-            await _wait_code_inputs(page, sel['login_code_inputs'], 8000)
+            await _wait_code_inputs(page, sel['login_code_inputs'], CODE_INPUTS_FAST)
         except (Exception,):
-            await page.locator(sel['login_submit']).first.click(timeout=8000)
+            await page.locator(sel['login_submit']).first.click(timeout=CODE_INPUTS_FAST)
             try:
-                await _wait_code_inputs(page, sel['login_code_inputs'], 15000)
+                await _wait_code_inputs(page, sel['login_code_inputs'], CODE_INPUTS_SLOW)
             except (Exception,):
                 # Экран кода не открылся. Прежде чем отдать наверх голый таймаут, спросим саму
                 # модалку: чаще всего она прямо пишет причину, и это НЕ наша поломка (лимит
@@ -456,7 +496,7 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
         # Ключ сессии зависит от механизма входа, который binodex выбирает сам — ждём ЛЮБОЙ из
         # списка. Пока ждали именно privy:token, вход по новой модалке проходил, а мы считали
         # его провалом по таймауту и не сохраняли свежие куки (18-09-2026).
-        await page.wait_for_function(SESSION_PROBE_JS, arg=keys, timeout=30000)
+        await page.wait_for_function(SESSION_PROBE_JS, arg=keys, timeout=SESSION_WAIT)
         await goto(page, trade)
         if not is_trade(page.url):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
@@ -500,6 +540,6 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
         # соединение всё равно закроется, когда поток-сирота добьётся сокет-таймаутом.
         if not imap_timed_out:
             try:
-                await imap_thread(safe_logout, imap, timeout=15)
+                await imap_thread(safe_logout, imap, timeout=LOGOUT_TIMEOUT)
             except (Exception,):
                 pass  # logout под потолком; зависший сервер не должен держать выход из флоу
