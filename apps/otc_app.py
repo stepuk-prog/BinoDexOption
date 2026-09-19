@@ -30,11 +30,13 @@ from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
                               apply_chart_background as binodex_chart_background,
                               close_modal_button as binodex_close_modal,
                               LoginRateLimited, RATE_LIMIT_PAUSE,
+                              rate_limit_sleep as binodex_rate_limit_sleep,
                               has_session as binodex_has_session,
                               watch_session_refresh as binodex_watch_refresh)
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
 from apps.otc_login import otc_inline_login
+from apps.shutdown import shutdown_event
 from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 from settings.config import screenshot_path, database, cookies_pocket_id
@@ -1645,7 +1647,11 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
         # аутэйджа, и возвращаем неуспех: наверху сработает обычный счётчик.
         logger.warning(f'OTC inline-релогин: binodex ограничил запросы кода («{limit}») — '
                        f'пауза {RATE_LIMIT_PAUSE // 60} мин, вход сейчас не пробую')
-        await asyncio.sleep(RATE_LIMIT_PAUSE)
+        # Пауза ПРЕРЫВАЕМАЯ: голый sleep не давал начаться уборке по SIGTERM, и systemd добивал
+        # процесс SIGKILL по TimeoutStopSec (19-09-2026: Result=timeout, ExecMainStatus=9 — для
+        # диспетчера это краш, то есть лишний повод к рестартам).
+        if not await binodex_rate_limit_sleep(RATE_LIMIT_PAUSE, stop=shutdown_event()):
+            logger.info('OTC inline-релогин: пауза по лимиту прервана остановкой процесса')
         return False
     # Свежую сессию — в БД (переживёт рестарт). Сбой сохранения не критичен: работаем на live-сессии.
     # Подложку гасим ДО снятия storage_state, а не после. Настройка живёт в localStorage

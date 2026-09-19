@@ -59,6 +59,7 @@ REQUIRED_SELECTORS = ('login_open', 'login_email', 'login_submit', 'login_code_i
 RATE_LIMIT_MARKERS = ('too many requests', 'слишком много запросов', 'try again later',
                       'попробуйте позже')
 RATE_LIMIT_PAUSE = 900   # сек тишины после такого отказа (лимит binodex остывает ~25 мин)
+RATE_LIMIT_STEP = 1.0    # шаг проверки остановки внутри паузы (см. rate_limit_sleep)
 
 
 class LoginRateLimited(RuntimeError):
@@ -413,6 +414,39 @@ async def _session_survived(page, keys, eval_js, logger) -> bool:
         logger.warning(f'OTC inline-логин: не прочитать признак сессии после загрузки /trade '
                        f'({err}) — вход не оспариваю, решит снимок кук')
         return True
+
+
+async def rate_limit_sleep(seconds: float = RATE_LIMIT_PAUSE, *, stop=None,
+                           step: float = RATE_LIMIT_STEP) -> bool:
+    """Пауза после отказа по лимиту кодов, ПРЕРЫВАЕМАЯ остановкой процесса.
+    True — выдержали её целиком, False — прервала остановка.
+
+    Голый `asyncio.sleep(RATE_LIMIT_PAUSE)` здесь стоить дорого: 19-09-2026 юнит, стоявший в
+    этой паузе, на SIGTERM не начинал уборку вовсе — systemd добивал его SIGKILL по
+    `TimeoutStopSec`, и в журнале оставалось `Result=timeout, ExecMainStatus=9`. Для диспетчера
+    9/KILL — краш, то есть ещё один повод к рестартам и переносам, ровно к тем, от которых
+    пауза и придумана.
+
+    `stop` — что угодно с `.is_set()` (asyncio.Event у одних программ, threading.Event у
+    других) либо вызываемое, возвращающее «пора уходить». None — обычный сон (ранний старт,
+    события ещё нет). Шаг мелкий: teardown должен начаться в пределах секунды, а не минут."""
+    def _stopped() -> bool:
+        if stop is None:
+            return False
+        try:
+            probe = getattr(stop, 'is_set', None) or stop
+            return bool(probe())
+        except (Exception,):
+            return False          # нечитаемый признак остановки не повод рвать паузу
+
+    left = max(0.0, float(seconds))
+    while left > 0:
+        if _stopped():
+            return False
+        nap = min(step, left)
+        await asyncio.sleep(nap)
+        left -= nap
+    return not _stopped()
 
 
 def watch_session_refresh(page, on_rotated, *, hint: str = SESSION_REFRESH_HINT, logger=None,
