@@ -29,6 +29,7 @@ from classes.result_types import OperationResult
 from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
                               apply_chart_background as binodex_chart_background,
                               close_modal_button as binodex_close_modal,
+                              LoginRateLimited, RATE_LIMIT_PAUSE,
                               has_session as binodex_has_session)
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
@@ -1612,7 +1613,17 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
         logger.error('OTC inline-релогин: нет селекторов binodex_settings')
         return False
     sel = {r['par_name']: r['par_value'] for r in rows}
-    if not await otc_inline_login(page, manager.context, creds['mail'], creds['mail_app_pass'], sel):
+    try:
+        if not await otc_inline_login(page, manager.context, creds['mail'], creds['mail_app_pass'], sel):
+            return False
+    except LoginRateLimited as limit:
+        # Лимит запросов кода у binodex: повторять вход нельзя — КАЖДАЯ попытка его продлевает
+        # (18-09 ForumTradeEnglish просила код каждые 2.5 минуты три часа подряд, 19-09 в ту же
+        # яму сползли 3m/5m OTC). Держим паузу прямо здесь, как это уже делает ветка front-end
+        # аутэйджа, и возвращаем неуспех: наверху сработает обычный счётчик.
+        logger.warning(f'OTC inline-релогин: binodex ограничил запросы кода («{limit}») — '
+                       f'пауза {RATE_LIMIT_PAUSE // 60} мин, вход сейчас не пробую')
+        await asyncio.sleep(RATE_LIMIT_PAUSE)
         return False
     # Свежую сессию — в БД (переживёт рестарт). Сбой сохранения не критичен: работаем на live-сессии.
     # Подложку гасим ДО снятия storage_state, а не после. Настройка живёт в localStorage

@@ -53,6 +53,17 @@ IMAP_OP_TIMEOUT = 30   # сек на одну IMAP-операцию в пото�
 
 REQUIRED_SELECTORS = ('login_open', 'login_email', 'login_submit', 'login_code_inputs')
 
+# Отказ binodex по ЛИМИТУ запросов кода. Отдельный класс, потому что лечение у него обратное
+# обычному: повторять вход НЕЛЬЗЯ — каждая попытка продлевает лимит. 18-09-2026 ForumTradeEnglish
+# так просила код каждые ~2.5 минуты три часа подряд, 19-09 в ту же яму сползли 3m/5m OTC.
+RATE_LIMIT_MARKERS = ('too many requests', 'слишком много запросов', 'try again later',
+                      'попробуйте позже')
+RATE_LIMIT_PAUSE = 900   # сек тишины после такого отказа (лимит binodex остывает ~25 мин)
+
+
+class LoginRateLimited(RuntimeError):
+    """binodex отказал по лимиту запросов кода — входить сейчас нельзя, нужна пауза."""
+
 URL_LANDING = 'https://binodex.app/'
 URL_TRADE = 'https://binodex.app/trade'
 
@@ -540,6 +551,11 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
                 alert = await _alert_text(page, sel, eval_js)
                 if alert:
                     logger.warning(f'OTC inline-логин: binodex отказал на шаге e-mail — «{alert}»')
+                    if any(m in alert.lower() for m in RATE_LIMIT_MARKERS):
+                        # Не просто «не вышло»: пока лимит горит, КАЖДЫЙ новый запрос кода его
+                        # продлевает. Отдаём отдельным классом — вызывающий выдержит паузу
+                        # вместо того, чтобы жечь попытки счётчика (19-09-2026).
+                        raise LoginRateLimited(alert)
                     return False
                 raise
         code = await imap_thread(wait_for_code, imap, baseline, froms, hint, stop_wait,
@@ -572,6 +588,10 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
                            f'— вход состоялся, письма останутся в ящике')
         _report(logger, 'OTC: inline-релогин binodex успешен')
         return True
+    except LoginRateLimited:
+        # Мимо общего except ниже: он превратил бы лимит в безликое «вход не удался», и
+        # вызывающий пошёл бы на следующий круг, продлевая лимит собственными запросами.
+        raise
     except LoginInterrupted as stop:
         # Нас останавливают — это НЕ сбой логина: ложное «релогин не удался» и врёт в журнале, и
         # зря тратит попытку счётчика. Пишем фактом, уровнем info.
