@@ -64,6 +64,18 @@ RATE_LIMIT_PAUSE = 900   # сек тишины после такого отка�
 class LoginRateLimited(RuntimeError):
     """binodex отказал по лимиту запросов кода — входить сейчас нельзя, нужна пауза."""
 
+
+# Ротация сессии. Собственная авторизация binodex держит сессию на ОДНОРАЗОВОМ refresh-токене:
+# живой фронт меняет его запросом ниже примерно раз в 15 минут (столько живёт accessToken), а
+# сервер помнит потраченный экземпляр и на повтор отвечает
+# `401 {"code":"REFRESH_REUSED","message":"refresh token was already used"}`.
+# Значит снимок, снятый при входе, устаревает не по времени, а при ПЕРВОЙ ЖЕ ротации: замер
+# 19-09-2026 — снимок 674 возрастом 26 часов не поднялся именно с этим кодом, хотя
+# `refreshExpiresAt` у него стоял на +30 суток. Отсюда правило: перечитывать storage_state
+# после каждой ротации (у Privy такой беды не было — там снимок восстанавливаемый).
+SESSION_REFRESH_HINT = '/id/refresh'   # хвост URL обновления сессии (api.binodex.app/v1/id/refresh)
+SNAPSHOT_MIN_GAP = 60                  # сек между сохранениями снимка: ответы могут идти пачкой
+
 URL_LANDING = 'https://binodex.app/'
 URL_TRADE = 'https://binodex.app/trade'
 
@@ -82,6 +94,13 @@ CODE_INPUTS_FAST = 8000      # быстрая проба: ячейки кода 
 CODE_INPUTS_SLOW = 15000     # длинная проба: после клика по кнопке отправки
 SESSION_WAIT = 30000         # ожидание признака сессии в localStorage
 CELL_FILL_TIMEOUT = 30000    # запасной путь ввода кода: до шести fill по таймауту страницы
+
+# Принятый код binodex уводит на /trade САМ, и наш goto поверх этого редиректа гасил сессию
+# (см. _wait_own_redirect). Числа сняты с живого аккаунта 19-09-2026: собственный редирект
+# приходит примерно за секунду, а сорванная сессия исчезает в первые секунды после загрузки.
+OWN_REDIRECT_WAIT = 15       # сек ожидания собственного редиректа binodex на /trade
+OWN_REDIRECT_POLL = 0.5      # сек между опросами page.url
+SESSION_SETTLE = 5           # сек «отстоя» на /trade перед контрольным чтением признака сессии
 
 # Сбои навигации, которые лечатся повтором. Список собран на живом флоте: первым идёт гонка
 # редиректа (фронт сам уводит страницу на загрузке, и Firefox рвёт навигацию), дальше сетевые и
@@ -121,7 +140,9 @@ def login_budget() -> float:
         + CODE_WAIT_SECONDS + IMAP_OP_TIMEOUT                 # код с почты
         + 6 * CELL_FILL_TIMEOUT / 1000                        # запасной ввод по ячейкам
         + SESSION_WAIT / 1000                                 # признак сессии в localStorage
-        + goto_leg                                            # goto /trade
+        + OWN_REDIRECT_WAIT                                   # ждём свой редирект binodex
+        + goto_leg                                            # goto /trade (запасной путь)
+        + SESSION_SETTLE                                      # отстой + контрольное чтение
         + IMAP_OP_TIMEOUT + LOGOUT_TIMEOUT                    # уборка писем + logout
     )
 
@@ -347,6 +368,105 @@ async def _alert_text(page, sel: dict, eval_js) -> str:
     return ' / '.join(texts)[:200] if texts else ''
 
 
+async def _wait_own_redirect(page, is_trade, timeout: float = OWN_REDIRECT_WAIT) -> bool:
+    """Дождаться, пока binodex САМ уведёт страницу на /trade. True — увёл, False — не дождались.
+
+    Зачем вообще ждать вместо того, чтобы перейти самим. После принятого кода binodex делает
+    свой переход на /trade примерно за секунду, а наш `goto` в тот же момент ложился ПОВЕРХ
+    чужого редиректа: навигация рвала инициализацию приложения, и binodex гасил только что
+    выданную сессию. Снаружи это неотличимо от протухших кук — логин рапортовал успех, ключа в
+    localStorage через секунду уже не было, `init` видел Demo, и программа шла на следующий
+    релогин, сжигая одноразовые коды до лимита (19-09-2026: пять «успешных» входов за 90 секунд,
+    дальше «Too many requests» и остановка юнита). Воспроизведено дважды на одном аккаунте:
+    ручные шаги БЕЗ своего goto дают живую сессию, штатный вход со своим goto — пустой
+    localStorage.
+
+    Опрос `page.url`, а не `wait_for_url`: страница здесь утка (модуль не импортирует
+    Playwright), и у программ она разных версий."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if is_trade(page.url):
+                return True
+        except (Exception,):
+            pass            # страница в середине навигации — просто спросим ещё раз
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(OWN_REDIRECT_POLL)
+
+
+async def _session_survived(page, keys, eval_js, logger) -> bool:
+    """Пережил ли признак сессии загрузку /trade. Только это и есть доказательство входа.
+
+    Раньше успехом считался САМ ФАКТ появления ключа сразу после кода — а binodex умеет принять
+    код, отдать сессию и погасить её на первом же переходе. Поэтому читаем ПОВТОРНО, дав
+    странице отстояться.
+
+    Не прочитали (рендерер занят, evaluate упал) — НЕ винить: молчание страницы не доказывает
+    отвала, а ложный неуспех стоит одноразового кода. Настоящая вторая проверка всё равно
+    впереди: вызывающий смотрит снимок storage_state через `has_session` и без признака сессии
+    в БД его не пишет."""
+    await asyncio.sleep(SESSION_SETTLE)
+    try:
+        return bool(await eval_js(page, SESSION_PROBE_JS, list(keys)))
+    except (Exception,) as err:
+        logger.warning(f'OTC inline-логин: не прочитать признак сессии после загрузки /trade '
+                       f'({err}) — вход не оспариваю, решит снимок кук')
+        return True
+
+
+def watch_session_refresh(page, on_rotated, *, hint: str = SESSION_REFRESH_HINT, logger=None,
+                          min_gap: float = SNAPSHOT_MIN_GAP) -> bool:
+    """Звать `on_rotated()` после каждой успешной ротации сессии binodex. True — подписались.
+
+    Зачем. refresh-токен у собственной авторизации binodex ОДНОРАЗОВЫЙ (см. SESSION_REFRESH_HINT):
+    как только живой браузер его прокрутил, экземпляр, лежащий в БД, становится потраченным, и
+    следующий холодный старт получает 401 REFRESH_REUSED → «куки протухли» → релогин → письмо с
+    одноразовым кодом. При серии рестартов (диспетчер делает их сам) это упирается в лимит
+    запросов кода. Лечение — держать в БД ТЕКУЩИЙ снимок: подписаться на ответ обновления и
+    перезаписывать storage_state сразу после него.
+
+    `on_rotated()` — корутина вызывающего: снять storage_state и сохранить (у программ свои
+    таблица, владелец кук и потолок). Её сбой глушим: не сохранили снимок — работа продолжается,
+    цена ошибки всего лишь релогин на следующем подъёме.
+
+    Подписка ИДЕМПОТЕНТНА: init зовут на каждом подъёме браузера, а страница между ними может
+    быть той же (reload вместо пересоздания) — второй обработчик сохранял бы снимок дважды.
+    `page`/`response` — утки: Playwright модуль не импортирует."""
+    logger = logger or _log
+    if getattr(page, '_binocore_session_watch', False):
+        return False
+    guard = {'at': 0.0, 'busy': False}
+
+    async def _save() -> None:
+        try:
+            await on_rotated()
+        except (Exception,) as err:
+            logger.warning(f'binodex: снимок сессии после ротации не сохранён ({err})')
+        finally:
+            guard['at'] = time.monotonic()
+            guard['busy'] = False
+
+    def _on_response(response) -> None:
+        try:
+            if hint not in response.url or response.status >= 400:
+                return
+        except (Exception,):
+            return            # ответ уже недоступен (страница ушла) — ротацию пропускаем
+        if guard['busy'] or time.monotonic() - guard['at'] < min_gap:
+            return
+        guard['busy'] = True  # флаг ставим ДО планирования: ответы приходят пачкой
+        try:
+            asyncio.get_running_loop().create_task(_save())
+        except (Exception,) as err:
+            guard['busy'] = False
+            logger.warning(f'binodex: сохранение снимка после ротации не запущено ({err})')
+
+    page.on('response', _on_response)
+    page._binocore_session_watch = True
+    return True
+
+
 def _report(logger, message: str) -> None:
     """Успех входа — в отчётный уровень программы, если он у неё есть (у семьи это `report`)."""
     getattr(logger, 'report', logger.info)(message)
@@ -495,11 +615,13 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
                        goto=None, eval_js=None, logger=None, on_trade=None, stop_wait=None) -> bool:
     """Залогиниться в binodex.app по email-OTP прямо в текущем (живом) браузере.
 
-    True — вход удался (признак сессии в localStorage и мы на /trade). False — любой сбой
+    True — вход удался (признак сессии ПЕРЕЖИЛ загрузку /trade). False — любой сбой
     (лог + откат): вызывающий тогда не сохраняет куки и считает попытки сам.
 
     Шаги: чистим сессию → страница авторизации → login_open → e-mail → код из почты (IMAP) →
-    ввод → ждём признак сессии → /trade. Селекторы и URL — из `sel` (binodex_settings).
+    ввод → ждём признак сессии → ЖДЁМ СОБСТВЕННЫЙ редирект binodex на /trade (свой goto —
+    только если его не было) → перечитываем признак сессии. Селекторы и URL — из `sel`
+    (binodex_settings).
 
     Все зависимости НЕОБЯЗАТЕЛЬНЫ: без них берутся дефолты ядра, то есть модуль работает сразу
     после раскладки sync.py. Передают их там, где у программы есть своя обёртка (у копий они
@@ -565,9 +687,21 @@ async def inline_login(page, context, *, mail: str, app_pass: str, sel: dict,
         # списка. Пока ждали именно privy:token, вход по новой модалке проходил, а мы считали
         # его провалом по таймауту и не сохраняли свежие куки (18-09-2026).
         await page.wait_for_function(SESSION_PROBE_JS, arg=keys, timeout=SESSION_WAIT)
-        await goto(page, trade)
+        # На /trade нас уводит САМ binodex — свой goto только если он этого не сделал. Наша
+        # навигация поверх чужого редиректа гасила выданную сессию (см. _wait_own_redirect).
+        if await _wait_own_redirect(page, is_trade):
+            logger.info('OTC inline-логин: binodex сам увёл на /trade — свой переход не делаю')
+        else:
+            logger.info(f'OTC inline-логин: своего редиректа на /trade не дождался за '
+                        f'{OWN_REDIRECT_WAIT}с — перехожу сам')
+            await goto(page, trade)
         if not is_trade(page.url):
             logger.warning(f'OTC inline-логин: после входа редирект с /trade на {page.url}')
+            return False
+        # Вход засчитываем ТОЛЬКО тем, что пережило загрузку /trade.
+        if not await _session_survived(page, keys, eval_js, logger):
+            logger.warning('OTC inline-логин: binodex погасил сессию сразу после входа '
+                           '(признак сессии исчез на /trade) — вход НЕ состоялся')
             return False
         # ВСЁ, что ниже, — уборка, а не часть входа: вход уже доказан (признак сессии в
         # localStorage + мы на /trade). Поэтому её сбой НЕ должен превращаться в «релогин не

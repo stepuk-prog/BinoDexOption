@@ -30,7 +30,8 @@ from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
                               apply_chart_background as binodex_chart_background,
                               close_modal_button as binodex_close_modal,
                               LoginRateLimited, RATE_LIMIT_PAUSE,
-                              has_session as binodex_has_session)
+                              has_session as binodex_has_session,
+                              watch_session_refresh as binodex_watch_refresh)
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
 from apps.otc_login import otc_inline_login
@@ -1600,6 +1601,27 @@ async def _verify_otc_ready(page: Page) -> None:
         logger.info("✅ binodex: WS котировок подключён")
 
 
+async def _save_session_snapshot(manager: "BrowserManager") -> None:
+    """Положить ТЕКУЩИЙ storage_state в БД. Зовётся после каждой ротации сессии binodex
+    (подписка `watch_session_refresh` в init_otc).
+
+    Зачем не только после релогина. refresh-токен собственной авторизации binodex одноразовый:
+    фронт меняет его примерно раз в 15 минут, и снимок, снятый при входе, к этому моменту уже
+    потрачен — холодный старт с него получает 401 REFRESH_REUSED, то есть «куки протухли» →
+    релогин → письмо с кодом. Держим в БД текущий экземпляр, и рестарт снова стоит ноль писем.
+
+    Гард на признак сессии тот же, что у релогина: снимок без ключа в БД не пишем, прежние куки
+    целее."""
+    state = await manager.context.storage_state()
+    if not binodex_has_session(state, otc_session_keys):
+        logger.warning('OTC: в снимке после ротации нет признака сессии — в БД НЕ пишу')
+        return
+    if await database.save_otc_cookies(cookies_pocket_id, state) is False:
+        logger.warning('OTC: снимок после ротации сессии не сохранён в БД (сбой) — работа продолжается')
+        return
+    logger.info('OTC: снимок сессии обновлён в БД после ротации токена binodex')
+
+
 async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     """Inline-релогин binodex В ТЕКУЩЕМ браузере (без подпроцесса/холодного браузера): почта+app-pass
     и селекторы из БД → otc_login.otc_inline_login над живым page. Успех → свежий storage_state в БД
@@ -1673,6 +1695,9 @@ async def init_otc(manager: "BrowserManager") -> bool:
     # работающие индикаторы (клик ТОГГЛИТ). Реестр: legend-scan-scope.
     reset_legend_scope()
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
+    # Ротация сессии: подписываемся ДО навигации по той же причине — первый refresh фронт может
+    # сделать сразу после загрузки. Подписка идемпотентна (init зовут на каждом подъёме).
+    binodex_watch_refresh(page, lambda: _save_session_snapshot(manager), logger=logger)
 
     # URL — из binodex_settings.trade_url (browser_config.otc_trade_url) с дефолтом на уровне
     # чтения настроек, поэтому пустым быть не может: прежняя async-обёртка _otc_page_url() и
