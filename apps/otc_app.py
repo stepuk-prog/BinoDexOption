@@ -28,6 +28,7 @@ from classes.price_tracker import WebSocketPriceTracker, symbol_key
 from classes.result_types import OperationResult
 from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
                               apply_chart_background as binodex_chart_background,
+                              close_modal_button as binodex_close_modal,
                               has_session as binodex_has_session)
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
@@ -649,9 +650,11 @@ async def dismiss_modal_backdrop(page: Page) -> None:
     что мешает оверлей (ровно так 20-08-2026 масштаб перестал применяться у английских
     OTC-программ семьи). Проверка дешёвая: нет бэкдропа — выходим сразу.
 
-    Сначала Escape — штатный путь MUI. Если модалка ставит disableEscapeKeyDown, кликаем по самому
-    бэкдропу. Не закрылась — не падаем: пункты всё равно кликаются через dispatch_event, который
-    проверку перекрытия пропускает."""
+    Лесенка от дешёвого к грубому, каждый шаг проверяется исчезновением бэкдропа: Escape
+    (штатный путь MUI) → крестик самой модалки (ядро; только он убирает окно ИЗ КАДРА) → клик
+    в КРАЙ бэкдропа (центр перекрывает картинка анонса) → клик по бэкдропу DOM-событием, которое
+    перекрытие не проверяет вовсе. Не закрылась — не падаем: вызывающий код всё равно кликает
+    пункты через dispatch_event."""
     backdrop = page.locator(MODAL_BACKDROP).first
     try:
         if not await backdrop.count() or not await backdrop.is_visible():
@@ -662,12 +665,40 @@ async def dismiss_modal_backdrop(page: Page) -> None:
         return
     except (Exception,):
         pass
+    # Крестик самой модалки. Единственный путь, который убирает её ИЗ КАДРА, а не просто
+    # перестаёт мешать кликам: Escape и клик по бэкдропу берут лишь те окна, что закрываются
+    # снаружи, а модалку-анонс binodex рисует картинкой ПОВЕРХ бэкдропа. Ядро ищет закрывашку
+    # по служебным признакам (aria-label/data-testid/класс close, значок ×) и НЕ трогает кнопки
+    # с подписями вроде «OK» — такая в промо увела бы бота с /trade.
+    closed_by = await binodex_close_modal(page)
+    if closed_by:
+        try:
+            await backdrop.wait_for(state='hidden', timeout=2000)
+            logger.info(f'OTC: модалка binodex закрыта крестиком ({closed_by})')
+            return
+        except (Exception,):
+            pass
+    # Клик в КРАЙ бэкдропа, а не в центр: поверх него binodex рисует модалку-анонс
+    # (`announcement-images/*.webp`), и её картинка перехватывает pointer events ровно по центру —
+    # Playwright ретраит клик до таймаута и пишет полотно «subtree intercepts pointer events»
+    # (EnglishGold, ночь 18-09-2026: так не выбрались пять пар подряд). Угол бэкдропа свободен.
     try:
-        await backdrop.click(timeout=1500)
+        await backdrop.click(position={'x': 4, 'y': 4}, timeout=1500)
         await backdrop.wait_for(state='hidden', timeout=2000)
-        logger.info('OTC: модалка binodex закрыта кликом по бэкдропу')
+        logger.info('OTC: модалка binodex закрыта кликом по краю бэкдропа')
+        return
+    except (Exception,):
+        pass
+    # Последний путь: клик DOM-событием. dispatch_event не проверяет перекрытие вовсе, то есть
+    # проходит и сквозь картинку анонса; MUI слушает onClick на самом бэкдропе, событие всплывает.
+    try:
+        await backdrop.dispatch_event('click')
+        await backdrop.wait_for(state='hidden', timeout=2000)
+        logger.info('OTC: модалка binodex закрыта DOM-событием по бэкдропу')
     except (Exception,) as error:
-        logger.warning(f'OTC: модалка binodex не закрылась ({error}) — '
+        # Первая строка: Playwright кладёт в сообщение весь call log (десятки строк на каждый
+        # ретрай клика), и в warning.log это полотно топит вокруг себя всё остальное.
+        logger.warning(f'OTC: модалка binodex не закрылась ({str(error).splitlines()[0]}) — '
                        f'настройки графика выставляем через DOM-события')
 
 
@@ -1594,9 +1625,16 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
         if not binodex_has_session(state, otc_session_keys):
             # Снимок БЕЗ признака сессии в БД не пишем: 18-09-2026 такой записался (вход прошёл,
             # но binodex погасил сессию сразу после него) и затёр рабочие куки служебными ключами.
-            logger.warning('OTC inline-релогин: в снимке нет признака сессии — в БД НЕ пишу, '
+            # И возвращаем FALSE, а не True: раз ключа нет в снимке — его нет и в браузере
+            # (снимок снимается с ТОГО ЖЕ контекста, в котором живёт вкладка), то есть вход не
+            # прижился и работать на «live-сессии» не на чем. Прежнее True стоило ночи 19-09-2026
+            # на EnglishGold: init сразу за релогином видел Demo → CookiesExpired → счётчик гнал
+            # ещё три входа, binodex слал ЧЕТЫРЕ письма с кодом подряд (лимит запросов — рядом),
+            # и всё это заканчивалось выходом 11. False отдаёт решение наверх с первого раза.
+            logger.warning('OTC inline-релогин: в снимке нет признака сессии — вход не прижился '
+                           '(binodex погасил сессию сразу после входа); в БД НЕ пишу, '
                            'прежние куки целее')
-            return True
+            return False
         if await database.save_otc_cookies(cookies_pocket_id, state) is False:
             logger.warning('OTC inline-релогин: storage_state не сохранён в БД (сбой) — продолжаю на live-сессии')
     except (Exception,) as err:

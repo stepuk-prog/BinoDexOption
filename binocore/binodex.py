@@ -361,6 +361,54 @@ def has_session(state: Mapping[str, object], keys=SESSION_KEYS) -> bool:
     return bool(names & set(keys))
 
 
+# ── модалка поверх страницы ───────────────────────────────────────────────────────────────────
+# Кнопка закрытия ВНУТРИ модалки, которую binodex поднимает поверх /trade (онбординг, промо,
+# анонс). Ищем ТОЛЬКО по служебным признакам закрывашки (aria-label / data-testid / класс со
+# словом close) и по значку-крестику — намеренно НЕ по подписям вроде «OK» или «Got it»:
+# в промо-модалке такая кнопка ведёт на внешнюю страницу, то есть «закрытие» увело бы бота с
+# торговой страницы. Ничего не нашли — вернём пусто, у вызывающего есть свои пути (Escape,
+# клик по краю бэкдропа, DOM-событие).
+MODAL_CLOSE_JS = """
+() => {
+  const CROSS = ['\u00d7', '\u2715', '\u2716', '\u2717', '\u2718', 'x'];
+  const BY_ATTR = ['[aria-label*="close" i]', '[data-testid*="close" i]',
+                   'button[class*="close" i]', '[class*="closeBtn" i]', '[class*="close_btn" i]'];
+  const visible = (el) => !!(el.offsetWidth || el.offsetHeight);
+  const roots = document.querySelectorAll('[role="presentation"], [role="dialog"], [aria-modal="true"]');
+  for (const root of roots) {
+    for (const sel of BY_ATTR) {
+      for (const btn of root.querySelectorAll(sel)) {
+        if (!visible(btn)) continue;
+        try { btn.click(); return sel; } catch (e) {}
+      }
+    }
+    for (const btn of root.querySelectorAll('button,[role="button"]')) {
+      if (!visible(btn)) continue;
+      if (CROSS.includes((btn.innerText || '').trim().toLowerCase())) {
+        try { btn.click(); return '\u043a\u0440\u0435\u0441\u0442\u0438\u043a'; } catch (e) {}
+      }
+    }
+  }
+  return '';
+}
+"""
+
+
+async def close_modal_button(page, *, eval_js=None) -> str:
+    """Нажать крестик модалки binodex. Возврат — по какому признаку нашли кнопку ('' — не нашли).
+
+    Нужен потому, что остальные пути лесенки бьют по БЭКДРОПУ, а модалку-анонс binodex рисует
+    картинкой поверх него: клик в центр Playwright не пропускает («subtree intercepts pointer
+    events»), а закрывается ли такая модалка кликом по бэкдропу — зависит от того, как её
+    собрали. Крестик закрывает её честно, и она уходит ИЗ КАДРА, а не только перестаёт мешать
+    кликам. Ошибки не критичны: не вышло — вызывающий идёт дальше по своей лесенке."""
+    eval_js = eval_js or default_eval_js
+    try:
+        return await eval_js(page, MODAL_CLOSE_JS) or ''
+    except (Exception,):
+        return ''
+
+
 # ── чарт: фоновая подложка ────────────────────────────────────────────────────────────────────
 async def chart_bg_on(page, wrap_bg: str | None) -> bool | None:
     """Включена ли фоновая подложка чарта. None — спросить не вышло (нет селектора, страница

@@ -79,6 +79,10 @@ _use_proxy = False
 # OTC: счётчик front-end-аутэйджей подряд в прокси-режиме (для переотбивки direct). Сбрасывается
 # при успешном init и при каждом новом заходе в прокси-режим.
 _proxy_outage_streak = 0
+# OTC: «под прокси объявили отвал кук → уже переотбивали прямой режим». Один раз за цикл подъёма,
+# сброс — ТОЛЬКО при успешном init. Без флага возможен пинг-понг: direct не поднял фронт →
+# прокси → «куки» → назад в direct → снова не поднял фронт → прокси, и так без конца.
+_cookies_direct_reprobe = False
 
 
 def _reset_cookie_fails():
@@ -163,6 +167,7 @@ async def _init_with_retry():
     Паузы прерываются сигналом остановки.
     :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
     global _use_proxy, _proxy_outage_streak, _setup_streak, _browser_fails, _outage_cycles
+    global _cookies_direct_reprobe
     # Счётчики МОДУЛЬНЫЕ (как _cookie_fails/_otc_recover_cycles). Локальными они обнулялись на
     # каждом входе, а _recreate_browser зовёт эту функцию заново — в цикле «браузер поднялся →
     # опцион упал → пересоздание» лимиты не накапливались, и предохранители не срабатывали
@@ -254,6 +259,20 @@ async def _init_with_retry():
                 return None
             continue
         except CookiesExpired as error:
+            # ПОД ПРОКСИ диагноз «протухли куки» ненадёжен: binodex принимает код, отдаёт сессию и
+            # гасит её на первом же переходе на /trade — снаружи это выглядит ровно как мёртвый
+            # storage_state, хотя куки ни при чём (EnglishGold, ночь 19-09-2026: семь писем с
+            # кодом подряд и выход 11, а после рестарта процесса те же куки поднялись сразу —
+            # разница была только в том, что рестарт начинает с ПРЯМОГО режима). Поэтому первым
+            # делом переотбиваем direct и пробуем ещё раз ТАМ, не тратя ни попытки счётчика, ни
+            # одноразовых кодов. Один раз за цикл подъёма (см. _cookies_direct_reprobe).
+            if not binary and _use_proxy and not _cookies_direct_reprobe:
+                _use_proxy = False
+                _cookies_direct_reprobe = True
+                _proxy_outage_streak = 0
+                logger.report(f'OTC: отвал кук случился в ПРОКСИ-режиме — возвращаюсь в прямой '
+                              f'и проверяю там, прежде чем звать релогин: {error}')
+                continue
             if not binary:  # OTC: рефрешер (3 попытки); при провале _recover_otc_cookies сам выйдет
                 if await _recover_otc_cookies():
                     continue  # успех → новый виток init_load прочитает свежие куки из БД
@@ -264,6 +283,7 @@ async def _init_with_retry():
         if manager:
             _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
             _proxy_outage_streak = 0  # init поднялся (direct или прокси) → стрик аутэйджей сброшен
+            _cookies_direct_reprobe = False   # подъём удался → переотбивка direct снова разрешена
             # ВСЕ предохранители подъёма — на ноль: браузер поднялся и настроился, значит
             # прежние провалы были транзиентными. Без этого сброса счётчики стали бы
             # монотонными за жизнь процесса: три SetupError с сутками нормальной работы между
