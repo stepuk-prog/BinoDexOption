@@ -861,17 +861,17 @@ _LEGEND_ROOT_MAX_UP = 6
 # Берём САМЫЙ ВНУТРЕННИЙ элемент (без вложенных span/div), иначе один чип считался бы дважды —
 # за себя и за обёртку с тем же textContent.
 _LEGEND_SCAN_JS = (
-    "(arg) => { const scan = (root) => { const counts = {};"
+    "(arg) => { const scan = (root) => { const counts = {}; let total = 0;"
     "   for (const b of arg.badges) counts[b] = 0;"
-    "   for (const el of root.querySelectorAll('span')) {"
-    "     const t = (el.textContent || '').trim();"
-    "     if (!arg.badges.includes(t)) continue;"
+    "   for (const el of root.querySelectorAll('div,span')) {"
     "     if (el.querySelector('span,div')) continue;"
     "     const chip = el.closest('div');"
     "     if (!chip || !chip.querySelector('img[src*=\"/img/chart/\"]')) continue;"
-    "     counts[t]++; }"
-    "   return counts; };"
-    " const full = (c) => arg.badges.every(b => c[b] > 0);"
+    "     total++;"
+    "     const t = (el.textContent || '').trim();"
+    "     if (arg.badges.includes(t)) counts[t]++; }"
+    "   return {c: counts, total}; };"
+    " const full = (r) => arg.badges.every(b => r.c[b] > 0);"
     " if (arg.scope === 'box') {"
     "   const root = document.querySelector('[' + arg.rootAttr + ']');"
     "   return {near: root ? scan(root) : null}; }"
@@ -911,6 +911,25 @@ _LEGEND_DROP_JS = (
     "   return 'clicked'; }")
 
 
+def _counts_or_blind(payload, badges) -> dict | None:
+    """Счётчики из ответа скана либо None, если легенда НЕ ПРОЧИТАНА.
+
+    Отличаем «индикаторов нет» от «мы ослепли»: скан возвращает и общее число чипов легенды
+    (любой лист внутри бейджа с картинками /img/chart/), независимо от их имён. Нули по нашим
+    бейджам при НЕНУЛЕВОМ total — это правда «их выключили». Нули при нулевом total — легенда
+    не отрисована или binodex сменил вёрстку; кликать по такому нельзя: клик добавит копию, а
+    уборка по тем же нулям ничего не снимет, и копии будут расти на каждом подъёме."""
+    if not isinstance(payload, dict):
+        return None
+    counts, total = payload.get('c'), payload.get('total')
+    if not isinstance(counts, dict):
+        return None
+    result = {badge: int(counts.get(badge, 0) or 0) for badge in badges}
+    if not any(result.values()) and not total:
+        return None
+    return result
+
+
 async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, int] | None:
     """СКОЛЬКО копий каждого индикатора сейчас на графике — по чипам легенды.
 
@@ -942,24 +961,24 @@ async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, i
         if near is None:
             _legend_scope = None      # перекалибруемся на следующем вызове
             return None
-        counts = near
+        payload = near
     elif scope == 'document':
-        counts = whole
+        payload = whole
     else:
-        counts = whole
+        payload = whole
         # Только ПОЛНЫЙ набор: по одному-двум горящим чипам судить о раскладке нельзя (см.
         # докстринг). Неполное наблюдение оставляет scope=None — перекалибруемся на след. вызове.
         # А вот при полном наборе решение принимается ВСЕГДА, в том числе когда контейнер не
         # нашёлся (near=None: канваса нет в DOM либо легенда лежит дальше _LEGEND_ROOT_MAX_UP).
-        if isinstance(whole, dict) and all(whole.get(b, 0) > 0 for b in badges):
-            same = isinstance(near, dict) and all(near.get(b, 0) == whole[b] for b in badges)
+        whole_c = whole.get('c') if isinstance(whole, dict) else None
+        near_c = near.get('c') if isinstance(near, dict) else None
+        if isinstance(whole_c, dict) and all(whole_c.get(b, 0) > 0 for b in badges):
+            same = isinstance(near_c, dict) and all(near_c.get(b, 0) == whole_c[b] for b in badges)
             _legend_scope = 'box' if same else 'document'
             up = res.get('up')
             logger.info(f'OTC: область поиска чипов легенды — {_legend_scope}'
                         + (f' (предок канваса +{up})' if _legend_scope == 'box' and up is not None else ''))
-    if not isinstance(counts, dict):
-        return None
-    return {badge: int(counts.get(badge, 0) or 0) for badge in badges}
+    return _counts_or_blind(payload, badges)
 
 
 # Пауза перед ПОДТВЕРЖДАЮЩИМ чтением легенды. Нужна ровно в одном случае — когда первое
@@ -1013,18 +1032,23 @@ async def drop_extra_indicators(page: Page, extra: dict[str, int],
                 logger.warning('OTC: бюджет ремонта исчерпан — лишние копии индикаторов '
                                'оставляю следующему опциону')
                 return
+            # try охватывает ВЕСЬ шаг, включая паузу: страница может моргнуть посреди
+            # уборки, а исключение отсюда уходит наверх, где ловятся только типизированные
+            # (CookiesExpired и прочие) — то есть оформление кадра утащило бы за собой
+            # полный ре-init. Соседи по функции ошибки глотают по тому же принципу:
+            # «оформление кадра — не данные».
             try:
                 verdict = await _eval(page, _LEGEND_DROP_JS, {'badge': badge},
                                       cap=_left_s(deadline, EVAL_TIMEOUT))
+                if verdict != 'clicked':
+                    if verdict == 'no-button':
+                        logger.warning(f'OTC: у чипа {badge} нет кнопки удаления — вёрстка легенды '
+                                       f'изменилась, лишние копии снять не могу')
+                    break
+                await page.wait_for_timeout(300)
             except (Exception,) as err:
                 logger.debug(f'OTC: снятие лишней копии {badge} не удалось ({err})')
                 break
-            if verdict != 'clicked':
-                if verdict == 'no-button':
-                    logger.warning(f'OTC: у чипа {badge} нет кнопки удаления — вёрстка легенды '
-                                   f'изменилась, лишние копии снять не могу')
-                break
-            await page.wait_for_timeout(300)
 
 
 async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | None = None,
@@ -1037,7 +1061,8 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     «клик ТОГГЛИТ» — так было у прежнего фронта; сейчас (проверено 20-09-2026 на живой странице)
     повторный клик не выключает индикатор, а вешает ВТОРУЮ копию: 1 → 2 → 3. Отсюда и брались
     три Stochastic на боевых кадрах — каждый ложный «ремонт» добавлял панель. Выключить
-    индикатор через меню нельзя вообще, только крестиком на чипе (drop_extra_indicators). binodex сбрасывает индикаторы на дефолт (выкл) при новом
+    индикатор через меню нельзя вообще, только крестиком на чипе
+    (drop_extra_indicators). binodex сбрасывает индикаторы на дефолт (выкл) при новом
     контексте, как и масштаб (в сохранённом storage_state ключей `indicators/*` нет) → на холодном
     старте (_verify_otc_ready) включаем с нуля. Порядок важен: Volume ПОСЛЕДНИМ (нижняя панель);
     Whale Absorption — оверлей, панели не заводит. Ошибки не критичны (индикатор — оформление кадра,
