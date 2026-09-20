@@ -724,6 +724,12 @@ async def dismiss_modal_backdrop(page: Page) -> None:
 _OP_FLOOR = 0.2   # сек
 
 
+# Потолок УБОРКИ (вернуть скрытый ярлык). Он намеренно НЕ режется остатком бюджета: уборка идёт
+# после того, как кадр уже снят, и урезание её до _OP_FLOOR на исчерпанном бюджете оставило бы
+# страницу с inline-скрытым ярлыком пары до следующей пересборки вырезки.
+_CLEANUP_CAP = 2.0   # сек
+
+
 def _left_s(deadline: float | None, cap: float) -> float:
     """Сколько СЕКУНД можно ждать: не дольше штатного потолка и не дольше остатка бюджета."""
     if deadline is None:
@@ -1320,8 +1326,7 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False,
             b_buf = await _shot(page, clip=region, cap=_left_s(deadline, EVAL_TIMEOUT))  # B: фон без ярлыка
         finally:                                                          # вернуть ярлык в любом случае
             await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
-                              " if (e) e.style.removeProperty('visibility'); }",
-                        cap=_left_s(deadline, EVAL_TIMEOUT))
+                              " if (e) e.style.removeProperty('visibility'); }", cap=_CLEANUP_CAP)
         # Матирование векторное (ImageChops) — доли миллисекунды на C, отдельный поток не нужен.
         cutout = _matte_label(Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
         result = (cutout, (lx - clip['x'], ly - clip['y']))
