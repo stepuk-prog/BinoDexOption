@@ -191,7 +191,8 @@ class TelegramBotHandler(Handler):  # Handler для логера, отправ�
             return self.msg_fmt, cookies_dest
         return None
 
-    def _note_suppressed(self, key: tuple, now: float) -> None:
+    @staticmethod
+    def _note_suppressed(key: tuple, now: float) -> None:
         """Учесть подавленный повтор. Счётчик хранится ВМЕСТЕ с меткой времени: ключ,
         срезанный потолком частоты, в `_last_sent` не попадает вовсе (там только реально
         отправленные), поэтому прунинг по чужой метке такую запись не видел бы никогда."""

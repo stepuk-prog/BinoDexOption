@@ -59,7 +59,11 @@ async def goto_retry(page: Page, url: str, timeout: int,
     NB: таймаут самой навигации теперь тоже ретраится (раньше в init_otc он падал с первого
     раза) — до attempts×timeout на подъём страницы, зато блип не уводит в пересоздание браузера.
 
+    :param page: вкладка, которой идём по адресу
+    :param url: куда переходим
     :param timeout: потолок ОДНОЙ навигации (мс)
+    :param attempts: сколько раз пробуем (ретраятся только сбои из RETRYABLE_GOTO_ERRORS)
+    :param pause: пауза между попытками (сек)
     :param label: префикс в логе — чей это поток (init/релогин)
     """
     last_error = None
