@@ -3,7 +3,7 @@
 Прокси берутся из settings.proxy_data в БД binodex (общий пул семейства ботов, со статистикой/
 банами). BROWSER-бот (Playwright-Firefox) НЕ умеет socks5-auth и ненадёжно жуёт http-auth
 напрямую, поэтому берём ТОЛЬКО :50100 (HTTP) и авторизуемся через локальный релей
-(settings/local_proxy) — браузеру отдаём адрес релея без авторизации.
+(classes/local_proxy) — браузеру отдаём адрес релея без авторизации.
 
 Используется как фолбэк, когда прямой режим не поднял front-end binodex (напр. отравленный
 CDN-эдж отдаёт index.html вместо JS-чанка — был инцидент на AMS-колокейшене Cloudflare). Бан
@@ -13,9 +13,9 @@ CDN-эдж отдаёт index.html вместо JS-чанка — был инц�
 """
 
 import random
-from dataclasses import dataclass
 from typing import Optional
 
+from classes.proxy_data import ProxyData
 from logs import init_logger
 from settings.config import binary
 
@@ -23,15 +23,6 @@ logger = init_logger(__name__)
 
 # Рынок бана: OTC → 'binodex' (поля *_binodex), FIN/binary (TradingView) → 'tv' (общие поля).
 PROXY_SCOPE: str = 'tv' if binary else 'binodex'
-
-
-@dataclass
-class ProxyData:
-    """Данные прокси из settings.proxy_data (:50100 HTTP)."""
-    ip: str
-    port: int
-    login: str
-    password: str
 
 
 # Активные прокси из БД (кэш на процесс; перечитываются load_proxies_from_db при ротации/банах).
@@ -47,8 +38,16 @@ async def load_proxies_from_db(database) -> bool:
     забаненные/long_ban этого рынка). True при успехе."""
     global proxy_list
     rows = await database.get_active_proxies(PROXY_SCOPE)
-    if not rows:  # None/False/[] — пула нет или сбой
-        logger.error(f"Прокси({PROXY_SCOPE}): не удалось загрузить активные :50100 из settings.proxy_data")
+    # Исходы РАЗНЫЕ, и слой БД их намеренно разводит (False — сбой, [] — строк нет). Схлопывать
+    # их в один error нельзя: при пустом пуле загрузка УДАЛАСЬ, грузить нечего — а текст про
+    # «не удалось загрузить» уводил разбор аварии в сторону БД вместо таблицы банов.
+    if rows is False or rows is None:
+        logger.error(f"Прокси({PROXY_SCOPE}): не удалось прочитать settings.proxy_data (сбой БД)")
+        proxy_list = []
+        return False
+    if not rows:
+        logger.warning(f"Прокси({PROXY_SCOPE}): активных :50100-прокси нет "
+                       f"(все в бане / пул пуст) — работаю в прямом режиме")
         proxy_list = []
         return False
     proxy_list = [ProxyData(ip=r['ip'], port=r['port'], login=r['login'], password=r['password'])

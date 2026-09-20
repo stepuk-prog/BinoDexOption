@@ -948,7 +948,9 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     if missing is None:
         missing = list(OTC_CHART_INDICATORS)
     await _click_indicators(page, missing, deadline=deadline)
-    left = await _missing_indicators(page)
+    # cap обязателен: без него контрольное чтение ждёт общий EVAL_TIMEOUT ПОВЕРХ бюджета
+    # ремонта, и на подвисшей SPA это +10с молчания ленты перед первым постом опциона.
+    left = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     retry = [item for item in missing if left is not None and item in left]
     if retry and deadline is not None and time.monotonic() >= deadline:
         logger.warning(f"OTC: индикаторы не включились ({', '.join(n for n, _ in retry)}), "
@@ -957,7 +959,7 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
         logger.warning(f"OTC: индикаторы не включились с первого раза "
                        f"({', '.join(n for n, _ in retry)}) — повторяю")
         await _click_indicators(page, retry, deadline=deadline)
-        left = await _missing_indicators(page)
+        left = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
         still = [item for item in retry if left is not None and item in left]
         if still:
             logger.warning(f"OTC: индикаторы так и не включились "
@@ -1023,7 +1025,14 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
             break
         try:
             if not await _indicators_menu_open(page, cap=_left_s(deadline, EVAL_TIMEOUT)):
-                await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+                try:
+                    await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+                except (Exception,):
+                    # Бэкдроп модалки-анонса binodex ест pointer events, и обычный клик выжигает
+                    # весь таймаут — по КАЖДОМУ индикатору, ДВА прохода (замер: 20с на проход,
+                    # кадр уходит без индикаторов, пока модалка висит). dispatch_event перекрытие
+                    # не проверяет вовсе; тот же фолбэк давно стоит в apply_chart_scale.
+                    await page.locator(otc_indicators).first.dispatch_event('click')
                 # Ждём факт открытия, а не «полсекунды на всякий случай» — и тем же предикатом,
                 # что и остальной файл (см. _wait_menu_open).
                 if not await _wait_menu_open(page, timeout=_left_s(deadline, 1.5)):
@@ -1044,7 +1053,10 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
     # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
     try:
         if await _indicators_menu_open(page, cap=_left_s(deadline, EVAL_TIMEOUT)):
-            await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+            try:
+                await page.locator(otc_indicators).first.click(timeout=_left_ms(deadline, TIMEOUT_SHORT))
+            except (Exception,):
+                await page.locator(otc_indicators).first.dispatch_event('click')
     except (Exception,):
         pass
 
@@ -1139,6 +1151,10 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     if not scale_drifted and not missing:
         return
     await _clear_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    # Бэкдроп гасим ЗДЕСЬ, а не внутри apply_chart_scale: она вызывается только при дрейфе
+    # масштаба, и когда сбились ОДНИ индикаторы (частый случай), модалку никто не закрывал —
+    # клики по меню индикаторов выжигали таймаут. Вызов дешёвый: бэкдропа нет — мгновенный выход.
+    await dismiss_modal_backdrop(page)
     try:
         if scale_drifted:
             await apply_chart_scale(page, deadline=deadline)

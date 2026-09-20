@@ -45,7 +45,7 @@ class BrowserManager:
         # по внутреннему гарду). Иначе daemon-поток релея переживал бы браузер, который обслуживал.
         # stop() синхронный (join до 2с) → в тред, чтобы не блокировать event loop на teardown.
         try:
-            from settings.local_proxy import stop_local_proxy
+            from classes.local_proxy import stop_local_proxy
             await asyncio.to_thread(stop_local_proxy)
         except (Exception,) as e:
             logger.warning(f"stop_local_proxy при закрытии не удался: {e}")

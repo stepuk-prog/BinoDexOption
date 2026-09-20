@@ -718,7 +718,7 @@ STEALTH_JS = """
 async def _proxy_launch_options(chromium: bool = False) -> dict:
     """launch-опции + :50100-HTTP-прокси из binodex.settings.proxy_data. Chromium (binodex) умеет
     http-proxy с auth НАТИВНО (username/password в опции proxy) — local-relay не нужен. Firefox (TV)
-    socks5/http-auth напрямую не жуёт → через локальный релей (settings/local_proxy). Выбранный прокси
+    socks5/http-auth напрямую не жуёт → через локальный релей (classes/local_proxy). Выбранный прокси
     запоминается в settings.proxy.current_proxy — main по нему ведёт stats/ban. Сбой подбора/релея →
     базовые опции (без прокси): init упадёт штатно, main забанит/повернёт."""
     from settings.proxy import load_proxies_from_db, get_unused_proxy, proxy_list, PROXY_SCOPE
@@ -740,7 +740,7 @@ async def _proxy_launch_options(chromium: bool = False) -> dict:
         logger.report(f'Прокси({PROXY_SCOPE}): Chromium через {proxy.ip}:{proxy.port} (нативный auth)')
         return opts
     # Firefox (TV): через локальный релей (Playwright-Firefox не жуёт http-auth напрямую).
-    from settings.local_proxy import start_local_proxy
+    from classes.local_proxy import start_local_proxy
     if proxy.login and proxy.password:
         # start_local_proxy синхронный (time.sleep + socket.connect до ~3.3с) → в тред, иначе
         # блокировал бы event loop (WS-колбэки, обработчик SIGTERM) на всё окно старта релея.
