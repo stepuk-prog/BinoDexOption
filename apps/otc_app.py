@@ -978,7 +978,17 @@ async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, i
             up = res.get('up')
             logger.info(f'OTC: область поиска чипов легенды — {_legend_scope}'
                         + (f' (предок канваса +{up})' if _legend_scope == 'box' and up is not None else ''))
-    return _counts_or_blind(payload, badges)
+    counts = _counts_or_blind(payload, badges)
+    if counts is None:
+        # Слепота была МОЛЧАЛИВОЙ: _indicator_enabled отвечал «включён», apply_chart_indicators
+        # тихо пропускал оба бейджа, и кадр уходил без индикаторов — узнать об этом можно было
+        # только по картинке у подписчика. Warning, а не error: в Telegram такому не место,
+        # индикатор — оформление кадра, не данные.
+        logger.warning(f'OTC: легенда НЕ ПРОЧИТАНА (область {scope}) — ни одного чипа с '
+                       'картинками /img/chart/. Индикаторы не трогаем: по слепому чтению '
+                       'клик добавил бы копию, а уборка её не сняла бы. Строка на КАЖДОМ '
+                       'подъёме при живых индикаторах в кадре = признак уехал')
+    return counts
 
 
 # Пауза перед ПОДТВЕРЖДАЮЩИМ чтением легенды. Нужна ровно в одном случае — когда первое
