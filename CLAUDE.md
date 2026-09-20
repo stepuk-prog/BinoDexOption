@@ -55,4 +55,4 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 - `scripts/reauth_userbot.py` — переавторизация юзербота при пустом/протухшем `telegram.telegram.session_string` (старт падает на `config.py:80`): интерактивный логин Pyrogram (телефон+код), экспорт свежей строки и заливка в Program-БД. Пишет в БД из текущего `.env` (`DATABASE`/`PG_*`). Запуск: `PYTHONPATH=. .venv/bin/python scripts/reauth_userbot.py <id_telegram>`.
 
 ## Доки
-`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: `window.chartData` + медиана; WS — фолбэк/liveness), `docs/CHANGELOG.md`. Деплой/управление на нодах — инструментом **DeployManager**.
+`docs/DATABASE.md` (схема БД), `docs/DEPLOY.md` (деплой на сервер), `docs/BINODEX_PRICE.md` (как правильно снимать цену OTC: `window.chartData` + медиана; WS — фолбэк/liveness), `docs/CHANGELOG.md`, `docs/TODO.md` (отложенные задачи с обоснованием). Деплой/управление на нодах — инструментом **DeployManager**.
