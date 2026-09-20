@@ -8,7 +8,7 @@
 диффов — теперь она вносится в ядре и раскладывается `sync.py`.
 
 Здесь остаётся ровно то, что у программы СВОЁ: навигация с ретраями, `evaluate` под нашим
-потолком, прерываемая пауза ожидания кода (`apps.shutdown.wait_stop`) и логгер модуля.
+потолком, прерываемая пауза ожидания кода (`binocore.shutdown.wait_stop`) и логгер модуля.
 
 Контракт прежний: `otc_inline_login(page, context, mail, app_pass, sel) -> bool` (True — вошли,
 в localStorage есть признак сессии и мы на /trade). Селекторы/URL — из binodex_settings (sel).
@@ -18,7 +18,7 @@ from playwright.async_api import Page, BrowserContext
 from binocore.binodex import inline_login
 from apps.browser_io import eval_js
 from apps.page_nav import goto_retry, on_trade
-from apps.shutdown import wait_stop
+from binocore.shutdown import wait_stop
 from logs import init_logger
 
 logger = init_logger(__name__)

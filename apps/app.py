@@ -14,7 +14,7 @@ from apps.browser_io import eval_js, shot
 # Остановка живёт в нейтральном apps/shutdown.py (его могут импортировать модули, которым
 # apps.app тянуть нельзя — my_exeptions, binodex_feed). Здесь — реэкспорт: main.py и
 # main_app.py берут request_shutdown/sleep_or_stop по прежнему адресу.
-from apps.shutdown import (request_shutdown, shutdown_event,  # noqa: F401 (реэкспорт)
+from binocore.shutdown import (request_shutdown, shutdown_event,  # noqa: F401 (реэкспорт)
                            shutdown_requested, sleep_or_stop)
 from logs import init_logger
 from binocore.price import clean_price, lang_from_url

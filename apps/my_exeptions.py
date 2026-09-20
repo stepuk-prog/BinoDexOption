@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pyrogram.errors import Unauthorized, FloodWait
 
 from apps.exit_app import session_dead_shutdown, session_failed
-from apps.shutdown import shutdown_event, sleep_or_stop
+from binocore.shutdown import shutdown_event, sleep_or_stop
 from logs import init_logger
 from settings.config import get_app, channel_id
 from settings.timing import (TG_HISTORY_PROBE_LIMIT, TG_HISTORY_PROBE_SKEW,

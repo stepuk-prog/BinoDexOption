@@ -36,7 +36,7 @@ from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.browser_io import eval_js as _eval, shot as _shot
 from apps.otc_login import otc_inline_login
-from apps.shutdown import shutdown_event
+from binocore.shutdown import shutdown_event
 from apps.page_nav import goto_retry, on_trade
 from logs import init_logger
 from settings.config import screenshot_path, database, cookies_pocket_id

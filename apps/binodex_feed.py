@@ -14,7 +14,7 @@ import asyncio
 
 import aiohttp
 
-from apps.shutdown import sleep_or_stop
+from binocore.shutdown import sleep_or_stop
 from classes.price_tracker import symbol_key
 from logs import init_logger
 from settings.browser_config import otc_ws_origin, otc_api_url
