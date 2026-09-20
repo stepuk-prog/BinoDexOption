@@ -21,7 +21,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops
-from playwright.async_api import Page, WebSocket, FloatRect
+from playwright.async_api import Page, WebSocket, FloatRect, Position
 
 from classes.Option_class import Option
 from classes.price_tracker import WebSocketPriceTracker, symbol_key
@@ -194,9 +194,9 @@ async def _close_pair_modal(page: Page):
         await page.keyboard.press('Escape')
 
     async def _click_chart():
-        # position — TypedDict Position; dict-литерал корректен в рантайме, инспекцию типа подавляем.
-        # noinspection PyTypeChecker
-        await page.locator(screen_zone_otc).first.click(timeout=TIMEOUT_SHORT, position={'x': 8, 'y': 8})
+        # Position — TypedDict Playwright; аннотируем, а не глушим инспекцию (как рядом с FloatRect).
+        corner: Position = {'x': 8, 'y': 8}
+        await page.locator(screen_zone_otc).first.click(timeout=TIMEOUT_SHORT, position=corner)
 
     for method in (_click_select, _escape, _click_chart, _click_select):
         if not await _pair_modal_open(page):
@@ -696,7 +696,8 @@ async def dismiss_modal_backdrop(page: Page) -> None:
     # Playwright ретраит клик до таймаута и пишет полотно «subtree intercepts pointer events»
     # (EnglishGold, ночь 18-09-2026: так не выбрались пять пар подряд). Угол бэкдропа свободен.
     try:
-        await backdrop.click(position={'x': 4, 'y': 4}, timeout=1500)
+        edge: Position = {'x': 4, 'y': 4}
+        await backdrop.click(position=edge, timeout=1500)
         await backdrop.wait_for(state='hidden', timeout=2000)
         logger.info('OTC: модалка binodex закрыта кликом по краю бэкдропа')
         return
@@ -854,12 +855,23 @@ _LEGEND_ROOT_ATTR = 'data-legend-root'
 # body: «контейнер» размером со страницу не экономит ничего.
 _LEGEND_ROOT_MAX_UP = 6
 
+# Чип легенды — это span с ТОЧНЫМ именем индикатора внутри бейджа, у которого есть кнопки
+# действий (глаз/карандаш/крестик — картинки /img/chart/*.svg). Признак по картинке, а не по
+# классу: CSS-хэши binodex (_badge_1sh1r_92) плавают между сборками, а пути картинок стабильны.
+# Берём САМЫЙ ВНУТРЕННИЙ элемент (без вложенных span/div), иначе один чип считался бы дважды —
+# за себя и за обёртку с тем же textContent.
 _LEGEND_SCAN_JS = (
-    "(arg) => { const scan = (root) => { const found = [];"
-    "   for (const el of root.querySelectorAll('div,span')) {"
+    "(arg) => { const scan = (root) => { const counts = {};"
+    "   for (const b of arg.badges) counts[b] = 0;"
+    "   for (const el of root.querySelectorAll('span')) {"
     "     const t = (el.textContent || '').trim();"
-    "     if (arg.badges.includes(t) && !found.includes(t)) found.push(t); }"
-    "   return found; };"
+    "     if (!arg.badges.includes(t)) continue;"
+    "     if (el.querySelector('span,div')) continue;"
+    "     const chip = el.closest('div');"
+    "     if (!chip || !chip.querySelector('img[src*=\"/img/chart/\"]')) continue;"
+    "     counts[t]++; }"
+    "   return counts; };"
+    " const full = (c) => arg.badges.every(b => c[b] > 0);"
     " if (arg.scope === 'box') {"
     "   const root = document.querySelector('[' + arg.rootAttr + ']');"
     "   return {near: root ? scan(root) : null}; }"
@@ -868,7 +880,7 @@ _LEGEND_SCAN_JS = (
     # ТОЛЬКО при полном наборе — по неполному о раскладке судить нельзя, а лишний обход в
     # сценарии ремонта сделал бы хуже, чем было до оптимизации.
     " const all = scan(document);"
-    " if (!arg.badges.every(b => all.includes(b))) return {all, near: null};"
+    " if (!full(all)) return {all, near: null};"
     # Ищем МИНИМАЛЬНОГО предка канваса, внутри которого видны все чипы: родитель канваса на
     # живом binodex их не содержит, легенда лежит выше. Найденный узел метим атрибутом.
     " for (const el of document.querySelectorAll('[' + arg.rootAttr + ']'))"
@@ -876,21 +888,41 @@ _LEGEND_SCAN_JS = (
     " let node = document.querySelector(arg.zone);"
     " for (let i = 0; node && i <= arg.maxUp; i++, node = node.parentElement) {"
     "   const near = scan(node);"
-    "   if (arg.badges.every(b => near.includes(b))) {"
+    "   if (full(near)) {"
     "     node.setAttribute(arg.rootAttr, '');"
     "     return {all, near, up: i}; } }"
     " return {all, near: null}; }")
 
+# Снять ОДНУ лишнюю копию индикатора: крестик на последнем его чипе. По одной за вызов —
+# после клика React перестраивает легенду, и пачка кликов по устаревшим узлам не проходит.
+# Выключить индикатор через меню НЕЛЬЗЯ (см. apply_chart_indicators): там клик добавляет.
+_LEGEND_DROP_JS = (
+    "(arg) => { const chips = [];"
+    "   for (const el of document.querySelectorAll('span')) {"
+    "     if ((el.textContent || '').trim() !== arg.badge) continue;"
+    "     if (el.querySelector('span,div')) continue;"
+    "     const chip = el.closest('div');"
+    "     if (chip && chip.querySelector('img[src*=\"/img/chart/\"]')) chips.push(chip); }"
+    "   if (chips.length < 2) return 'no-dup';"
+    "   const btn = chips[chips.length - 1]"
+    "     .querySelector('button img[src*=\"cross\"]');"
+    "   if (!btn) return 'no-button';"
+    "   btn.closest('button').click();"
+    "   return 'clicked'; }")
 
-async def _missing_indicators(page: Page, cap: float | None = None) -> list[tuple[str, str]] | None:
-    """Какие индикаторы сейчас ВЫКЛЮЧЕНЫ — по чипам-легендам на графике (элемент с ТОЧНЫМ текстом,
-    напр. 'VOL'). Детект по тексту, а не по классу: CSS-хэши binodex (_badge_XXXX) плавают между
-    сборками. Один обход DOM на все чипы сразу.
 
-    `None` — прочитать НЕ удалось (страница моргнула/evaluate бросил): «не знаю» НЕЛЬЗЯ трактовать
-    как «выключено всё» — клик по пункту меню ТОГГЛИТ, и одно неудачное чтение ВЫКЛЮЧИЛО бы уже
-    включённые индикаторы. Вызывающий на None просто ничего не трогает (следующий опцион
-    перечитает), и состояние не может стать хуже."""
+async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, int] | None:
+    """СКОЛЬКО копий каждого индикатора сейчас на графике — по чипам легенды.
+
+    Считаем именно количество, а не факт наличия: клик по пункту меню binodex ДОБАВЛЯЕТ ещё
+    один экземпляр индикатора (проверено 20-09-2026 на живой странице: 1 → 2 → 3), поэтому
+    каждый ложный «ремонт» — когда легенда ещё не отрисована после reload или смены пары и
+    скан вернул пусто — навешивал вторую копию поверх рабочей. К вечеру на боевых кадрах было
+    по ТРИ Stochastic: свечи сжаты в половину кадра, и это уходило подписчикам.
+
+    `None` — прочитать НЕ удалось (страница моргнула/evaluate бросил): «не знаю» НЕЛЬЗЯ
+    трактовать как «выключено всё», иначе ремонт добавит копии там, где всё было в порядке.
+    Вызывающий на None просто ничего не трогает — следующий опцион перечитает."""
     global _legend_scope
     badges = [badge for _, badge in OTC_CHART_INDICATORS]
     scope = _legend_scope or 'calibrate'
@@ -910,26 +942,61 @@ async def _missing_indicators(page: Page, cap: float | None = None) -> list[tupl
         if near is None:
             _legend_scope = None      # перекалибруемся на следующем вызове
             return None
-        present = near
+        counts = near
     elif scope == 'document':
-        present = whole
+        counts = whole
     else:
-        present = whole if whole is not None else []
+        counts = whole
         # Только ПОЛНЫЙ набор: по одному-двум горящим чипам судить о раскладке нельзя (см.
         # докстринг). Неполное наблюдение оставляет scope=None — перекалибруемся на след. вызове.
         # А вот при полном наборе решение принимается ВСЕГДА, в том числе когда контейнер не
         # нашёлся (near=None: канваса нет в DOM либо легенда лежит дальше _LEGEND_ROOT_MAX_UP).
-        # Иначе калибровка — а это скан документа плюс подъём по предкам — повторялась бы на
-        # КАЖДОМ вызове, то есть вышло бы дороже простого обхода документа.
-        if isinstance(whole, list) and set(whole) == set(badges):
-            _legend_scope = 'box' if near is not None and set(near) == set(whole) else 'document'
+        if isinstance(whole, dict) and all(whole.get(b, 0) > 0 for b in badges):
+            same = isinstance(near, dict) and all(near.get(b, 0) == whole[b] for b in badges)
+            _legend_scope = 'box' if same else 'document'
             up = res.get('up')
             logger.info(f'OTC: область поиска чипов легенды — {_legend_scope}'
                         + (f' (предок канваса +{up})' if _legend_scope == 'box' and up is not None else ''))
-    if not isinstance(present, list):
+    if not isinstance(counts, dict):
         return None
-    present = set(present)
-    return [(name, badge) for name, badge in OTC_CHART_INDICATORS if badge not in present]
+    return {badge: int(counts.get(badge, 0) or 0) for badge in badges}
+
+
+def _missing_from(counts: dict[str, int]) -> list[tuple[str, str]]:
+    """Индикаторы, которых на графике НЕТ ВОВСЕ (их и только их добавляем через меню)."""
+    return [(name, badge) for name, badge in OTC_CHART_INDICATORS if counts.get(badge, 0) == 0]
+
+
+def _extra_from(counts: dict[str, int]) -> dict[str, int]:
+    """Сколько ЛИШНИХ копий висит сверх одной у каждого индикатора."""
+    return {badge: counts[badge] - 1 for _, badge in OTC_CHART_INDICATORS if counts.get(badge, 0) > 1}
+
+
+async def drop_extra_indicators(page: Page, extra: dict[str, int],
+                                deadline: float | None = None) -> None:
+    """Снять лишние копии индикаторов — крестиком на чипе легенды.
+
+    Через меню это невозможно: там клик ДОБАВЛЯЕТ копию (см. _indicator_counts). Удаляем по
+    одной за вызов и перечитываем: после клика binodex перестраивает легенду, и пачка кликов
+    по устаревшим узлам не проходит. Потолок попыток — сумма лишних плюс запас на промах."""
+    for badge, count in extra.items():
+        for _ in range(count + 2):
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning('OTC: бюджет ремонта исчерпан — лишние копии индикаторов '
+                               'оставляю следующему опциону')
+                return
+            try:
+                verdict = await _eval(page, _LEGEND_DROP_JS, {'badge': badge},
+                                      cap=_left_s(deadline, EVAL_TIMEOUT))
+            except (Exception,) as err:
+                logger.debug(f'OTC: снятие лишней копии {badge} не удалось ({err})')
+                break
+            if verdict != 'clicked':
+                if verdict == 'no-button':
+                    logger.warning(f'OTC: у чипа {badge} нет кнопки удаления — вёрстка легенды '
+                                   f'изменилась, лишние копии снять не могу')
+                break
+            await page.wait_for_timeout(300)
 
 
 async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | None = None,
@@ -937,9 +1004,12 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     """Включить индикаторы графика (OTC_CHART_INDICATORS) для OTC-кадра — рисуются binodex на том же
     канвасе, что и свечи, поэтому попадают в toDataURL-кадр (screenshot_otc) без отдельного слоя.
     Меню #setup_indicators, пункты button.chart_indicator выбираются ПО ТЕКСТУ (порядок списка
-    binodex плавает). Клик по пункту ТОГГЛИТ индикатор и закрывает модалку, поэтому: (1) меню
-    переоткрываем перед каждым; (2) идемпотентность — включаем только ОТСУТСТВУЮЩИЕ (иначе
-    повторный клик выключил бы индикатор). binodex сбрасывает индикаторы на дефолт (выкл) при новом
+    binodex плавает). Клик по пункту ДОБАВЛЯЕТ индикатор и закрывает модалку, поэтому: (1) меню
+    переоткрываем перед каждым; (2) включаем только те, которых НЕТ ВОВСЕ. Раньше здесь стояло
+    «клик ТОГГЛИТ» — так было у прежнего фронта; сейчас (проверено 20-09-2026 на живой странице)
+    повторный клик не выключает индикатор, а вешает ВТОРУЮ копию: 1 → 2 → 3. Отсюда и брались
+    три Stochastic на боевых кадрах — каждый ложный «ремонт» добавлял панель. Выключить
+    индикатор через меню нельзя вообще, только крестиком на чипе (drop_extra_indicators). binodex сбрасывает индикаторы на дефолт (выкл) при новом
     контексте, как и масштаб (в сохранённом storage_state ключей `indicators/*` нет) → на холодном
     старте (_verify_otc_ready) включаем с нуля. Порядок важен: Volume ПОСЛЕДНИМ (нижняя панель);
     Whale Absorption — оверлей, панели не заводит. Ошибки не критичны (индикатор — оформление кадра,
@@ -965,7 +1035,8 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     await _click_indicators(page, missing, deadline=deadline)
     # cap обязателен: без него контрольное чтение ждёт общий EVAL_TIMEOUT ПОВЕРХ бюджета
     # ремонта, и на подвисшей SPA это +10с молчания ленты перед первым постом опциона.
-    left = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    left = None if counts is None else _missing_from(counts)
     retry = [item for item in missing if left is not None and item in left]
     if retry and deadline is not None and time.monotonic() >= deadline:
         logger.warning(f"OTC: индикаторы не включились ({', '.join(n for n, _ in retry)}), "
@@ -974,7 +1045,8 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
         logger.warning(f"OTC: индикаторы не включились с первого раза "
                        f"({', '.join(n for n, _ in retry)}) — повторяю")
         await _click_indicators(page, retry, deadline=deadline)
-        left = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+        counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+        left = None if counts is None else _missing_from(counts)
         still = [item for item in retry if left is not None and item in left]
         if still:
             logger.warning(f"OTC: индикаторы так и не включились "
@@ -1010,7 +1082,8 @@ async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> boo
     пробуем ещё раз до потолка."""
     deadline = time.monotonic() + timeout
     while True:
-        missing = await _missing_indicators(page, cap=max(_OP_FLOOR, deadline - time.monotonic()))
+        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic()))
+        missing = None if counts is None else _missing_from(counts)
         if missing is not None and not any(item_name == name for item_name, _ in missing):
             return True
         if time.monotonic() >= deadline:
@@ -1149,7 +1222,7 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
     проверяется между ними: внешних гейтов не хватало — на залипшем UI сама пара масштабов стоит
     до 30с, а проход по трём индикаторам до ~2 мин, то есть первый же шаг выбирал больше всего
     бюджета и ограничивать было уже нечего (ревизия 12-09-2026)."""
-    page = session.pages_by_role.get('main')
+    page = session.find('main')
     if page is None:
         return
     deadline = time.monotonic() + SETUP_TOTAL_BUDGET
@@ -1159,11 +1232,18 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
     # того, как его прокинули в ремонт (замер на модели: ×1.6 → ×1.0).
     scale_drifted = await _scale_drifted(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     # None — прочитать не удалось: НЕ трогаем
-    missing = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    missing = None if counts is None else _missing_from(counts)
+    extra = {} if counts is None else _extra_from(counts)
     if missing:
         logger.warning(f"OTC: индикаторы графика сбились ({', '.join(n for n, _ in missing)}) — "
                        f"включаю заново")
-    if not scale_drifted and not missing:
+    if extra:
+        # Лишние копии кадр ПОРТЯТ: каждая заводит свою панель, и свечи сжимаются в верхнюю
+        # половину. 20-09-2026 у боевых инстансов так и уходило подписчикам — по три Stochastic.
+        logger.warning('OTC: лишние копии индикаторов на графике ('
+                       + ', '.join(f'{b}×{n + 1}' for b, n in extra.items()) + ') — снимаю')
+    if not scale_drifted and not missing and not extra:
         return
     await _clear_offzone(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     # Бэкдроп гасим ЗДЕСЬ, а не внутри apply_chart_scale: она вызывается только при дрейфе
@@ -1180,11 +1260,18 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
             if scale_drifted:
                 # Масштаб перерисовал чарт — замер ДО кликов мог устареть. Перечитываем; не
                 # прочиталось (None) — идём по прежнему замеру, это лучшее, что у нас есть.
-                refreshed = await _missing_indicators(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+                refreshed = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
                 if refreshed is not None:
-                    missing = refreshed
+                    missing = _missing_from(refreshed)
+                    extra = _extra_from(refreshed)
             if missing:
                 await apply_chart_indicators(page, missing, deadline=deadline)
+        if extra:
+            # Снимаем ПОСЛЕ добавления недостающих: apply_chart_indicators сама перечитывает
+            # чипы и могла добрать ещё копию, если клик всё-таки дошёл со второго раза.
+            fresh = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+            await drop_extra_indicators(page, _extra_from(fresh) if fresh else extra,
+                                        deadline=deadline)
     finally:
         # Восстановление off-zone — ОБЯЗАТЕЛЬНАЯ уборка (без него остаток опциона рендерится на
         # полном CPU), поэтому идёт и при исчерпанном бюджете. Но тоже под потолком: остаток, а
@@ -1306,8 +1393,9 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False,
     нет: там мы не в кадре и не спешим). Сборка стоит трёх evaluate и двух скринов, то есть на
     подвисшей странице — десятки секунд ПОВЕРХ бюджета, уже ПОСЛЕ того как цена снята: кадр
     уезжал бы подписчику тем позже, чем хуже отвечает рендерер. Возврат ярлыка в finally идёт
-    под тем же потолком с полом _OP_FLOOR — уборку пропускать нельзя, иначе ярлык останется
-    скрытым и вырезка на следующем кадре выйдет полностью прозрачной."""
+    под ОТДЕЛЬНЫМ потолком _CLEANUP_CAP, а не под остатком бюджета: на исчерпанном бюджете
+    уборке доставался бы пол _OP_FLOOR=0.2с, она не успевала бы, и ярлык остался бы скрытым —
+    вырезка на следующем кадре вышла бы полностью прозрачной."""
     key = symbol_key(asset)
     if not rebuild and key in _label_cutout_cache:
         return _label_cutout_cache[key]
@@ -1501,8 +1589,12 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             # Тот же приём уже стоит в ensure_chart_setup (ревизия 12-09-2026).
             deadline = min(time.monotonic() + CANVAS_READY_SECONDS, shot_deadline)
             canvas_img = None
-            reads: list[float] = []
-            t_shot = time.time()
+            # Только объявление типа, без значения: обе заполняет ПЕРВАЯ же строка тела цикла, а
+            # `while True` гарантирует хотя бы один проход. Прежняя инициализация выглядела
+            # страховкой «на случай, если цикл не выполнится», хотя такого случая нет: выход до
+            # присваивания возможен лишь через исключение, а там обе переменные уже не читаются.
+            reads: list[float]
+            t_shot: float
             while True:
                 reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE,
                                                  deadline=shot_deadline)
@@ -1844,7 +1936,7 @@ async def reload_otc_page(session: "BrowserSession") -> bool:
     False — иначе бот зря уходит в пересоздание браузера (ложный «отвал cookies») / «нет пар».
     :return: True — UI снова готов к скрину; False — не поднялся после всех ретраев (вызывающий
     уйдёт в exit_main → main-цикл по otc_session_dead пересоздаст браузер)."""
-    page = session.pages_by_role.get('main')
+    page = session.find('main')
     if page is None:
         return False
     for attempt in range(1, RELOAD_RETRIES + 1):
@@ -1876,7 +1968,7 @@ async def otc_session_dead(session: "BrowserSession") -> tuple[bool, str]:
       (c) WS-фид котировок мёртв — токен WS мог протухнуть без редиректа страницы
           (дополняет (a); точнее и раньше, чем ждать сбоя данных).
     Возвращает (dead, reason) — reason для лога вызывающим."""
-    page = session.pages_by_role.get('main')
+    page = session.find('main')
     if page is not None:
         try:
             if not on_trade(page.url):
