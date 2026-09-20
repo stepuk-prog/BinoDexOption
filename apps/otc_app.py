@@ -1288,7 +1288,12 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
             if scale_drifted:
                 # Масштаб перерисовал чарт — замер ДО кликов мог устареть. Перечитываем; не
                 # прочиталось (None) — идём по прежнему замеру, это лучшее, что у нас есть.
-                refreshed = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+                # ЧТЕНИЕ С ПОДТВЕРЖДЕНИЕМ, и здесь оно нужнее, чем на входе функции: окно
+                # «легенда ещё не отрисована» создаёт ровно та перерисовка, которую мы только
+                # что вызвали сменой масштаба. По ложному нулю решение здесь — КЛИКАТЬ, а клик
+                # по пункту меню ДОБАВЛЯЕТ копию (см. _indicator_counts), то есть две лишние
+                # панели поверх работающих индикаторов.
+                refreshed = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
                 if refreshed is not None:
                     missing = _missing_from(refreshed)
                     extra = _extra_from(refreshed)
@@ -1297,7 +1302,10 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
         if extra:
             # Снимаем ПОСЛЕ добавления недостающих: apply_chart_indicators сама перечитывает
             # чипы и могла добрать ещё копию, если клик всё-таки дошёл со второго раза.
-            fresh = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+            # Тоже с подтверждением: по ложному нулю `_extra_from` даст пусто, и лишние копии
+            # доживут до конца опциона — то есть кадр уйдёт подписчику с тремя панелями и
+            # сжатыми свечами, ровно с тем, ради чего снятие копий и заводили.
+            fresh = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
             await drop_extra_indicators(page, _extra_from(fresh) if fresh else extra,
                                         deadline=deadline)
     finally:
