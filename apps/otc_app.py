@@ -1063,7 +1063,9 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     await _click_indicators(page, missing, deadline=deadline)
     # cap обязателен: без него контрольное чтение ждёт общий EVAL_TIMEOUT ПОВЕРХ бюджета
     # ремонта, и на подвисшей SPA это +10с молчания ленты перед первым постом опциона.
-    counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    # С подтверждением: окно «легенда ещё не отрисована» здесь создают НАШИ ЖЕ клики, а по
+    # ложному нулю ветка ниже кликает ПОВТОРНО — то есть вешает вторую копию каждого индикатора.
+    counts = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     left = None if counts is None else _missing_from(counts)
     retry = [item for item in missing if left is not None and item in left]
     if retry and deadline is not None and time.monotonic() >= deadline:
@@ -1073,7 +1075,7 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
         logger.warning(f"OTC: индикаторы не включились с первого раза "
                        f"({', '.join(n for n, _ in retry)}) — повторяю")
         await _click_indicators(page, retry, deadline=deadline)
-        counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+        counts = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
         left = None if counts is None else _missing_from(counts)
         still = [item for item in retry if left is not None and item in left]
         if still:
