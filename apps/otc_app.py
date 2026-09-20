@@ -84,9 +84,12 @@ CANVAS_READY_SECONDS = 6.0   # сколько ждать отрисовки св
 
 # Потолок на ВСЁ снятие кадра (все попытки вместе). CANVAS_READY_SECONDS ограничивает только
 # ожидание отрисовки внутри одной итерации, а сама итерация — это семь _eval по EVAL_TIMEOUT
-# каждый (3 чтения цены + toDataURL + 3 чтения) плюс wait_for(TIMEOUT_LONG) и закрытие модалки;
+# каждый (3 чтения цены + toDataURL + 3 чтения) плюс wait_for(TIMEOUT_LONG) и bounding_box;
 # при подвисшем рендерере три попытки складывались в минуты. Кадр, снятый после экспирации,
 # бесполезен — лучше честно вернуть ошибку и пропустить опцион.
+# Бюджет уходит ВНУТРЬ этих шагов (потолок каждого = min(штатный, остаток) через _left_s/_left_ms),
+# а не только проверяется между попытками: иначе он оставался номинальным — замер на боевой
+# функции давал 99.9с при объявленных 45, и кадр всё равно уходил, только с ценой чужого момента.
 SHOT_TOTAL_BUDGET = 45.0   # сек
 
 # Кнопка настроек аккаунта (otc_settings_btn) есть в тулбаре ТОЛЬКО когда торговый UI полностью
@@ -447,12 +450,18 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
     return False
 
 
-async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list[float]:
+async def _read_chart_prices(page: Page, symbol: str | None, count: int,
+                             deadline: float | None = None) -> list[float]:
     """`count` чтений window.chartData.price с паузой CHART_READ_GAP между ними. Если symbol задан
     — берём только тики этой пары (chartData.symbol == symbol), чтобы не схватить цену чужой пары
     сразу после переключения.
 
     Сбой ОДНОГО чтения (страница моргнула) серию НЕ рвёт — собираем что успели.
+
+    `deadline` (monotonic) — бюджет кадра от screenshot_otc. Каждое чтение ждёт не дольше
+    ОСТАТКА бюджета: без него серия из трёх чтений на подвисшем рендерере выбирала по
+    EVAL_TIMEOUT=10с каждое, то есть один брекет (два вызова) стоил минуту ПОВЕРХ объявленного
+    потолка снятия кадра — см. SHOT_TOTAL_BUDGET.
 
     Логи здесь — ТОЛЬКО debug: функция зовётся ДВАЖДЫ за каждую итерацию ожидания отрисовки
     канваса в screenshot_otc, то есть в сценарии «канвас пуст / символ ещё не переключился»
@@ -464,7 +473,7 @@ async def _read_chart_prices(page: Page, symbol: str | None, count: int) -> list
         if i:
             await asyncio.sleep(CHART_READ_GAP)
         try:
-            data = await _eval(page, CHART_DATA_JS)
+            data = await _eval(page, CHART_DATA_JS, cap=_left_s(deadline, EVAL_TIMEOUT))
         except (Exception,) as err:
             # type(err).__name__ обязателен: самый вероятный сбой здесь — таймаут _eval, а у
             # asyncio.TimeoutError пустой str(), и строка выродилась бы в «не удалось () —».
@@ -1232,14 +1241,17 @@ def _decode_canvas(d: dict) -> Image.Image:
     return img
 
 
-async def _canvas_alpha(element) -> Image.Image:
+async def _canvas_alpha(element, deadline: float | None = None) -> Image.Image:
     """Пиксели канваса с альфой (toDataURL), приведённые к CSS-боксу (ресайз при DPR).
 
     Декод — в отдельном потоке: base64 кадра плюс возможный LANCZOS-ресайз держали event loop
     по 100–300 мс, а кадров несколько на опцион. В эти окна не разбирались WS-фреймы котировок
     (страдал last_tick, по которому считается feed_dead) и не отрабатывал обработчик SIGTERM.
-    Реестр BinoCore: frame-io-thread (14-09-2026)."""
-    d = await _eval(element, _CANVAS_ALPHA_JS)
+    Реестр BinoCore: frame-io-thread (14-09-2026).
+
+    `deadline` (monotonic) — бюджет кадра от screenshot_otc, как в _read_chart_prices: снятие
+    канваса ждёт не дольше остатка, а не полного EVAL_TIMEOUT."""
+    d = await _eval(element, _CANVAS_ALPHA_JS, cap=_left_s(deadline, EVAL_TIMEOUT))
     return await asyncio.to_thread(_decode_canvas, d)
 
 
@@ -1275,31 +1287,41 @@ def _matte_label(crop_a: Image.Image, crop_b: Image.Image, k: int = 3, thr: int 
     return out
 
 
-async def _label_cutout(page: Page, asset, clip, rebuild: bool = False):
+async def _label_cutout(page: Page, asset, clip, rebuild: bool = False,
+                        deadline: float | None = None):
     """Вырезка ярлыка пары (с прозрачным фоном) и её позиция относительно бокса канваса.
     Глобус НЕ включаем — снимаем регион дважды при выкл глобусе: ярлык виден (A) и скрыт (B),
     вычитаем фон. None — если не собрать. Строить нужно при СНЯТОМ off-zone (полный UI) — иначе
     ярлык не захватится; поэтому пересборка (rebuild=True) идёт из select_otc_pair до off-zone.
     rebuild=True — пересобрать с нуля (актуальный payout на каждый выбор пары); rebuild=False
-    (из screenshot_otc) — взять готовое из кэша, собранного на этом же выборе пары."""
+    (из screenshot_otc) — взять готовое из кэша, собранного на этом же выборе пары.
+
+    `deadline` (monotonic) — бюджет кадра от screenshot_otc (у пересборки из select_otc_pair его
+    нет: там мы не в кадре и не спешим). Сборка стоит трёх evaluate и двух скринов, то есть на
+    подвисшей странице — десятки секунд ПОВЕРХ бюджета, уже ПОСЛЕ того как цена снята: кадр
+    уезжал бы подписчику тем позже, чем хуже отвечает рендерер. Возврат ярлыка в finally идёт
+    под тем же потолком с полом _OP_FLOOR — уборку пропускать нельзя, иначе ярлык останется
+    скрытым и вырезка на следующем кадре выйдет полностью прозрачной."""
     key = symbol_key(asset)
     if not rebuild and key in _label_cutout_cache:
         return _label_cutout_cache[key]
     try:
-        lb = await _eval(page, _LABEL_BOX_JS, screen_zone_otc)
+        lb = await _eval(page, _LABEL_BOX_JS, screen_zone_otc, cap=_left_s(deadline, EVAL_TIMEOUT))
         if not lb:
             return None
         lx, ly, lw, lh = round(lb['x']), round(lb['y']), round(lb['w']), round(lb['h'])
         region: FloatRect = {'x': lx, 'y': ly, 'width': lw, 'height': lh}
-        a_buf = await _shot(page, clip=region)                           # A: ярлык виден
+        a_buf = await _shot(page, clip=region, cap=_left_s(deadline, EVAL_TIMEOUT))  # A: ярлык виден
         await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
-                          " if (e) e.style.setProperty('visibility','hidden','important'); }")
+                          " if (e) e.style.setProperty('visibility','hidden','important'); }",
+                    cap=_left_s(deadline, EVAL_TIMEOUT))
         try:
             await page.wait_for_timeout(150)
-            b_buf = await _shot(page, clip=region)                       # B: фон без ярлыка
+            b_buf = await _shot(page, clip=region, cap=_left_s(deadline, EVAL_TIMEOUT))  # B: фон без ярлыка
         finally:                                                          # вернуть ярлык в любом случае
             await _eval(page, "() => { const e=document.querySelector('[data-otc-lbl]');"
-                              " if (e) e.style.removeProperty('visibility'); }")
+                              " if (e) e.style.removeProperty('visibility'); }",
+                        cap=_left_s(deadline, EVAL_TIMEOUT))
         # Матирование векторное (ImageChops) — доли миллисекунды на C, отдельный поток не нужен.
         cutout = _matte_label(Image.open(BytesIO(a_buf)), Image.open(BytesIO(b_buf)))
         result = (cutout, (lx - clip['x'], ly - clip['y']))
@@ -1441,12 +1463,13 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             break
         try:
             element = page.locator(screen_zone_otc).first
-            await element.wait_for(state='visible', timeout=TIMEOUT_LONG)
+            # Потолки шагов — не штатные, а min(штатный, ОСТАТОК бюджета): см. про бюджет ниже.
+            await element.wait_for(state='visible', timeout=_left_ms(shot_deadline, TIMEOUT_LONG))
             # _close_pair_modal здесь НЕ зовём (снято 12-09-2026): кадр собирается из
             # canvas.toDataURL, куда DOM-оверлей физически не попадает, а под активным off-zone
             # модалка скрыта (visibility:hidden) — _pair_modal_open возвращал False всегда, то
             # есть «страховка» ничего не проверяла и просто ходила в DOM на каждой попытке.
-            box = await element.bounding_box()
+            box = await element.bounding_box(timeout=_left_ms(shot_deadline, TIMEOUT_MEDIUM))
             if not box:  # элемент невидим/отсоединён → bounding_box=None (иначе TypeError на box['x'])
                 last_error = 'нет bounding_box зоны графика OTC'
                 logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS}: {last_error} для {asset}")
@@ -1462,15 +1485,26 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             # синхронной с кадром; пустой кадр НЕ постим (ждём/ретраим до бюджета).
             # Ожидание отрисовки не может пережить общий бюджет: иначе последняя попытка
             # растягивала снятие далеко за него.
+            #
+            # Бюджет уходит и ВНУТРЬ шагов итерации (потолок каждого = min(штатный, остаток)), а
+            # не только проверяется между ними. Без этого он был номинальным: одна итерация —
+            # это wait_for(15с) + bounding_box(10с) + семь _eval по EVAL_TIMEOUT=10с, и на
+            # подвисшем рендерере она выбирала под сотню секунд при объявленных 45. Проверено
+            # прогоном боевой функции (рендерер отвечает по 9.5с на вызов): 99.9с против 45с,
+            # причём кадр УХОДИЛ — с ценой, снятой на полторы минуты позже момента, ради
+            # которого его снимали, то есть исход опциона считался по чужой котировке.
+            # Тот же приём уже стоит в ensure_chart_setup (ревизия 12-09-2026).
             deadline = min(time.monotonic() + CANVAS_READY_SECONDS, shot_deadline)
             canvas_img = None
             reads: list[float] = []
             t_shot = time.time()
             while True:
-                reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE)
+                reads = await _read_chart_prices(page, symbol, CHART_READS_BEFORE,
+                                                 deadline=shot_deadline)
                 t_shot = time.time()
-                candidate = await _canvas_alpha(element)
-                reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER)
+                candidate = await _canvas_alpha(element, deadline=shot_deadline)
+                reads += await _read_chart_prices(page, symbol, CHART_READS_AFTER,
+                                                  deadline=shot_deadline)
                 if sum(candidate.getchannel('A').histogram()[16:]) >= candidate.width * candidate.height * CANVAS_MIN_OPAQUE:
                     canvas_img = candidate  # непустой кадр — используем его же как снимок
                     break
@@ -1515,7 +1549,7 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             # а в логах только общий «Ошибка скриншота».
             globe = _load_globe(canvas_img.size)
             comp = Image.alpha_composite(globe, canvas_img) if globe else canvas_img.copy()
-            cut = await _label_cutout(page, asset, clip)
+            cut = await _label_cutout(page, asset, clip, deadline=shot_deadline)
             if cut:
                 comp.alpha_composite(cut[0], dest=(max(0, cut[1][0]), max(0, cut[1][1])))
             comp = comp.convert('RGB')
@@ -1524,8 +1558,12 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
             comp.save(screenshot_path)
             return True, price
         except (Exception,) as error:
-            last_error = str(error)
-            logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS} скриншота OTC: {error}")
+            # С типом, а не голым str(): теперь самый частый сбой здесь — обрыв шага по остатку
+            # бюджета, то есть asyncio.TimeoutError, а у неё str() ПУСТОЙ. Без имени типа и лог, и
+            # bug_text вырождались в «Ошибка записи скриншота OTC - » без единого слова о причине
+            # (тот же приём уже стоит в _read_chart_prices).
+            last_error = f'{type(error).__name__}: {error}'.rstrip(': ')
+            logger.warning(f"Попытка {attempt}/{MAX_SCREENSHOT_ATTEMPTS} скриншота OTC: {last_error}")
     return False, f'Ошибка записи скриншота OTC - {last_error}'
 
 
