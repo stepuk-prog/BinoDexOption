@@ -962,6 +962,34 @@ async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, i
     return {badge: int(counts.get(badge, 0) or 0) for badge in badges}
 
 
+# Пауза перед ПОДТВЕРЖДАЮЩИМ чтением легенды. Нужна ровно в одном случае — когда первое
+# чтение дало ВСЕ НУЛИ: «индикаторов действительно нет» и «легенда ещё не отрисована» дают
+# одинаковый ответ, а решения у них противоположные. По ложному нулю ремонт добавит копии;
+# снимутся они следующим проходом, но это лишний цикл добавить-снять прямо перед опционом.
+# 0.6с хватает: чипы появляются вместе с первой отрисовкой чарта, а платим мы эту паузу только
+# в редком «всё по нулям», не на каждом опционе.
+_LEGEND_CONFIRM_PAUSE_MS = 600
+
+
+async def indicator_counts_confirmed(page: Page, cap: float | None = None) -> dict[str, int] | None:
+    """Счётчики чипов с подтверждением пустоты (приём тот же, что у confirm_stable для фида).
+
+    Ноль по ВСЕМ индикаторам перечитываем через паузу: это единственное показание, которое
+    нельзя отличить от «страница ещё не дорисовала легенду», и именно по нему принимается
+    решение КЛИКАТЬ. Непустой ответ подтверждения не требует — лишняя копия видна сразу."""
+    counts = await _indicator_counts(page, cap=cap)
+    if counts is None or any(counts.values()):
+        return counts
+    await page.wait_for_timeout(_LEGEND_CONFIRM_PAUSE_MS)
+    second = await _indicator_counts(page, cap=cap)
+    if second is None:
+        return None                      # «не знаю» — вызывающий не трогает UI
+    if any(second.values()):
+        logger.debug('OTC: первое чтение легенды дало пусто, подтверждение нашло чипы — '
+                     'легенда просто не была отрисована')
+    return second
+
+
 def _missing_from(counts: dict[str, int]) -> list[tuple[str, str]]:
     """Индикаторы, которых на графике НЕТ ВОВСЕ (их и только их добавляем через меню)."""
     return [(name, badge) for name, badge in OTC_CHART_INDICATORS if counts.get(badge, 0) == 0]
@@ -1232,7 +1260,7 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
     # того, как его прокинули в ремонт (замер на модели: ×1.6 → ×1.0).
     scale_drifted = await _scale_drifted(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     # None — прочитать не удалось: НЕ трогаем
-    counts = await _indicator_counts(page, cap=_left_s(deadline, EVAL_TIMEOUT))
+    counts = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     missing = None if counts is None else _missing_from(counts)
     extra = {} if counts is None else _extra_from(counts)
     if missing:
