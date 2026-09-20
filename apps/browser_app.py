@@ -27,6 +27,9 @@ from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
 
+# Потолок закрытия осиротевшего браузера в аварийных ветках подъёма.
+BROWSER_ABORT_CLOSE_BUDGET = 25   # сек
+
 # Логгер семьи для браузерного слоя ядра: init_logger вешает хендлеры на ИМЕНОВАННЫЙ
 # логгер с propagate=False, иначе записи о закрытии сессии не дойдут ни до файлов
 # уровней, ни до темы ошибок.
@@ -1184,7 +1187,11 @@ async def init_load(use_proxy: bool = False) -> BrowserSession | bool:
         else:
             browser_result = await open_otc_browser(session)
     except (CookiesExpired, FeedOutage, SetupError):
-        await session.close()  # cleanup перед пробросом — не оставить осиротевший Firefox
+        # Бюджет: аварийная ветка подъёма, браузер ещё не работает — тянуть
+
+        # полные 50с внутренних потолков незачем.
+
+        await session.close(budget=BROWSER_ABORT_CLOSE_BUDGET)  # cleanup перед пробросом — не оставить осиротевший Firefox
         raise
 
     if not browser_result.success:
@@ -1195,7 +1202,11 @@ async def init_load(use_proxy: bool = False) -> BrowserSession | bool:
         # Закрываем браузер, как и в ветке исключений выше: без этого Firefox остаётся
         # осиротевшим и держит lock в общем кэше Playwright. Для OTC это ШТАТНЫЙ путь (init_otc
         # с 12-09-2026 отдаёт неуспех, а не выходит через close_program), для FIN — редкий.
-        await session.close()
+        # Бюджет: аварийная ветка подъёма, браузер ещё не работает — тянуть
+
+        # полные 50с внутренних потолков незачем.
+
+        await session.close(budget=BROWSER_ABORT_CLOSE_BUDGET)
         return False
 
     return session

@@ -846,7 +846,7 @@ def reset_legend_scope() -> None:
 # Метка контейнера легенды: при калибровке помечаем найденный узел атрибутом и дальше
 # сканируем по нему. Держать ссылку на узел между вызовами нельзя (каждый evaluate — свой
 # контекст), а атрибут переживает вызовы и исчезает вместе с перерисовкой узла — тогда
-# scope='box' вернёт null, и Python перекалибруется (см. _missing_indicators).
+# scope='box' вернёт null, и Python перекалибруется (см. _indicator_counts).
 _LEGEND_ROOT_ATTR = 'data-legend-root'
 
 # Сколько уровней вверх от канваса пробуем при поиске контейнера легенды. Родитель канваса не
@@ -861,7 +861,13 @@ _LEGEND_ROOT_MAX_UP = 6
 # Берём САМЫЙ ВНУТРЕННИЙ элемент (без вложенных span/div), иначе один чип считался бы дважды —
 # за себя и за обёртку с тем же textContent.
 _LEGEND_SCAN_JS = (
-    "(arg) => { const scan = (root) => { const counts = {}; let total = 0;"
+    "(arg) => { const cv = document.querySelector(arg.zone);"
+    "   const box = cv ? cv.getBoundingClientRect() : null;"
+    # Свидетель отрисовки — САМ КАНВАС чарта, а не чипы: при выключенных индикаторах чипов не
+    # остаётся вовсе (замер на живой странице 20-09: 11 → 0), и по ним «сброшено» неотличимо
+    # от «не прочитали».
+    "   const drawn = !!(box && box.width > 0 && box.height > 0);"
+    "   const scan = (root) => { const counts = {}; let total = 0;"
     "   for (const b of arg.badges) counts[b] = 0;"
     "   for (const el of root.querySelectorAll('div,span')) {"
     "     if (el.querySelector('span,div')) continue;"
@@ -870,7 +876,7 @@ _LEGEND_SCAN_JS = (
     "     total++;"
     "     const t = (el.textContent || '').trim();"
     "     if (arg.badges.includes(t)) counts[t]++; }"
-    "   return {c: counts, total}; };"
+    "   return {c: counts, total, drawn}; };"
     " const full = (r) => arg.badges.every(b => r.c[b] > 0);"
     " if (arg.scope === 'box') {"
     "   const root = document.querySelector('[' + arg.rootAttr + ']');"
@@ -896,13 +902,19 @@ _LEGEND_SCAN_JS = (
 # Снять ОДНУ лишнюю копию индикатора: крестик на последнем его чипе. По одной за вызов —
 # после клика React перестраивает легенду, и пачка кликов по устаревшим узлам не проходит.
 # Выключить индикатор через меню НЕЛЬЗЯ (см. apply_chart_indicators): там клик добавляет.
+# Предикат чипа — ДОСЛОВНО тот же, что у _LEGEND_SCAN_JS (лист 'div,span' внутри бейджа с
+# картинками /img/chart/). Раньше скан считал листья 'div,span', а снятие искало только 'span':
+# чип с текстом в листовом div считался дублем, но не снимался, и функция уходила по 'no-dup'
+# молча — лишняя панель доживала до конца опциона. Дедуп по узлу обязателен: у чипа бывает
+# несколько листьев (имя и параметры), и один и тот же chip иначе попал бы в список дважды.
 _LEGEND_DROP_JS = (
     "(arg) => { const chips = [];"
-    "   for (const el of document.querySelectorAll('span')) {"
-    "     if ((el.textContent || '').trim() !== arg.badge) continue;"
+    "   for (const el of document.querySelectorAll('div,span')) {"
     "     if (el.querySelector('span,div')) continue;"
+    "     if ((el.textContent || '').trim() !== arg.badge) continue;"
     "     const chip = el.closest('div');"
-    "     if (chip && chip.querySelector('img[src*=\"/img/chart/\"]')) chips.push(chip); }"
+    "     if (!chip || !chip.querySelector('img[src*=\"/img/chart/\"]')) continue;"
+    "     if (!chips.includes(chip)) chips.push(chip); }"
     "   if (chips.length < 2) return 'no-dup';"
     "   const btn = chips[chips.length - 1]"
     "     .querySelector('button img[src*=\"cross\"]');"
@@ -914,23 +926,28 @@ _LEGEND_DROP_JS = (
 def _counts_or_blind(payload, badges) -> dict | None:
     """Счётчики из ответа скана либо None, если легенда НЕ ПРОЧИТАНА.
 
-    Отличаем «индикаторов нет» от «мы ослепли»: скан возвращает и общее число чипов легенды
-    (любой лист внутри бейджа с картинками /img/chart/), независимо от их имён. Нули по нашим
-    бейджам при НЕНУЛЕВОМ total — это правда «их выключили». Нули при нулевом total — легенда
-    не отрисована или binodex сменил вёрстку; кликать по такому нельзя: клик добавит копию, а
-    уборка по тем же нулям ничего не снимет, и копии будут расти на каждом подъёме."""
+    Отличаем «индикаторов нет» от «мы ослепли» по КАНВАСУ чарта: он есть на странице
+    независимо от того, включены индикаторы или нет. Нули по нашим бейджам при отрисованном
+    канвасе — это правда «их выключили» (включаем). Нули при отсутствующем канвасе — страница
+    не отрисована или вёрстка уехала; кликать по такому нельзя: клик добавит копию, а уборка
+    по тем же нулям ничего не снимет, и копии будут расти на каждом подъёме."""
     if not isinstance(payload, dict):
         return None
-    counts, total = payload.get('c'), payload.get('total')
+    counts = payload.get('c')
     if not isinstance(counts, dict):
         return None
     result = {badge: int(counts.get(badge, 0) or 0) for badge in badges}
-    if not any(result.values()) and not total:
-        return None
-    return result
+    if any(result.values()):
+        return result
+    # Наших чипов нет. Это «выключили» — только если страница ОТРИСОВАНА (канвас чарта на
+    # месте). Иначе мы просто не прочитали: вёрстка уехала, страница моргнула, легенда ещё не
+    # построена. Судить по числу ЧУЖИХ чипов нельзя: при выключенных индикаторах в легенде не
+    # остаётся ни одного (замер 20-09 на живой странице: 11 → 0), то есть честный сброс
+    # оформления выглядел бы слепотой и ремонт не сработал бы никогда.
+    return result if payload.get('drawn') else None
 
 
-async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, int] | None:
+async def _indicator_counts(page: Page, cap: float | None = None, quiet: bool = False) -> dict[str, int] | None:
     """СКОЛЬКО копий каждого индикатора сейчас на графике — по чипам легенды.
 
     Считаем именно количество, а не факт наличия: клик по пункту меню binodex ДОБАВЛЯЕТ ещё
@@ -941,7 +958,12 @@ async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, i
 
     `None` — прочитать НЕ удалось (страница моргнула/evaluate бросил): «не знаю» НЕЛЬЗЯ
     трактовать как «выключено всё», иначе ремонт добавит копии там, где всё было в порядке.
-    Вызывающий на None просто ничего не трогает — следующий опцион перечитает."""
+    Вызывающий на None просто ничего не трогает — следующий опцион перечитает.
+
+    `quiet` — не писать warning о слепоте. Для ГОРЯЧЕГО поллинга (ожидание появления чипа
+    после клика): там пустая легенда — штатное промежуточное состояние, а не признак съехавшей
+    вёрстки, и поллинг с шагом 0.15с превращал её в бурст одинаковых записей на КАЖДОМ холодном
+    старте (init_otc включает индикаторы на заведомо пустой легенде)."""
     global _legend_scope
     badges = [badge for _, badge in OTC_CHART_INDICATORS]
     scope = _legend_scope or 'calibrate'
@@ -1000,6 +1022,14 @@ async def _indicator_counts(page: Page, cap: float | None = None) -> dict[str, i
 _LEGEND_CONFIRM_PAUSE_MS = 600
 
 
+def _confirm_pause_ms(cap: float | None) -> float:
+    """Сколько ждать перед подтверждающим чтением: не дольше штатной паузы и не дольше того,
+    что осталось вызывающему (`cap` — остаток бюджета ремонта в секундах)."""
+    if cap is None:
+        return _LEGEND_CONFIRM_PAUSE_MS
+    return max(0.0, min(_LEGEND_CONFIRM_PAUSE_MS, cap * 1000))
+
+
 async def indicator_counts_confirmed(page: Page, cap: float | None = None) -> dict[str, int] | None:
     """Счётчики чипов с подтверждением пустоты (приём тот же, что у confirm_stable для фида).
 
@@ -1009,7 +1039,10 @@ async def indicator_counts_confirmed(page: Page, cap: float | None = None) -> di
     counts = await _indicator_counts(page, cap=cap)
     if counts is None or any(counts.values()):
         return counts
-    await page.wait_for_timeout(_LEGEND_CONFIRM_PAUSE_MS)
+    # Пауза списывается с ТОГО ЖЕ бюджета, что и остальные шаги ремонта: иначе три вызова за
+    # проход добавляли до 1.8с СВЕРХ SETUP_TOTAL_BUDGET — ровно та «номинальность» потолка,
+    # от которой избавлялись в горячем пути кадра.
+    await page.wait_for_timeout(_confirm_pause_ms(cap))
     second = await _indicator_counts(page, cap=cap)
     if second is None:
         return None                      # «не знаю» — вызывающий не трогает UI
@@ -1081,7 +1114,7 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     `missing` — что именно включать, список (name, badge) от вызывающего (ensure_chart_setup).
     `None` означает ХОЛОДНЫЙ СТАРТ: индикаторы заведомо выключены, включаем все. Никогда не
     вычисляем список сами: «не смог прочитать» и «выключено всё» — разные вещи, развести их может
-    только вызывающий (см. _missing_indicators).
+    только вызывающий (см. _indicator_counts).
 
     После кликов ОДИН раз перечитываем чипы и добираем не появившиеся: клик мог не дойти (модалка
     не открылась / пункт перерисовался), а без проверки индикатор оставался бы выключенным до
@@ -1140,14 +1173,14 @@ async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> boo
 
     Вместо слепой паузы: клик по пункту меню ТОГГЛИТ индикатор, и раньше мы просто ждали 700 мс
     на каждый, то есть ~2.1 с за проход и при этом без всякой гарантии. Проверку делает
-    _missing_indicators — он и читает чипы легенды (один обход DOM), а `name` тут только ключ
+    _indicator_counts — он и читает чипы легенды (один обход DOM), а `name` тут только ключ
     записи; отдельный аргумент под чип был лишним и не использовался.
 
-    `None` от _missing_indicators — «прочитать не удалось»: не трактуем как готовность, просто
+    `None` от _indicator_counts — «прочитать не удалось»: не трактуем как готовность, просто
     пробуем ещё раз до потолка."""
     deadline = time.monotonic() + timeout
     while True:
-        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic()))
+        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic(), quiet=True))
         missing = None if counts is None else _missing_from(counts)
         if missing is not None and not any(item_name == name for item_name, _ in missing):
             return True
