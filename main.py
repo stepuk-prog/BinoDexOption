@@ -74,6 +74,10 @@ _session_dead_error: BaseException | None = None
 _setup_streak = 0
 _browser_fails = 0
 _outage_cycles = 0
+# Провалы ПОДЪЁМА в прокси-режиме. Отдельно от _browser_fails намеренно: одна прокси-карусель
+# не должна сразу давать EXIT_BROWSER (дело может быть в одном мёртвом прокси, а не в ноде).
+# Но и не считать нельзя — см. ветку неуспеха ниже.
+_proxy_fails = 0
 
 _use_proxy = False
 # OTC: счётчик front-end-аутэйджей подряд в прокси-режиме (для переотбивки direct). Сбрасывается
@@ -167,7 +171,7 @@ async def _init_with_retry():
     Паузы прерываются сигналом остановки.
     :return: BrowserSession либо None (остановлены сигналом во время init/backoff)."""
     global _use_proxy, _proxy_outage_streak, _setup_streak, _browser_fails, _outage_cycles
-    global _cookies_direct_reprobe
+    global _cookies_direct_reprobe, _proxy_fails
     # Счётчики МОДУЛЬНЫЕ (как _cookie_fails/_otc_recover_cycles). Локальными они обнулялись на
     # каждом входе, а _recreate_browser зовёт эту функцию заново — в цикле «браузер поднялся →
     # опцион упал → пересоздание» лимиты не накапливались, и предохранители не срабатывали
@@ -288,14 +292,37 @@ async def _init_with_retry():
             # прежние провалы были транзиентными. Без этого сброса счётчики стали бы
             # монотонными за жизнь процесса: три SetupError с сутками нормальной работы между
             # ними дали бы ложный EXIT_SETUP «селекторы сломались».
-            _browser_fails = _setup_streak = _outage_cycles = 0
+            _browser_fails = _setup_streak = _outage_cycles = _proxy_fails = 0
             if _use_proxy:
                 await _mark_proxy_success()  # прокси поднял рабочий init → плюс в статистику
             return session
         if not binary and _use_proxy:
             # На прокси init провалился (вероятно прокси мёртв) → бан+ротация; это НЕ поломка
             # браузера ноды, поэтому _browser_fails не трогаем (иначе прокси-карусель ложно дала бы EXIT_BROWSER).
+            #
+            # ⚠️ Но и не считать нельзя. До этой правки здесь не рос НИ ОДИН счётчик, и провал
+            # самого ПОДЪЁМА в прокси-режиме (нет storage_state в БД, не стартовал локальный релей,
+            # битый бинарь браузера) крутился ВЕЧНО: пауза, бан очередного прокси — и по новой.
+            # Кода выхода нет, алерта нет, юнит зелёный, постов нет — диспетчер такую программу не
+            # забирает, потому что она «жива». Второй счёт по чужому карману: каждый виток банит
+            # прокси в ОБЩЕМ scope, то есть беда, к прокси отношения не имеющая, выбивает рабочие
+            # прокси у соседних программ семьи. Реестр BinoCore: proxy-bringup-counted.
             await _ban_current_proxy()
+            _proxy_fails += 1
+            if _proxy_fails >= PROXY_REPROBE_AFTER:
+                # Исчерпали — возвращаемся на direct тем же путём, что и при аутэйдже фронта.
+                # Там провал считается (_browser_fails) и доходит до EXIT_BROWSER → failover.
+                _use_proxy = False
+                _proxy_outage_streak = 0
+                _proxy_fails = 0
+                logger.error(f'OTC: браузер не поднялся через {PROXY_REPROBE_AFTER} прокси подряд — '
+                             f'возвращаюсь на прямой режим (там провал считается и уходит в '
+                             f'failover), пауза {INIT_RETRY_DELAY}с')
+            else:
+                # Счётчик в строке — ТОТ, который правит этой веткой: иначе оператор видит
+                # «провал 0/N» по _browser_fails, который в прокси-режиме не растёт вовсе.
+                logger.error(f'OTC: браузер не поднялся на прокси (провал {_proxy_fails}/'
+                             f'{PROXY_REPROBE_AFTER}) — бан, ротация, пауза {INIT_RETRY_DELAY}с')
         else:
             _browser_fails += 1
             if _browser_fails >= BROWSER_MAX_ATTEMPTS:
