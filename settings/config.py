@@ -33,7 +33,15 @@ binary = parse_bool(os.getenv("BINARY", "0"))
 #   firefox|chromium — принудительно этот движок независимо от режима.
 # Влияет ТОЛЬКО на выбор движка (apps/browser_app._use_chromium); привязку логина/кук/прокси к
 # режиму (binary) не трогает.
-browser_engine = os.getenv("BROWSER", "auto").lower()
+browser_engine = os.getenv("BROWSER", "").lower()
+if not browser_engine:
+    # Ключ ОБЯЗАТЕЛЕН, а не «рекомендуется»: прежний дефолт `auto` давал для OTC Chromium, а
+    # deploy ставит на ноде Firefox. Забытая строка не видна ничем, кроме последствия: init_load
+    # падает «Executable doesn't exist», BROWSER_MAX_ATTEMPTS доводит до exit(10), и диспетчер
+    # переносит программу с ноды на ноду с тем же исходом. Тот же случай, что с ERROR_TOPIC_*:
+    # тихий фолбэк дороже явного отказа на старте.
+    fatal_exit("Не задана обязательная переменная окружения BROWSER (auto|firefox|chromium) — "
+               "на нодах это firefox; см. docs/DEPLOY.md и .env.example")
 if browser_engine not in ("auto", "firefox", "chromium"):
     fatal_exit(f"BROWSER='{browser_engine}' не поддерживается (auto|firefox|chromium)")
 # Ключ программы — фильтр своих строк в общей settings.option_setting.
