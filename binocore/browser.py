@@ -28,17 +28,31 @@ BinoOptions. Различались не задачи, а слова: одно �
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
-if TYPE_CHECKING:                     # playwright не импортируется в рантайме: ядро вендорится
-    from playwright.async_api import Browser, BrowserContext, Page   # и в неброузерные программы
+# Типов Playwright здесь НЕТ намеренно — даже под TYPE_CHECKING. Ядро вендорится во все
+# программы семьи, в том числе туда, где playwright не установлен, а у самого BinoCore его нет
+# и в venv (тесты гоняют фейковые объекты) — IDE честно отвечала «Module 'Browser' not found» и
+# считала строковые аннотации битыми. Классу типы и не нужны: он владеет ресурсами по duck
+# typing — ждёт у контекста и браузера `close()`, у playwright `stop()`, у вкладки `is_closed()`.
 
 _logger = logging.getLogger(__name__)
 
 # Таймаут на КАЖДЫЙ шаг закрытия. Зависший шаг не должен довести процесс до SIGKILL от systemd.
 CLOSE_STEP_TIMEOUT = 15      # сек
 CLEANUP_TIMEOUT = 5          # сек на один хук уборки
+_STEP_FLOOR = 0.5            # сек — меньше не даём даже на исчерпанном бюджете
+
+# Сумма потолков (3 шага + хук) = 50с, и это БОЛЬШЕ, чем внешние потолки у вызывающих: у пары
+# BinoOptions остановка даёт close() 30с (SHUTDOWN_STEP_TIMEOUT). Внешний обрыв на 30-й секунде
+# приходился ровно посередине уборки: pw.stop() не начинался, хук релея не выполнялся — то есть
+# драйвер и Firefox оставались жить с локом в общем кэше ms-playwright, и следующий запуск на
+# ноде браузер не поднимал. Ровно то, от чего потолки на шаг и защищают.
+# Поэтому вызывающий передаёт СВОЙ бюджет: `close(budget=30)` — и шаги делят его между собой,
+# вместо того чтобы обрываться снаружи. Резерв под хуки считается отдельно: без него три
+# зависших шага съели бы бюджет целиком и релей снова остался бы непогашенным.
 
 
 def configure(logger=None) -> None:
@@ -50,6 +64,15 @@ def configure(logger=None) -> None:
     global _logger
     if logger is not None:
         _logger = logger
+
+
+def _left(deadline: float | None, cap: float, reserve: float = 0.0) -> float:
+    """Сколько секунд можно ждать этот шаг: не дольше его потолка и не дольше остатка бюджета
+    за вычетом резерва под хуки уборки. Пол `_STEP_FLOOR` намеренный — ноль Playwright понял бы
+    как «ждать бесконечно», а шаг на исчерпанном бюджете всё равно стоит попробовать."""
+    if deadline is None:
+        return cap
+    return max(_STEP_FLOOR, min(cap, deadline - time.monotonic() - reserve))
 
 
 def _clean_err(error) -> str:
@@ -74,11 +97,11 @@ class BrowserSession:
     отличаются «свои» вкладки от попапов рекламы (`close_unexpected_pages`).
     `pages_by_role` — карта 'main'/'price'/… → Page (у форумных заполняется по
     `cookies.pages.description`). Заменяет хардкодные индексы и словарь имён `BrowserManager`."""
-    pw: Any = None
-    browser: 'Browser | None' = None
-    context: 'BrowserContext | None' = None
-    expected_pages: list = field(default_factory=list)
-    pages_by_role: dict = field(default_factory=dict)
+    pw: Any = None                      # Playwright (у него stop())
+    browser: Any = None                 # playwright.async_api.Browser
+    context: Any = None                 # playwright.async_api.BrowserContext
+    expected_pages: list = field(default_factory=list)      # list[Page]
+    pages_by_role: dict = field(default_factory=dict)       # dict[str, Page]
     _cleanups: list = field(default_factory=list, repr=False)
 
     @property
@@ -87,7 +110,7 @@ class BrowserSession:
         обращение к закрытой Page бросает, а вызывающие ждут «есть вкладка / нет вкладки»."""
         return [p for p in self.expected_pages if not p.is_closed()]
 
-    def main_page(self) -> 'Page':
+    def main_page(self) -> Any:
         """Основная (первая) вкладка. RuntimeError, а не IndexError: отсутствие вкладки —
         это сигнал «пересоздать браузер», и вызывающие ловят именно его."""
         pages = self.pages
@@ -95,7 +118,7 @@ class BrowserSession:
             return pages[0]
         raise RuntimeError('Нет открытой вкладки в сессии браузера (init её не создал)')
 
-    def page(self, role: str) -> 'Page':
+    def page(self, role: str) -> Any:
         """Вкладка по роли. KeyError с внятным текстом вместо `pages_by_role['main']`:
         промах по роли означает, что init не довёл страницу до готовности."""
         found = self.pages_by_role.get(role)
@@ -104,26 +127,40 @@ class BrowserSession:
             raise KeyError(f'Нет живой вкладки с ролью {role!r} (известные роли: {known})')
         return found
 
+    def find(self, role: str) -> Any:
+        """Вкладка по роли или None — МЯГКИЙ путь для мест, где отсутствие страницы штатно
+        (проверка оформления чарта, health-чек, аварийный reload). Отличие от прямого
+        `pages_by_role.get(role)`, который там стоял раньше: закрытая вкладка тоже даёт None.
+        Иначе best-effort ветка получала мёртвую Page и падала уже внутри действия над ней."""
+        found = self.pages_by_role.get(role)
+        return None if found is None or found.is_closed() else found
+
     def add_cleanup(self, action: Callable) -> None:
         """Хук, который выполнится ПОСЛЕ закрытия браузера (см. про релей в докстринге модуля).
         Принимает и обычную функцию (уйдёт в поток), и корутинную."""
         self._cleanups.append(action)
 
-    async def close(self) -> None:
-        """Закрытие в порядке context → browser → pw, каждый шаг под своим таймаутом, затем
-        хуки уборки. Ошибки не поднимаются: пропущенный шаг дороже любого из них."""
+    async def close(self, budget: float | None = None) -> None:
+        """Закрытие в порядке context → browser → pw, затем хуки уборки. Ошибки не поднимаются:
+        пропущенный шаг дороже любого из них.
+
+        `budget` — СКОЛЬКО СЕКУНД есть всего (см. про внешние потолки выше). Каждый шаг тогда
+        получает min(свой потолок, остаток), а под хуки резервируется место заранее. Без
+        аргумента — прежнее поведение, до 50с в худшем случае."""
+        reserve = CLEANUP_TIMEOUT if self._cleanups else 0.0
+        deadline = None if budget is None else time.monotonic() + budget
         steps = (('контекст', getattr(self.context, 'close', None)),
                  ('браузер', getattr(self.browser, 'close', None)),
                  ('playwright', getattr(self.pw, 'stop', None)))
         for name, closer in steps:
             if closer is None:                    # шага нет (сессия не доросла до него)
                 continue
-            await self._guarded(name, closer(), CLOSE_STEP_TIMEOUT)
+            await self._guarded(name, closer(), _left(deadline, CLOSE_STEP_TIMEOUT, reserve))
         for action in self._cleanups:
             # Синхронный хук — В ПОТОК: `stop()` релея join'ит до 2с, и держать на этом
             # event loop во время остановки нельзя.
             running = action() if inspect.iscoroutinefunction(action) else asyncio.to_thread(action)
-            await self._guarded('уборка', running, CLEANUP_TIMEOUT)
+            await self._guarded('уборка', running, _left(deadline, CLEANUP_TIMEOUT))
         # Ссылки на закрытые Page не должны пережить close(): задержавшийся объект сессии
         # иначе отдаёт мёртвую страницу по роли.
         self.pages_by_role.clear()
@@ -143,7 +180,7 @@ class BrowserSession:
         try:
             await asyncio.wait_for(awaitable, timeout=timeout)
         except asyncio.TimeoutError:
-            _logger.warning(f'Закрытие ({name}): не уложилось в {timeout:.0f}с')
+            _logger.warning(f'Закрытие ({name}): не уложилось в {timeout:.1f}с')
         except (Exception,) as error:
             level = _logger.debug if _expected(error) else _logger.warning
             level(f'Закрытие ({name}): {_clean_err(error)}')

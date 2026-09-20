@@ -315,7 +315,7 @@ async def _recreate_browser(session):
     :return: новый BrowserSession либо None (остановлены сигналом)."""
     try:
         # Верхняя граница: зависший Firefox-close не должен подвесить пересоздание браузера.
-        await asyncio.wait_for(session.close(), timeout=BROWSER_CLOSE_TIMEOUT)
+        await asyncio.wait_for(session.close(budget=BROWSER_CLOSE_TIMEOUT - 1), timeout=BROWSER_CLOSE_TIMEOUT)
     except (Exception,) as error:
         logger.warning(f'Ошибка закрытия браузера при пересоздании: {error}')  # утечка Firefox не должна быть незаметной
     return await _init_with_retry()
@@ -531,16 +531,21 @@ async def bot():
     # а до этого момента разбудить цикл было бы нечем. Юзербот к этой строке уже поднят.
     _install_session_guard(loop)
 
-    def _on_stop_signal():
+    def _on_stop_signal(sig: signal.Signals):
+        # ЧЕМ именно нас остановили — записываем здесь: дальше в логе остаётся только общее
+        # «Остановлен сигналом 🛑» из close_program, по которому не отличить SIGTERM диспетчера
+        # от Ctrl-C оператора, а это первое, что спрашивают при разборе остановки. В файл, не в
+        # канал: про саму остановку отчёт и так уйдёт.
+        logger.info('Получен %s — штатная остановка', sig.name)
         stop_event.set()
         request_shutdown()  # подавить main_bug_message — это штатная остановка, не сбой
 
-    # add_signal_handler(sig, callback, *args): *args опционален, но инспекция PyCharm ложно
-    # считает его обязательным («Parameter 'args' unfilled») — подавляем точечно noinspection.
+    # add_signal_handler(sig, callback, *args): args передаём ЯВНО — сам сигнал. Он опционален,
+    # но инспекция считала его обязательным («Parameter 'args' unfilled»), а точечное
+    # noinspection её не гасило; здесь аргумент не заглушка — обработчик и правда им пользуется.
     for _sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            # noinspection PyArgumentList
-            loop.add_signal_handler(_sig, _on_stop_signal)
+            loop.add_signal_handler(_sig, _on_stop_signal, _sig)
         except NotImplementedError:
             pass  # Windows — graceful по сигналам недоступен
 
@@ -588,7 +593,7 @@ async def bot():
         if not binary and not res_option.result and not await binodex_ready():
             try:
                 # Верхняя граница: зависший Firefox-close не должен подвесить аварийную выгрузку.
-                await asyncio.wait_for(session.close(), timeout=BROWSER_CLOSE_TIMEOUT)
+                await asyncio.wait_for(session.close(budget=BROWSER_CLOSE_TIMEOUT - 1), timeout=BROWSER_CLOSE_TIMEOUT)
             except (Exception,) as error:
                 logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):

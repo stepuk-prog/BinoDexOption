@@ -150,7 +150,7 @@ async def close_program(session: "BrowserSession | None", status: int, text: str
     # аварийной уборки — там, где падение дороже всего. Реестр BinoCore: close-driver-falsy.
     if session:
         try:
-            await asyncio.wait_for(session.close(), timeout=SHUTDOWN_STEP_TIMEOUT)
+            await asyncio.wait_for(session.close(budget=SHUTDOWN_STEP_TIMEOUT - 1), timeout=SHUTDOWN_STEP_TIMEOUT)
         except (Exception,) as e:
             logger.warning(f"Ошибка закрытия браузера: {e}")
 

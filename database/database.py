@@ -287,7 +287,8 @@ class Database(BaseDatabase):
         """Статистика прокси ip для scope'а. На успехе пишем last_success (триггер снимет бан
         scope'а по свежему last_success), на провале — last_failure + счётчик. Разбан по успеху
         делает триггер proxy_auto_unban, тут его НЕ дублируем. True|False."""
-        b_is, b_until, _b_long, b_used, b_ok_ts, b_fail_ts, b_succ, b_fail = self._PROXY_SCOPE[scope]
+        # Первые три поля (флаг бана, срок, «долгий» бан) нужны ban_proxy, здесь — нет.
+        *_, b_used, b_ok_ts, b_fail_ts, b_succ, b_fail = self._PROXY_SCOPE[scope]
         if success:
             sql = (
                 "UPDATE settings.proxy_data SET "

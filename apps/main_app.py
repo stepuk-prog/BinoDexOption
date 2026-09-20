@@ -196,7 +196,7 @@ async def _acquire_otc_pair(session: "BrowserSession", stop_event) -> str:
         left = deadline - time.monotonic()
         if left <= 0:
             break
-        if await sleep_or_stop(stop_event, min(NO_PAIRS_RELOAD_PAUSE, left)):
+        if await sleep_or_stop(stop_event, min(float(NO_PAIRS_RELOAD_PAUSE), left)):
             return 'stopped'
     if stop_event.is_set():
         return 'stopped'
