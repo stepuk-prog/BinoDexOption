@@ -28,7 +28,7 @@ GitHub: `git@github.com-stepuk:stepuk-prog/BinoDexOption.git`.
 
 ## Структура
 - `apps/` — процедурная логика: `app.py` (FIN: цена/скрин/точка входа), `otc_app.py` (OTC: выбор пары/скрин/WS-цена + inline-релогин), `browser_app.py` (init Playwright/TV), `main_app.py` (главный цикл + посты), `exit_app.py` (завершение/алерты), `otc_login.py` (inline Privy email-OTP логин в основном браузере, async), `binodex_feed.py` (браузер-фри health-чек market-WS), `my_exeptions.py`, `cookie_utils.py`.
-- `classes/` — `Option_class.py` (`Option` — данные опциона; обычный класс, НЕ dataclass), `browser_manager.py`, `price_tracker.py` (WS-цены OTC), `result_types.py`.
+- `classes/` — `Option_class.py` (`Option` — данные опциона; обычный класс, НЕ dataclass), `price_tracker.py` (WS-цены OTC), `result_types.py`. Самой браузерной сессии здесь НЕТ: с 20-09-2026 она берётся из ядра — `binocore.browser.BrowserSession` (местный `browser_manager.py` со словарём `pages[имя]` был одной из ДЕВЯТИ редакций одного класса по семье). Страницы — по роли: `session.page('main')`, `session.page('price')`; `session.pages` теперь СПИСОК живых вкладок, а не словарь.
 - `database/database.py`, `messages/message.py` (тексты постов), `settings/` (config, _bootstrap, constant, browser_*, screenshot_set, timing, image_paths, logger_config), `logs/log_init.py` (по-уровневые файлы + TG-хендлер; INFO пишется ПО УМОЛЧАНИЮ с 11-09-2026: порог логгера — `INFO`, заводится `info.log`; `LOG_INFO=0` возвращает прежний `REPORT` (25), `LOG_DEBUG=1` добавляет `debug.log` и опускает порог до DEBUG), `pictures/`, `scripts/`, `systemd/`, `docs/`.
 
 ## OTC / binodex (важное)

@@ -124,7 +124,7 @@ async def _recover_otc_cookies() -> bool:
     if _otc_recover_cycles > RECOVER_ATTEMPTS:
         logger.cookies(f'OTC: {RECOVER_ATTEMPTS} циклов восстановления подряд без успешного init '
                        f'({cook_name_otc}) — релогин не помог. Останавливаю работу')
-        await close_program(manager=None, status=EXIT_COOKIES,
+        await close_program(session=None, status=EXIT_COOKIES,
                             text=f'Не восстановить сессию binodex для {cook_name_otc} 🍪🛑 (код {EXIT_COOKIES})')  # sys.exit
         return False  # страховка (close_program делает sys.exit)
     logger.warning(f'OTC: init не поднялся после inline-релогина ({cook_name_otc}), '
@@ -165,18 +165,18 @@ async def _init_with_retry():
     рефрешером (3 попытки → иначе выход). TV: Survive-backoff (сообщение + пауза, на повторе init
     перечитает куки из БД), БЕЗ выхода. Прочий провал init_load → пауза INIT_RETRY_DELAY и повтор.
     Паузы прерываются сигналом остановки.
-    :return: BrowserManager либо None (остановлены сигналом во время init/backoff)."""
+    :return: BrowserSession либо None (остановлены сигналом во время init/backoff)."""
     global _use_proxy, _proxy_outage_streak, _setup_streak, _browser_fails, _outage_cycles
     global _cookies_direct_reprobe
     # Счётчики МОДУЛЬНЫЕ (как _cookie_fails/_otc_recover_cycles). Локальными они обнулялись на
     # каждом входе, а _recreate_browser зовёт эту функцию заново — в цикле «браузер поднялся →
     # опцион упал → пересоздание» лимиты не накапливались, и предохранители не срабатывали
-    # никогда. Обнуляются ВСЕ разом при успешном подъёме (ветка `if manager:` ниже).
+    # никогда. Обнуляются ВСЕ разом при успешном подъёме (ветка `if session:` ниже).
     while True:
         if _stop_event is not None and _stop_event.is_set():
             return None
         try:
-            manager = await init_load(use_proxy=_use_proxy)
+            session = await init_load(use_proxy=_use_proxy)
         except FeedOutage as error:
             # OTC: аутэйдж binodex — market-WS молчит ЛИБО auth-API api.binodex.app лежит (5xx),
             # подтверждено браузер-фри. НЕ отвал кук и НЕ front-end-аутэйдж: релогин/прокси не помогут,
@@ -222,7 +222,7 @@ async def _init_with_retry():
                             logger.report(f'OTC: front-end аутэйдж binodex не преодолён за '
                                           f'{SETUP_OUTAGE_MAX_CYCLES} цикла (direct+прокси) — отдаю ноду '
                                           f'диспетчеру для провайдер-диверсного переноса ☄️ (код {EXIT_SETUP})')
-                            await close_program(manager=None, status=EXIT_SETUP,
+                            await close_program(session=None, status=EXIT_SETUP,
                                                 text=f'OTC: front-end аутэйдж binodex устойчив с этой ноды '
                                                      f'({SETUP_OUTAGE_MAX_CYCLES} цикла) — перенос на другого '
                                                      f'провайдера ☄️ (код {EXIT_SETUP})')
@@ -252,7 +252,7 @@ async def _init_with_retry():
             if _setup_streak >= SETUP_ATTEMPTS:
                 logger.cookies(f'OTC: сайт не настраивается за {SETUP_ATTEMPTS} попытки '
                                f'({cook_name_otc}) — нужно ручное вмешательство (селекторы binodex). Останавливаю')
-                await close_program(manager=None, status=EXIT_SETUP,
+                await close_program(session=None, status=EXIT_SETUP,
                                     text=f'OTC: сайт не настраивается — проверить селекторы binodex ⚙️🛑 (код {EXIT_SETUP})')
                 return None  # close_program делает sys.exit; страховка
             if await sleep_or_stop(_stop_event, INIT_RETRY_DELAY):
@@ -280,7 +280,7 @@ async def _init_with_retry():
             if await _handle_cookie_failure(str(error)):  # TV: пауза прервана сигналом
                 return None
             continue  # пересоздаём на новом витке — init перечитает куки
-        if manager:
+        if session:
             _reset_cookie_fails()  # init удался → куки живы, сбрасываем бэкофф
             _proxy_outage_streak = 0  # init поднялся (direct или прокси) → стрик аутэйджей сброшен
             _cookies_direct_reprobe = False   # подъём удался → переотбивка direct снова разрешена
@@ -291,7 +291,7 @@ async def _init_with_retry():
             _browser_fails = _setup_streak = _outage_cycles = 0
             if _use_proxy:
                 await _mark_proxy_success()  # прокси поднял рабочий init → плюс в статистику
-            return manager
+            return session
         if not binary and _use_proxy:
             # На прокси init провалился (вероятно прокси мёртв) → бан+ротация; это НЕ поломка
             # браузера ноды, поэтому _browser_fails не трогаем (иначе прокси-карусель ложно дала бы EXIT_BROWSER).
@@ -302,7 +302,7 @@ async def _init_with_retry():
                 # Браузер не поднялся подряд BROWSER_MAX_ATTEMPTS раз (не куки/селекторы/фид/прокси —
                 # те идут своими ветками): нода, вероятно, не может поднять Firefox → отдаём диспетчеру
                 # (failover на другую ноду), exit(EXIT_BROWSER). status НЕ трогаем (инвариант).
-                await close_program(manager=None, status=EXIT_BROWSER,
+                await close_program(session=None, status=EXIT_BROWSER,
                                     text=f'Браузер не поднялся {BROWSER_MAX_ATTEMPTS}× — отдаю ноду диспетчеру ☄️ (код {EXIT_BROWSER})')
                 return None  # close_program делает sys.exit; страховка
         logger.error(f'init_load провалился — пауза {INIT_RETRY_DELAY}с и повтор')
@@ -310,12 +310,12 @@ async def _init_with_retry():
             return None
 
 
-async def _recreate_browser(manager):
+async def _recreate_browser(session):
     """Закрыть текущий браузер и поднять заново через _init_with_retry (Survive §4.3).
-    :return: новый BrowserManager либо None (остановлены сигналом)."""
+    :return: новый BrowserSession либо None (остановлены сигналом)."""
     try:
         # Верхняя граница: зависший Firefox-close не должен подвесить пересоздание браузера.
-        await asyncio.wait_for(manager.close(), timeout=BROWSER_CLOSE_TIMEOUT)
+        await asyncio.wait_for(session.close(), timeout=BROWSER_CLOSE_TIMEOUT)
     except (Exception,) as error:
         logger.warning(f'Ошибка закрытия браузера при пересоздании: {error}')  # утечка Firefox не должна быть незаметной
     return await _init_with_retry()
@@ -408,7 +408,7 @@ def _install_session_guard(loop) -> None:
     loop.set_exception_handler(_loop_exception_handler)
 
 
-async def _shutdown_on_session_event(manager) -> bool:
+async def _shutdown_on_session_event(session) -> bool:
     """Закрыться нужным кодом, если сторож поймал отвал. True — выход сделан (дальше не идём).
 
     Код РАЗНЫЙ, и различает их session_lost: голый `[401 Unauthorized]` без ID — потеря
@@ -418,9 +418,9 @@ async def _shutdown_on_session_event(manager) -> bool:
         return False
     reason = 'фоновая задача pyrogram'
     if session_lost(_session_dead_error):
-        await session_lost_shutdown(_session_dead_error, reason=reason, manager=manager)
+        await session_lost_shutdown(_session_dead_error, reason=reason, session=session)
     else:
-        await session_dead_shutdown(_session_dead_error, reason=reason, manager=manager)
+        await session_dead_shutdown(_session_dead_error, reason=reason, session=session)
     return True
 
 
@@ -500,7 +500,7 @@ async def bot():
             await weekly_post('end', 'pictures/end_week.png', weekend_message(),
                               'сообщение о выходных', now)
             await write_status_offline(program_id)
-            await close_program(manager=None, status=0, text='Закрываюсь 🔱 (выходные)')
+            await close_program(session=None, status=0, text='Закрываюсь 🔱 (выходные)')
             return
         # Приветствие — на ПЕРВОМ за неделю подъёме в рабочие дни (по плану это понедельник
         # 4:55 по крону; если старт задержался — уйдёт при том подъёме, который случился).
@@ -551,18 +551,18 @@ async def bot():
         if not await _await_binodex_feed(at_start=True):
             if await _shutdown_on_session_event(None):
                 return
-            await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
+            await close_program(session=None, status=0, text='Остановлен сигналом 🛑')
             return
 
     # Survive §4.3: init с бэкоффом при отвале cookies — без выхода, крутим пока не починят.
-    manager = await _init_with_retry()
-    if manager is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
+    session = await _init_with_retry()
+    if session is None:  # остановлены сигналом во время init/cookies-backoff (close_program сам гасит юзербот)
         if await _shutdown_on_session_event(None):
             return
-        await close_program(manager=None, status=0, text='Остановлен сигналом 🛑')
+        await close_program(session=None, status=0, text='Остановлен сигналом 🛑')
         return
 
-    logger.info("✅ Браузер инициализирован, страницы: %s", list(manager.pages.keys()))
+    logger.info("✅ Браузер инициализирован, страницы: %s", list(session.pages_by_role))
     logger.info("🔄 Переход в main loop...")
 
     while not stop_event.is_set():
@@ -571,7 +571,7 @@ async def bot():
         # только Premium-аккаунт, а истекает он посреди прогона.
         await check_premium()
 
-        res_option = await main(manager=manager, qr=qr, stop_event=stop_event)
+        res_option = await main(session=session, qr=qr, stop_event=stop_event)
 
         # Остановка по сигналу (SIGTERM/SIGINT): ошибка из-за гибели Playwright-драйвера —
         # это штатный стоп, не сбой; уходим в graceful-ветку ниже (выход с кодом 0;
@@ -588,13 +588,13 @@ async def bot():
         if not binary and not res_option.result and not await binodex_ready():
             try:
                 # Верхняя граница: зависший Firefox-close не должен подвесить аварийную выгрузку.
-                await asyncio.wait_for(manager.close(), timeout=BROWSER_CLOSE_TIMEOUT)
+                await asyncio.wait_for(session.close(), timeout=BROWSER_CLOSE_TIMEOUT)
             except (Exception,) as error:
                 logger.warning(f'закрытие браузера не завершилось штатно — {error}')
             if not await _await_binodex_feed(at_start=False):
                 break  # SIGTERM во время ожидания
-            manager = await _init_with_retry()
-            if manager is None:  # остановлены сигналом во время повторного init
+            session = await _init_with_retry()
+            if session is None:  # остановлены сигналом во время повторного init
                 break
             continue
 
@@ -606,7 +606,7 @@ async def bot():
         # упрётся в CookiesExpired → _init_with_retry запустит авто-восстановление рефрешером
         # (3 попытки → иначе выход). Если умер только WS (куки живы) — init поднимется без рефреша.
         if not binary:
-            dead, reason = await otc_session_dead(manager)
+            dead, reason = await otc_session_dead(session)
             if not dead and res_option.check_cookies > 2:
                 dead, reason = True, 'цена не менялась N проверок ВНУТРИ опциона (вторичный сигнал)'
             if dead:
@@ -614,14 +614,14 @@ async def bot():
                 # пересоздание это переживёт без рефреша (init разведёт: CookiesExpired / FeedOutage / SetupError).
                 # Реальный отвал/невосстановление дойдёт до cookies-канала из _recover_otc_cookies.
                 logger.warning(f'OTC: сессия не отвечает в рантайме ({reason}) — пересоздаю браузер')
-                manager = await _recreate_browser(manager)
-                if manager is None:  # остановлены сигналом во время пересоздания
+                session = await _recreate_browser(session)
+                if session is None:  # остановлены сигналом во время пересоздания
                     break
                 continue
 
         # Критическая ошибка (краш, НЕ cookies) → выход; диспетчер рестартит (§1).
         if not res_option.result and res_option.fall:
-            await close_program(manager=manager, status=1,  # сам гасит юзербот (_close_userbot)
+            await close_program(session=session, status=1,  # сам гасит юзербот (_close_userbot)
                                 text=f'Перезагрузка бота ☄️. Ошибка - {res_option.bug_text}')
             return  # close_program делает sys.exit; явный выход (правило 9)
 
@@ -638,19 +638,19 @@ async def bot():
                 await weekly_post('end', 'pictures/end_week.png', weekend_message(),
                                   'сообщение о выходных')
                 await write_status_offline(program_id)
-                await close_program(manager=manager, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
+                await close_program(session=session, status=0, text='Закрываюсь 🔱')  # сам гасит юзербот
                 return
 
     # Отвал юзербота, пойманный сторожем лупа: цикл вышел не по сигналу, а по нему — код
     # выхода тогда 13 или 20, а не 0 (иначе диспетчер счёл бы это штатной остановкой).
-    if await _shutdown_on_session_event(manager):
+    if await _shutdown_on_session_event(session):
         return
 
     # Сюда — только по SIGTERM/SIGINT: чисто закрываемся с кодом 0 (штатная остановка извне).
     # status НЕ трогаем (инвариант: status=false выставляет только плановый weekend-выход binary;
     # стоп инициировал диспетчер — он сам управляет своим состоянием). Юзербот гасит сам
     # close_program (_close_userbot с таймаутом); единственное сообщение о закрытии — ниже.
-    await close_program(manager=manager, status=0, text='Остановлен сигналом 🛑')
+    await close_program(session=session, status=0, text='Остановлен сигналом 🛑')
 
 
 def _log_fatal(error: BaseException) -> None:

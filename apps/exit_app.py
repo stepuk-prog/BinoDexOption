@@ -10,7 +10,7 @@ from settings.timing import (LOGGER_FLUSH_DELAY, SHUTDOWN_DB, SHUTDOWN_LOGGER,
 from settings.constant import EXIT_RESTART, EXIT_USERBOT
 
 if TYPE_CHECKING:
-    from classes.browser_manager import BrowserManager
+    from binocore.browser import BrowserSession
 
 logger = init_logger(__name__)
 
@@ -136,21 +136,21 @@ async def _close_telegram_logger():
         print(f"Ошибка закрытия aiogram-бота: {e}")  # logger уже могут быть погашены
 
 
-async def close_program(manager: "BrowserManager | None", status: int, text: str):
+async def close_program(session: "BrowserSession | None", status: int, text: str):
     """
     Полное закрытие программы: браузер → юзербот → БД (пулы+соединения) → aiogram.
-    :param manager: BrowserManager — для отключения браузера (None на ранних выходах)
+    :param session: BrowserSession — для отключения браузера (None на ранних выходах)
     :param status: код выхода (sys.exit) — его читает диспетчер. 0 — штатно, 1 — краш/перезагрузка,
                    10/11/12/13 — browser/cookies/setup/userbot (таксономия в settings/constant.py)
     :param text: текст, отправляемый с завершением/ошибкой
     """
-    # 1. Браузер (на ранних выходах manager может отсутствовать)
-    # `if manager`, а не `is not None`: init отдаёт либо BrowserManager, либо FALSE.
+    # 1. Браузер (на ранних выходах session может отсутствовать)
+    # `if session`, а не `is not None`: init отдаёт либо BrowserSession, либо FALSE.
     # Проверка на None пропускала False, и `False.close()` падал AttributeError ВНУТРИ
     # аварийной уборки — там, где падение дороже всего. Реестр BinoCore: close-driver-falsy.
-    if manager:
+    if session:
         try:
-            await asyncio.wait_for(manager.close(), timeout=SHUTDOWN_STEP_TIMEOUT)
+            await asyncio.wait_for(session.close(), timeout=SHUTDOWN_STEP_TIMEOUT)
         except (Exception,) as e:
             logger.warning(f"Ошибка закрытия браузера: {e}")
 
@@ -173,7 +173,7 @@ async def close_program(manager: "BrowserManager | None", status: int, text: str
     sys.exit(status)
 
 
-async def session_dead_shutdown(error, reason: str = '', manager=None):
+async def session_dead_shutdown(error, reason: str = '', session=None):
     """
     session юзербота недоступна → стоп с кодом EXIT_USERBOT: ошибка в error-канал, критичный
     алерт в ВЫДЕЛЕННЫЙ session-канал (НЕ cookies — иначе поток cookies похоронит алерт, §3.3),
@@ -184,11 +184,11 @@ async def session_dead_shutdown(error, reason: str = '', manager=None):
     suffix = f" ({reason})" if reason else ''
     logger.error(f"Недоступна session юзербота{suffix}: {error}")
     logger.session(f"🔒 Отвал юзербота — session недоступна{suffix}, требуется реавторизация. Останавливаюсь.")
-    await close_program(manager=manager, status=EXIT_USERBOT,
+    await close_program(session=session, status=EXIT_USERBOT,
                         text=f"Отвал юзербота (session) 🔒 (код {EXIT_USERBOT})")
 
 
-async def session_lost_shutdown(error, reason: str = '', manager=None):
+async def session_lost_shutdown(error, reason: str = '', session=None):
     """
     Юзербот потерял авторизацию СОЕДИНЕНИЯ (голый 401 без ID — см. session_lost) → стоп с кодом
     EXIT_RESTART: диспетчер перезапустит на месте, без CB/relocate/ALARM. Переавторизация не
@@ -201,5 +201,5 @@ async def session_lost_shutdown(error, reason: str = '', manager=None):
                  f"перезапуск (код {EXIT_RESTART}), переавторизация НЕ требуется")
     logger.session(f"🔁 Юзербот потерял авторизацию соединения{suffix} (ключ, вероятно, цел) — "
                    f"перезапуск на месте.")
-    await close_program(manager=manager, status=EXIT_RESTART,
+    await close_program(session=session, status=EXIT_RESTART,
                         text=f"Потеря авторизации соединения юзербота 🔁 (код {EXIT_RESTART})")

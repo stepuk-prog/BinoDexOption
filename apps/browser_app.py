@@ -6,7 +6,7 @@ import time
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
-from classes.browser_manager import BrowserManager
+from binocore.browser import BrowserSession, configure as configure_browser
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.otc_app import open_otc_browser
 from apps.browser_io import eval_js
@@ -26,6 +26,11 @@ from settings.timing import (
 from classes.result_types import BrowserInitResult, OperationResult
 
 logger = init_logger(__name__)
+
+# Логгер семьи для браузерного слоя ядра: init_logger вешает хендлеры на ИМЕНОВАННЫЙ
+# логгер с propagate=False, иначе записи о закрытии сессии не дойдут ни до файлов
+# уровней, ни до темы ошибок.
+configure_browser(logger=logger)
 
 # Грабли 2026-08-02 (node-6, лёг BinoStoch): Playwright ≥1.5x перепроверяет host-requirements,
 # если маркеру <build>/DEPENDENCIES_VALIDATED больше 30 дней (kMaximumReValidationPeriod).
@@ -82,16 +87,16 @@ def setup_dialog_handler(page: Page):
     page.on('dialog', handle_dialog)
 
 
-def setup_popup_blocker(context: BrowserContext, manager: 'BrowserManager'):
+def setup_popup_blocker(context: BrowserContext, session: 'BrowserSession'):
     """Автоматическое закрытие неожиданных всплывающих окон (новых вкладок)"""
     async def handle_popup(page: Page):
-        # Если страница не зарегистрирована в manager.pages - это неожиданный popup.
+        # Если вкладки нет среди созданных init-логикой — это неожиданный popup.
         # Весь колбэк best-effort: event-хендлер НЕ должен бросать в диспетчер Playwright
         # (иначе «Task exception was never retrieved») — page.url/is_closed на гонке/
         # disposed-странице тоже могут кинуть, поэтому try охватывает всё тело.
         try:
             await asyncio.sleep(POPUP_SETTLE_DELAY)
-            if page not in manager.pages.values() and not page.is_closed():
+            if page not in session.expected_pages and not page.is_closed():
                 logger.debug(f"🚫 Закрытие popup окна: {page.url}")
                 await page.close()
         except (Exception,) as error:  # гонка: popup мог закрыться сам — не роняем event-колбэк
@@ -867,18 +872,22 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
         page = await context.new_page()
         await page.set_viewport_size({'width': win_x, 'height': win_y})
 
-        manager = BrowserManager(
-            browser=browser,
-            context=context,
-            pages={'main': page},  # первая страница всегда 'main'
-            playwright=pw
-        )
+        # Роли и порядок создания — раздельно: expected_pages отличает СВОИ вкладки от
+        # попапов (их гасит handle_popup выше), pages_by_role даёт доступ по имени из
+        # cookies.pages. Прежний BrowserManager держал ОДИН словарь имён и потому не мог
+        # ответить на вопрос «эта вкладка наша?» иначе как перебором его значений.
+        session = BrowserSession(pw=pw, browser=browser, context=context,
+                                 expected_pages=[page], pages_by_role={'main': page})
+        # Гашение локального релея — хуком сессии: раньше оно сидело ВНУТРИ close()
+        # BrowserManager, а ядро про classes/local_proxy не знает.
+        from classes.local_proxy import stop_local_proxy
+        session.add_cleanup(stop_local_proxy)
 
         # Подключаем автоматическое подавление всплывающих окон
         setup_dialog_handler(page)
-        setup_popup_blocker(context, manager)
+        setup_popup_blocker(context, session)
 
-        return BrowserInitResult(success=True, manager_or_error=manager)
+        return BrowserInitResult(success=True, session_or_error=session)
     except (Exception,) as error:
         # Подчищаем частично поднятое, чтобы не оставить осиротевший Firefox-процесс
         try:
@@ -891,13 +900,13 @@ async def init_browser(storage_state=None, use_proxy: bool = False) -> BrowserIn
                 await pw.stop()
         except (Exception,):
             pass
-        return BrowserInitResult(success=False, manager_or_error=f"Ошибка подключения браузера - {error}")
+        return BrowserInitResult(success=False, session_or_error=f"Ошибка подключения браузера - {error}")
 
 
-async def open_tv_browser(manager: BrowserManager, cookies_override=None):
+async def open_tv_browser(session: BrowserSession, cookies_override=None):
     """
     Загрузка браузера по cookies для TradingView
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :param cookies_override: свежие TV-куки из БД (Survive §4.3); None → import-снимок cookies
     :return: tuple (success, error_message)
     """
@@ -913,7 +922,7 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
         # транзиентный сбой до первого же ретрая и прятал его от этих счётчиков: на моргании
         # TV или блипе PgBouncer получался рестарт с полным переподъёмом браузера. Для OTC это
         # починено 12-09-2026 (apps/otc_app.py::init_otc), сюда правка не доехала — ревизия
-        # 17-09-2026, п.1.2. Закрытие менеджера и запись ошибки в лог делает init_load.
+        # 17-09-2026, п.1.2. Закрытие сессии и запись ошибки в лог делает init_load.
         return OperationResult(success=False, error='Не удалось получить страницы браузера из БД')
 
     for idx, page_data in enumerate(list_screen):
@@ -921,22 +930,22 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
 
         if idx == 0:
             # Первая страница — уже открытая, она же 'main'. Ключ 'main' ЖЁСТКО зашит по всей
-            # программе (apps/app.py, otc_app, _ensure_otc_alive — везде manager.pages['main']),
+            # программе (apps/app.py, otc_app, _ensure_otc_alive — везде session.page('main')),
             # поэтому имя из БД для неё нормализуем, а не регистрируем вторым ключом: алиас дал бы
             # две записи на одну страницу, то есть двойной обход в pages.items() и двойное закрытие.
-            # Ниже идёт безусловное manager.pages[page_name] — без этой нормализации переименование
+            # Ниже идёт безусловное session.page(page_name) — без этой нормализации переименование
             # строки в cookies.pages давало бы KeyError на старте (ветка idx>0 свою страницу
             # регистрирует, а эта полагалась на то, что в БД написано ровно 'main').
             if page_name != 'main':
                 logger.warning("cookies.pages: первая страница (order_idx=0) названа %r, а не "
                                "'main' — использую 'main' (этот ключ зашит в коде)", page_name)
                 page_name = 'main'
-            page = manager.pages['main']
+            page = session.page('main')
             try:
                 await page.goto(page_data['url'], wait_until='domcontentloaded', timeout=TIMEOUT_EXTRA_LONG)
 
                 # Добавляем cookies (свежие из БД — Survive §4.3)
-                await add_cookies_to_context(manager.context, tv_cookies)
+                await add_cookies_to_context(session.context, tv_cookies)
                 # NB: проактивный TTL (§4.4a) для TV здесь НЕ делаем — у TV-кук этого деплоя
                 # `expires` уже в прошлом, а сессия живёт (TV держит её server-side/sliding),
                 # т.е. срок в куке не отражает жизнь сессии (тот же капкан, что у Privy) →
@@ -957,16 +966,19 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
         else:
             # Открываем новую вкладку через JavaScript
             try:
-                current_page = manager.pages['main']
+                current_page = session.page('main')
 
                 # Ожидаем новую страницу и открываем её одновременно
-                async with manager.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
+                async with session.context.expect_page(timeout=TIMEOUT_EXTRA_LONG) as new_page_info:
                     # URL передаём аргументом, а не в строку JS — кавычка в URL не сломает evaluate.
                     # Верхняя граница по времени — в eval_js (browser_io): у evaluate её нет.
                     await eval_js(current_page, "u => window.open(u)", page_data['url'])
 
                 page = await new_page_info.value
-                manager.pages[page_name] = page  # СРАЗУ регистрируем, чтобы handle_popup не закрыл
+                # Регистрируем СРАЗУ, до первого await: иначе handle_popup примет свою же вкладку
+                # за рекламный попап и закроет её.
+                session.pages_by_role[page_name] = page
+                session.expected_pages.append(page)
                 await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_MEDIUM)
                 await page.set_viewport_size({'width': win_x, 'height': win_y})
                 setup_dialog_handler(page)
@@ -975,7 +987,7 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
                     success=False,
                     error=f'Ошибка загрузки страницы {page_data["url"]} - {error}')
 
-        page = manager.pages[page_name]
+        page = session.page(page_name)
         await page.bring_to_front()
 
         # Закрытие всплывающих DOM-окон
@@ -1000,7 +1012,7 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
     # (не только на main, откуда скрин): TV может синхронизировать состояние панели между
     # вкладками сессии — «разбалансировка» (свёрнута на main, открыта на price) рискует тем,
     # что price переоткроет панель и она вернётся на main. _collapse_right_panel тоггл-safe.
-    for page_name, page in manager.pages.items():
+    for page_name, page in session.pages_by_role.items():
         await page.bring_to_front()
         await close_dom_popups(page)
         await _collapse_right_panel(page)
@@ -1008,7 +1020,7 @@ async def open_tv_browser(manager: BrowserManager, cookies_override=None):
     # info, НЕ report: report уходит в служебную TG-тему, а это рутинная строка успеха —
     # она повторяется на каждом подъёме браузера (старт, fall, ротация прокси) и в канале
     # только зашумляет настоящие события. В файле info.log остаётся.
-    logger.info("✅ open_tv_browser завершён, страницы: %s", list(manager.pages.keys()))
+    logger.info("✅ open_tv_browser завершён, страницы: %s", list(session.pages_by_role))
     return OperationResult(success=True)
 
 
@@ -1084,10 +1096,10 @@ async def _click_exchange_pair(page, pair: str, exchange: str) -> bool:
     return False
 
 
-async def init_valute_browser(manager: BrowserManager, valute: str, exchange: str = 'OANDA') -> bool:
+async def init_valute_browser(session: BrowserSession, valute: str, exchange: str = 'OANDA') -> bool:
     """
     Настройка валюты в окне браузера (TradingView).
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :param valute: название валютной пары (например 'EURUSD')
     :param exchange: TV-код биржи котировок из БД (assets.binary_assets.exchange), напр. 'OANDA'
     :return: True — валюта выставлена на всех страницах; False — не вышло, вызывающий берёт
@@ -1098,7 +1110,7 @@ async def init_valute_browser(manager: BrowserManager, valute: str, exchange: st
     """
     pair = valute.replace('/', '').replace(f'{exchange}:', '').upper()
     try:
-        for page_name, page in manager.pages.items():
+        for page_name, page in session.pages_by_role.items():
             logger.info(f"🔄 Переключение валюты на странице: {page_name}")
             await page.bring_to_front()
             await page.wait_for_load_state('domcontentloaded', timeout=TIMEOUT_MEDIUM)
@@ -1138,13 +1150,13 @@ async def init_valute_browser(manager: BrowserManager, valute: str, exchange: st
     return True
 
 
-async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
+async def init_load(use_proxy: bool = False) -> BrowserSession | bool:
     """
     Запуск загрузки и настройки браузера. Survive §4.3: куки перечитываются из БД на
     КАЖДОМ init — пересоздание браузера после отвала cookies подхватывает свежий refresh
     без рестарта процесса. CookiesExpired пробрасывается наружу (после cleanup) →
     main.py::_init_with_retry (backoff + повтор).
-    :return: BrowserManager либо False
+    :return: BrowserSession либо False
     """
     tv_override = None       # свежие TV-куки из БД (только в FIN-ветке; иначе не используется)
     storage_state = None     # свежий OTC storage_state из БД (только в OTC-ветке)
@@ -1161,18 +1173,18 @@ async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
     # use_proxy — только OTC-фолбэк (FIN/TradingView — другой домен, не задет инцидентом)
     result = await init_browser(storage_state=storage_state, use_proxy=(use_proxy and not binary))
     if not result.success:
-        logger.error(result.manager_or_error)
+        logger.error(result.session_or_error)
         return False
 
-    manager = result.manager
+    session = result.session
 
     try:
         if binary:
-            browser_result = await open_tv_browser(manager, cookies_override=tv_override)
+            browser_result = await open_tv_browser(session, cookies_override=tv_override)
         else:
-            browser_result = await open_otc_browser(manager)
+            browser_result = await open_otc_browser(session)
     except (CookiesExpired, FeedOutage, SetupError):
-        await manager.close()  # cleanup перед пробросом — не оставить осиротевший Firefox
+        await session.close()  # cleanup перед пробросом — не оставить осиротевший Firefox
         raise
 
     if not browser_result.success:
@@ -1183,7 +1195,7 @@ async def init_load(use_proxy: bool = False) -> BrowserManager | bool:
         # Закрываем браузер, как и в ветке исключений выше: без этого Firefox остаётся
         # осиротевшим и держит lock в общем кэше Playwright. Для OTC это ШТАТНЫЙ путь (init_otc
         # с 12-09-2026 отдаёт неуспех, а не выходит через close_program), для FIN — редкий.
-        await manager.close()
+        await session.close()
         return False
 
-    return manager
+    return session

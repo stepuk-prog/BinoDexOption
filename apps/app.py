@@ -33,7 +33,7 @@ from settings.image_paths import PLUS_SERIES_IMAGE, PLUS_IMAGE_DIR
 from settings.screenshot_set import load_rgba
 
 if TYPE_CHECKING:
-    from classes.browser_manager import BrowserManager
+    from binocore.browser import BrowserSession
 
 logger = init_logger(__name__)
 
@@ -264,16 +264,16 @@ async def mouse_move(page: Page, element_xpath: str, move: int) -> bool:
         return False
 
 
-async def get_price(manager: "BrowserManager") -> tuple[bool, float | str]:
+async def get_price(session: "BrowserSession") -> tuple[bool, float | str]:
     """
     Получение цены
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :return: (success, price или error_message)
     """
-    result = await find_price(manager)
+    result = await find_price(session)
     if result[0]:
         strprice = result[1]
-        page = manager.pages['price']
+        page = session.page('price')
         if not await mouse_move(page, move_field, 1):
             return False, 'Ошибка имитации движения мыши'
         try:
@@ -285,14 +285,14 @@ async def get_price(manager: "BrowserManager") -> tuple[bool, float | str]:
         return False, result[1]
 
 
-async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
+async def find_price(session: "BrowserSession") -> tuple[bool, str]:
     """
     Поиск цены в браузере
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :return: (success, price_text или error_message)
     """
     try:
-        page = manager.pages['price']
+        page = session.page('price')
         await page.bring_to_front()
 
         # Закрытие popup, если есть
@@ -320,16 +320,16 @@ async def find_price(manager: "BrowserManager") -> tuple[bool, str]:
 SCREENSHOT_TOTAL_TIMEOUT = 120   # сек
 
 
-async def _screenshot_steps(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
+async def _screenshot_steps(session: "BrowserSession", take_shot: bool, qr) -> tuple[bool, float | str]:
     """
     Шаги снятия кадра. Наружу — через screenshot() с общим потолком.
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :param take_shot: False — только цена без скриншота; True — снимаем скрин и кладём QR.
     :param qr: кортеж (qr110, qr85) — QR-оверлеи
     :return: (success, price или error_message)
     """
     try:
-        price_result = await get_price(manager)
+        price_result = await get_price(session)
         if not price_result[0]:
             return False, price_result[1]
 
@@ -337,7 +337,7 @@ async def _screenshot_steps(manager: "BrowserManager", take_shot: bool, qr) -> t
             return True, price_result[1]
 
         # Грузится только окно main — все скрины снимаются с него.
-        page = manager.pages['main']
+        page = session.page('main')
         await page.bring_to_front()
 
         # Закрытие popup, если есть
@@ -378,13 +378,13 @@ async def _screenshot_steps(manager: "BrowserManager", take_shot: bool, qr) -> t
         return False, error_text
 
 
-async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bool, float | str]:
+async def screenshot(session: "BrowserSession", take_shot: bool, qr) -> tuple[bool, float | str]:
     """Снятие скриншота с окна main под общим потолком SCREENSHOT_TOTAL_TIMEOUT.
 
     Пропустить кадр дешевле, чем держать цикл минутами на залипшем рендерере: прогноз с
     опозданием всё равно уже не прогноз, а вызывающий (main_app) сам решит судьбу итерации."""
     try:
-        return await asyncio.wait_for(_screenshot_steps(manager, take_shot, qr),
+        return await asyncio.wait_for(_screenshot_steps(session, take_shot, qr),
                                       timeout=SCREENSHOT_TOTAL_TIMEOUT)
     except (asyncio.TimeoutError, TimeoutError):
         error_text = (f'Кадр не уложился в {SCREENSHOT_TOTAL_TIMEOUT}с — '
@@ -393,10 +393,10 @@ async def screenshot(manager: "BrowserManager", take_shot: bool, qr) -> tuple[bo
         return False, error_text
 
 
-async def find_point(manager: "BrowserManager", buy: bool) -> tuple[bool, str]:
+async def find_point(session: "BrowserSession", buy: bool) -> tuple[bool, str]:
     """
     Поиск точки входа
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :param buy: направление сигнала (True — покупка). ФЛАГОМ, а не текстом resume: источник
         истины один и тот же по всему коду, и правка текста (редактура, перевод) не развернёт
         ожидание цвета молча. Реестр BinoCore: direction-from-flag.
@@ -405,7 +405,7 @@ async def find_point(manager: "BrowserManager", buy: bool) -> tuple[bool, str]:
     color = bull_color if buy else bear_color
 
     while_time = (datetime.now() + timedelta(minutes=find_time))
-    page = manager.pages['price']
+    page = session.page('price')
     await page.bring_to_front()
     price_element = page.locator(f"xpath={price_field}").first  # локатор постоянен — вне цикла
 
@@ -442,11 +442,11 @@ FIN_PAIR_ATTEMPTS = 3
 FIN_PAIR_FAIL_PAUSE = 5   # сек
 
 
-async def find_option_data(manager: "BrowserManager", log_data: Option, used_val: list,
+async def find_option_data(session: "BrowserSession", log_data: Option, used_val: list,
                            stop_event=None) -> bool:
     """
     Поиск данных для опциона
-    :param manager: менеджер браузера
+    :param session: сессия браузера
     :param used_val: список последних использованных валютных пар
     :param log_data: класс с данными
     :param stop_event: событие остановки — чтобы пауза между парами не держала SIGTERM
@@ -457,7 +457,7 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     """
     active_binary_list = await database.option_data_tv(tf=log_data.find_timeframe, exclude_ids=used_val)
     if active_binary_list is False:  # сбой пула (контракт execute_query) — это отвал БД, НЕ «нет пар»
-        await close_program(manager=manager, status=1,
+        await close_program(session=session, status=1,
                             text='Сбой БД при чтении пар (option_data_tv) — перезапуск')
         return False  # close_program вызывает sys.exit, но на всякий случай
     if not active_binary_list and used_val:
@@ -470,7 +470,7 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
         active_binary_list = await database.option_data_tv(
             tf=log_data.find_timeframe, exclude_ids=[]) or []
     if not active_binary_list:  # пустой список — реально нет валютных пар для опциона
-        await close_program(manager=manager, status=1, text='Не найдено валютных пар для опциона')
+        await close_program(session=session, status=1, text='Не найдено валютных пар для опциона')
         return False  # close_program вызывает sys.exit, но на всякий случай
 
     # Кандидаты: те же топ-3 по рангу, что и раньше, но теперь их МОЖНО перебрать. Пара,
@@ -481,7 +481,7 @@ async def find_option_data(manager: "BrowserManager", log_data: Option, used_val
     random.shuffle(candidates)
     for attempt, pair_data in enumerate(candidates, 1):
         log_data.add_option_data(pair_data)
-        if await init_valute_browser(manager, log_data.name.replace('/', ''), log_data.exchange):
+        if await init_valute_browser(session, log_data.name.replace('/', ''), log_data.exchange):
             return True
         if attempt < len(candidates):
             # Тормоз перед следующей парой — на случай, когда браузер МЁРТВ: Playwright тогда

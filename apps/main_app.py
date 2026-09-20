@@ -15,7 +15,7 @@ from settings.timing import BETWEEN_MESSAGES_DELAY, POST_SCREENSHOT_DELAY, TG_SE
 from settings.image_paths import DOGON_IMAGES, NEW_FORECAST_IMAGES
 
 if TYPE_CHECKING:
-    from classes.browser_manager import BrowserManager
+    from binocore.browser import BrowserSession
 
 used_val = [0]
 prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
@@ -70,10 +70,10 @@ async def _try_send(photo, caption, mes_type: str, timeout: float = TG_SEND_TIME
     return ok, err
 
 
-async def _repair_otc_ui(manager: "BrowserManager", page) -> None:
+async def _repair_otc_ui(session: "BrowserSession", page) -> None:
     """Собственно ремонт UI в течение опциона: reload → вернуть ТУ ЖЕ пару → вернуть оформление.
     Вынесено из _ensure_otc_alive, чтобы накрыть всё это ОДНИМ потолком по времени (см. там)."""
-    if not await reload_otc_page(manager=manager):
+    if not await reload_otc_page(session=session):
         logger.warning('OTC: reload в течение опциона не поднял UI — результат может не сняться')
         return
     # reload сбрасывает выбранную пару → возвращаем ту же. option_data.name = '<pair> OTC',
@@ -84,10 +84,10 @@ async def _repair_otc_ui(manager: "BrowserManager", page) -> None:
         return
     # Аварийный reload сбрасывает и оформление графика (масштабы/индикаторы) — возвращаем, иначе
     # остаток опциона снимался бы чужим таймфреймом и без индикаторов.
-    await ensure_chart_setup(manager)
+    await ensure_chart_setup(session)
 
 
-async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
+async def _ensure_otc_alive(session: "BrowserSession", stop_event):
     """OTC: перед фиксацией результата СНАЧАЛА дёшево проверить, жив ли UI — видна ли кнопка
     настроек аккаунта (точный маркер «не сплеш»). Видна → ничего не делаем, БЕЗ reload. И только
     если пропала (binodex сам свалился на сплеш в течение опциона, не наш reload) — поднять reload
@@ -100,13 +100,13 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
     просто неверной. Лучше признать опцион несостоявшимся, чем опубликовать чужую цену."""
     if binary or stop_event.is_set():
         return
-    page = manager.pages['main']
+    page = session.page('main')
     if await ui_loaded(page, UI_DEAD_CONFIRM):   # кнопка настроек на месте → UI жив, reload не нужен
         return
     logger.warning('OTC: кнопка настроек пропала в течение опциона (сплеш) — reload+переселект, '
                    'не прерывая опцион')  # рутина → файл, не канал
     try:
-        await asyncio.wait_for(_repair_otc_ui(manager, page), timeout=ALIVE_REPAIR_BUDGET)
+        await asyncio.wait_for(_repair_otc_ui(session, page), timeout=ALIVE_REPAIR_BUDGET)
     except asyncio.TimeoutError:
         logger.warning(f'OTC: ремонт UI не уложился в {ALIVE_REPAIR_BUDGET}с — прекращаю, '
                        f'итог снимется как есть (цена после экспирации была бы неверной)')
@@ -116,7 +116,7 @@ async def _ensure_otc_alive(manager: "BrowserManager", stop_event):
         await apply_offzone(page)
 
 
-async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
+async def _wait_result(session: "BrowserSession", stop_event, seconds: float):
     """Дождаться экспирации перед фиксацией результата, но за HEALTH_LEAD сек до конца проверить
     живость OTC-UI и при сплеше восстановить (reload+переселект). Лид прячется в хвосте ожидания —
     в норме (UI жив, проверка ~мгновенна) задержки нет; при сплеше результат снимется с опозданием,
@@ -129,25 +129,25 @@ async def _wait_result(manager: "BrowserManager", stop_event, seconds: float):
         # итоговый кадр снимался бы с ценой чужого момента — ровно то, от чего страхует бюджет
         # кадра. Поэтому досыпаем только ОСТАТОК лида (в норме проверка мгновенна и остаток полный).
         started = time.monotonic()
-        await _ensure_otc_alive(manager, stop_event)
+        await _ensure_otc_alive(session, stop_event)
         await sleep_or_stop(stop_event, max(0.0, lead - (time.monotonic() - started)))
 
 
-async def _capture(manager: "BrowserManager", qr, *, seek_point: bool):
+async def _capture(session: "BrowserSession", qr, *, seek_point: bool):
     """Снять скрин текущего окна (единый код вместо 4 дублей if binary/else).
     FIN — окно price/main + опциональный поиск точки входа (seek_point); OTC — окно main.
     :return: кортеж (ok, price|error) от screenshot/screenshot_otc."""
     if binary:
         if seek_point:
-            fp_ok, fp_err = await find_point(manager, option_data.buy)
+            fp_ok, fp_err = await find_point(session, option_data.buy)
             if not fp_ok:
                 logger.warning("find_point не нашёл точку входа (%s) — продолжаю по текущей цене", fp_err)
-        return await screenshot(manager=manager, take_shot=True, qr=qr)
-    page = manager.pages['main']
+        return await screenshot(session=session, take_shot=True, qr=qr)
+    page = session.page('main')
     return await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
 
-async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
+async def _acquire_otc_pair(session: "BrowserSession", stop_event) -> str:
     """Подобрать OTC-пару с устойчивостью к тест-режиму binodex (периодически пар нет вовсе).
     Логика — см. константы NO_PAIRS_* выше. Развилки исходов:
       'ok'            — пара выбрана, можно работать дальше;
@@ -185,9 +185,9 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
             return 'stopped'
         if budget_spent():
             return 'timeout'
-        if not await reload_otc_page(manager=manager):
+        if not await reload_otc_page(session=session):
             return 'reload_failed'   # сессия/сплеш — не «нет пар», лечит otc_session_dead
-        if await parce_otc(manager=manager, log_data=option_data, valute=used_val,
+        if await parce_otc(session=session, log_data=option_data, valute=used_val,
                            deadline=deadline):
             return 'ok'
         # Пауза перед следующим кругом — тоже под бюджетом. Иначе она спала полные
@@ -207,7 +207,7 @@ async def _acquire_otc_pair(manager: "BrowserManager", stop_event) -> str:
     return 'no_pairs'
 
 
-async def main(manager: "BrowserManager", qr, stop_event):
+async def main(session: "BrowserSession", qr, stop_event):
     """Тонкая обёртка над _run_option: ловит НЕПРЕДВИДЕННОЕ исключение середины опциона (после
     первого сообщения, до итогового) и шлёт баг-картинку в канал (channel_mess по option_data.posted),
     а не молчаливый краш/рестарт без пояснения подписчикам. Явные сбои покрыты в _run_option."""
@@ -216,24 +216,24 @@ async def main(manager: "BrowserManager", qr, stop_event):
     # и два источника одной правды разъехались бы при первой же правке.
     option_data.posted = False
     try:
-        return await _run_option(manager, qr, stop_event)
+        return await _run_option(session, qr, stop_event)
     except (Exception,) as error:
         logger.error(f'Непредвиденная ошибка в опционе: {error}')
         return await exit_main(channel_mess=option_data.posted, result=False,
                                bug_text=f'Непредвиденная ошибка - {error}', check_cookies=count_price)
 
 
-async def _run_option(manager: "BrowserManager", qr, stop_event):
+async def _run_option(session: "BrowserSession", qr, stop_event):
     global prev_price, count_price, _init_fails   # used_val только мутируем (append/del) — global не нужен
     prev_price = 0.0  # цена предыдущего цикла (для определения отвала cookies)
     count_price = 0  # счетчик количества одинаковой цены подряд
 
     logger.info("🔄 Начало main(), binary=%s", binary)
-    logger.info("📑 Доступные страницы: %s", list(manager.pages.keys()))
+    logger.info("📑 Доступные страницы: %s", list(session.pages_by_role))
 
     if binary:
         logger.info("🔍 Вызов find_option_data...")
-        if not await find_option_data(manager=manager, log_data=option_data,
+        if not await find_option_data(session=session, log_data=option_data,
                                       used_val=used_val, stop_event=stop_event):
             # Ни одна пара не завелась. Один такой заход — не повод рестартить: выдача поиска
             # TV меняется, и пропустить опцион дешевле полного переподъёма браузера. А вот
@@ -252,14 +252,14 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
         _init_fails = 0
         logger.info("✅ find_option_data завершён")
         logger.info("📸 Вызов screenshot(screen=None)...")
-        screen_shot = await screenshot(manager=manager, take_shot=False, qr=qr)
+        screen_shot = await screenshot(session=session, take_shot=False, qr=qr)
         logger.info("✅ screenshot завершён: %s", screen_shot[0])
     else:
         # Перед каждым опционом перезагружаем страницу binodex и подбираем пару. binodex
         # периодически (тест-режим) висит без единой пары — это НЕ краш: ждём, а не рестартим
         # (единый принцип «сайт не даёт работать → ждём»). Все исходы-«сайт не готов» уходят с
         # fall=False → главный цикл сам переждёт (браузер-фри при мёртвом фиде / повтор при живом).
-        outcome = await _acquire_otc_pair(manager, stop_event)
+        outcome = await _acquire_otc_pair(session, stop_event)
         if outcome == 'stopped':  # SIGTERM во время ожидания пар — выходим без рестарта
             return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
         if outcome == 'reload_failed':  # новая версия/сплеш/редирект → otc_session_dead пересоздаст браузер
@@ -278,8 +278,8 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
         # Оформление графика (масштабы свеча/график + индикаторы) binodex периодически сбрасывает
         # сам — проверяем и возвращаем ПЕРЕД каждым опционом, до первого кадра. В норме read-only и
         # мгновенно; UI трогаем только при реальном сбросе. См. otc_app.ensure_chart_setup.
-        await ensure_chart_setup(manager)
-        page = manager.pages['main']
+        await ensure_chart_setup(session)
+        page = session.page('main')
         screen_shot = await screenshot_otc(page=page, asset=option_data.name, qr=qr)
 
     if not screen_shot[0]:
@@ -303,7 +303,7 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
 
     await asyncio.sleep(BETWEEN_MESSAGES_DELAY)
 
-    screen_shot = await _capture(manager, qr, seek_point=True)
+    screen_shot = await _capture(session, qr, seek_point=True)
 
     if not screen_shot[0]:
         return await exit_main(channel_mess=True, result=False,
@@ -329,11 +329,11 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
     if not ok:
         return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-    await _wait_result(manager, stop_event, option_data.option_time)
+    await _wait_result(session, stop_event, option_data.option_time)
     if stop_event.is_set():  # SIGTERM во время ожидания экспирации — выходим без постов
         return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
-    screen_shot = await _capture(manager, qr, seek_point=False)
+    screen_shot = await _capture(session, qr, seek_point=False)
 
     if screen_shot[0]:
         option_data.itg_price = round(screen_shot[1], option_data.round)
@@ -381,7 +381,7 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
 
         await asyncio.sleep(POST_SCREENSHOT_DELAY)
 
-        screen_shot = await _capture(manager, qr, seek_point=True)
+        screen_shot = await _capture(session, qr, seek_point=True)
 
         if not screen_shot[0]:
             return await exit_main(channel_mess=True, result=False,
@@ -400,11 +400,11 @@ async def _run_option(manager: "BrowserManager", qr, stop_event):
         if not ok:
             return await exit_main(channel_mess=True, result=False, bug_text=err, check_cookies=count_price)
 
-        await _wait_result(manager, stop_event, option_data.dgn_time)
+        await _wait_result(session, stop_event, option_data.dgn_time)
         if stop_event.is_set():  # SIGTERM во время ожидания итога догона — выходим без постов
             return await exit_main(channel_mess=False, result=False, fall=False, check_cookies=count_price)
 
-        screen_shot = await _capture(manager, qr, seek_point=False)
+        screen_shot = await _capture(session, qr, seek_point=False)
 
         if not screen_shot[0]:
             return await exit_main(channel_mess=True, result=False,

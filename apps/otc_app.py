@@ -51,7 +51,7 @@ from settings.browser_config import (otc_trade_url, otc_select_pair, otc_categor
                                      otc_theme_open, otc_theme_toggle, otc_wrap_bg, otc_session_keys)
 
 if TYPE_CHECKING:
-    from classes.browser_manager import BrowserManager
+    from binocore.browser import BrowserSession
 
 # WS котировок binodex. TLD-агностично: домен переехал api-coins.binodex.io → .app (грабли
 # 2026-07-20, всплыло при переезде на Chromium — реальный WS теперь wss://api-coins.binodex.app/market/;
@@ -409,7 +409,7 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
         await apply_offzone(page)   # off-zone восстанавливается на ЛЮБОМ исходе (успех/неудача/ошибка)
 
 
-async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
+async def parce_otc(log_data: Option, session: "BrowserSession", valute: list,
                     deadline: float | None = None) -> bool:
     """Подобрать активную OTC-пару из БД и выбрать её на binodex.
     Сначала берём активные пары, исключая последние использованные (valute) — чтобы актив не
@@ -422,7 +422,7 @@ async def parce_otc(log_data: Option, manager: "BrowserManager", valute: list,
     Перебор идёт по ВСЕМУ списку активных пар, а одна неудачная пара стоит до ~70с (открытие
     модалки, ожидание пункта, ожидание WS-котировки) — на двух десятках пар это десятки минут
     при формально живом юните. Бюджет вышел — отдаём False, вызывающий переждёт штатно."""
-    page = manager.pages['main']
+    page = session.page('main')
     # Один запрос вместо двух: тянем ПОЛНЫЙ список по ТФ, а недавние пары исключаем в памяти —
     # порядок вьюхи срез сохраняет, а прежний второй SELECT (на «пары исчерпаны исключением»)
     # был ровно тем же запросом без фильтра.
@@ -1127,7 +1127,7 @@ async def _scale_drifted(page: Page, cap: float | None = None) -> bool:
 SETUP_TOTAL_BUDGET = 25.0   # сек
 
 
-async def ensure_chart_setup(manager: "BrowserManager") -> None:
+async def ensure_chart_setup(session: "BrowserSession") -> None:
     """Проверить оформление графика и вернуть сбитое: масштабы (свеча 30S / график H1) + индикаторы.
 
     binodex сбрасывает их не только при новом контексте браузера, но и сам по себе в течение суток —
@@ -1149,7 +1149,7 @@ async def ensure_chart_setup(manager: "BrowserManager") -> None:
     проверяется между ними: внешних гейтов не хватало — на залипшем UI сама пара масштабов стоит
     до 30с, а проход по трём индикаторам до ~2 мин, то есть первый же шаг выбирал больше всего
     бюджета и ограничивать было уже нечего (ревизия 12-09-2026)."""
-    page = manager.pages.get('main')
+    page = session.pages_by_role.get('main')
     if page is None:
         return
     deadline = time.monotonic() + SETUP_TOTAL_BUDGET
@@ -1572,7 +1572,7 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
     return False, f'Ошибка записи скриншота OTC - {last_error}'
 
 
-async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
+async def open_otc_browser(session: "BrowserSession") -> OperationResult:
     """Открытие binodex для OTC.
 
     `error` заполняем ОБЯЗАТЕЛЬНО: init_load логирует его через logger.error, то есть текст
@@ -1580,7 +1580,7 @@ async def open_otc_browser(manager: "BrowserManager") -> OperationResult:
     и до 12-09-2026 оно никому не мешало только потому, что ветка была недостижима (init_otc
     выходил через close_program). Теперь это штатная реакция на транзиентный сбой подъёма,
     поэтому у алерта должен быть смысл. Конкретную причину init_otc уже положил в warning.log."""
-    if await init_otc(manager=manager):
+    if await init_otc(session=session):
         return OperationResult(success=True)
     return OperationResult(success=False,
                            error='OTC: binodex не поднялся (причина — warning.log выше) — '
@@ -1662,7 +1662,7 @@ async def _verify_otc_ready(page: Page) -> None:
         logger.info("✅ binodex: WS котировок подключён")
 
 
-async def _save_session_snapshot(manager: "BrowserManager") -> None:
+async def _save_session_snapshot(session: "BrowserSession") -> None:
     """Положить ТЕКУЩИЙ storage_state в БД. Зовётся после каждой ротации сессии binodex
     (подписка `watch_session_refresh` в init_otc).
 
@@ -1673,7 +1673,7 @@ async def _save_session_snapshot(manager: "BrowserManager") -> None:
 
     Гард на признак сессии тот же, что у релогина: снимок без ключа в БД не пишем, прежние куки
     целее."""
-    state = await manager.context.storage_state()
+    state = await session.context.storage_state()
     if not binodex_has_session(state, otc_session_keys):
         logger.warning('OTC: в снимке после ротации нет признака сессии — в БД НЕ пишу')
         return
@@ -1683,7 +1683,7 @@ async def _save_session_snapshot(manager: "BrowserManager") -> None:
     logger.info('OTC: снимок сессии обновлён в БД после ротации токена binodex')
 
 
-async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
+async def _relogin_inline(session: "BrowserSession", page: Page) -> bool:
     """Inline-релогин binodex В ТЕКУЩЕМ браузере (без подпроцесса/холодного браузера): почта+app-pass
     и селекторы из БД → otc_login.otc_inline_login над живым page. Успех → свежий storage_state в БД
     (переживёт рестарт, чтобы не логиниться OTP каждый старт). True/False (любой сбой — лог + False)."""
@@ -1697,7 +1697,7 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
         return False
     sel = {r['par_name']: r['par_value'] for r in rows}
     try:
-        if not await otc_inline_login(page, manager.context, creds['mail'], creds['mail_app_pass'], sel):
+        if not await otc_inline_login(page, session.context, creds['mail'], creds['mail_app_pass'], sel):
             return False
     except LoginRateLimited as limit:
         # Лимит запросов кода у binodex: повторять вход нельзя — КАЖДАЯ попытка его продлевает
@@ -1719,7 +1719,7 @@ async def _relogin_inline(manager: "BrowserManager", page: Page) -> bool:
     # ляжет storage_state с включённой подложкой, и каждый холодный старт будет выключать её заново.
     await apply_chart_background(page)
     try:
-        state = await manager.context.storage_state()
+        state = await session.context.storage_state()
         if not binodex_has_session(state, otc_session_keys):
             # Снимок БЕЗ признака сессии в БД не пишем: 18-09-2026 такой записался (вход прошёл,
             # но binodex погасил сессию сразу после него) и затёр рабочие куки служебными ключами.
@@ -1747,12 +1747,12 @@ async def _goto_otc(page: Page, url: str, timeout: int = TIMEOUT_LONG) -> None:
     await goto_retry(page, url, timeout=timeout, label='OTC')
 
 
-async def init_otc(manager: "BrowserManager") -> bool:
+async def init_otc(session: "BrowserSession") -> bool:
     """Загрузка binodex.app/trade: WS-перехват → страница из cookies.pages → goto →
     _verify_otc_ready (авторизация + UI; WS мягко). При «нужен релогин» (CookiesExpired) — INLINE-
     логин в ЭТОМ ЖЕ браузере (apps/otc_login), без подпроцесса/двойной загрузки, и перепроверка. Не
     вышло → CookiesExpired наверх (main: счётчик RECOVER_ATTEMPTS → плановый выход)."""
-    page = manager.pages['main']
+    page = session.page('main')
     get_price_tracker().reset()   # новая сессия: цены/история/liveness прошлой — невалидны
     _label_cutout_cache.clear()    # новый браузер/страница → старые вырезки ярлыков невалидны
     # И область поиска чипов легенды: новая версия фронта могла перенести легенду,
@@ -1762,7 +1762,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
     setup_websocket_tracker(page)  # подписка ДО навигации — поймать поток с самого старта
     # Ротация сессии: подписываемся ДО навигации по той же причине — первый refresh фронт может
     # сделать сразу после загрузки. Подписка идемпотентна (init зовут на каждом подъёме).
-    binodex_watch_refresh(page, lambda: _save_session_snapshot(manager), logger=logger)
+    binodex_watch_refresh(page, lambda: _save_session_snapshot(session), logger=logger)
 
     # URL — из binodex_settings.trade_url (browser_config.otc_trade_url) с дефолтом на уровне
     # чтения настроек, поэтому пустым быть не может: прежняя async-обёртка _otc_page_url() и
@@ -1793,7 +1793,7 @@ async def init_otc(manager: "BrowserManager") -> bool:
                 if relogged:
                     raise
                 logger.warning(f'OTC: {err} → inline-релогин в текущем браузере')
-                if not await _relogin_inline(manager, page):
+                if not await _relogin_inline(session, page):
                     raise  # inline не удался → наверх (счётчик RECOVER_ATTEMPTS → выход)
                 relogged = True
                 await _goto_otc(page, url)
@@ -1830,7 +1830,7 @@ async def _reload_otc_once(page: Page) -> bool:
     return True
 
 
-async def reload_otc_page(manager: "BrowserManager") -> bool:
+async def reload_otc_page(session: "BrowserSession") -> bool:
     """Перезагрузка binodex перед каждым новым опционом (вызов из main_app). binodex
     периодически выкатывает новую версию фронта и показывает баннер «Доступна новая версия.
     Обновите страницу», зависая на сплеше при ЖИВЫХ URL (/trade держится), UI и WS — отвал-кук-
@@ -1844,7 +1844,7 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
     False — иначе бот зря уходит в пересоздание браузера (ложный «отвал cookies») / «нет пар».
     :return: True — UI снова готов к скрину; False — не поднялся после всех ретраев (вызывающий
     уйдёт в exit_main → main-цикл по otc_session_dead пересоздаст браузер)."""
-    page = manager.pages.get('main')
+    page = session.pages_by_role.get('main')
     if page is None:
         return False
     for attempt in range(1, RELOAD_RETRIES + 1):
@@ -1867,7 +1867,7 @@ async def reload_otc_page(manager: "BrowserManager") -> bool:
 OTC_WS_SILENCE_LIMIT = 30  # сек без тика при закрытом WS = мёртвый фид (внутренний тайминг)
 
 
-async def otc_session_dead(manager: "BrowserManager") -> tuple[bool, str]:
+async def otc_session_dead(session: "BrowserSession") -> tuple[bool, str]:
     """Рантайм-детект отвала OTC-сессии (§4.4). Три сигнала:
       (a) редирект с /trade — Privy storage_state протух (основной, URL-детект);
       (b) торговый UI пропал — нет кнопки настроек аккаунта при живом URL/WS (Privy-токен
@@ -1876,7 +1876,7 @@ async def otc_session_dead(manager: "BrowserManager") -> tuple[bool, str]:
       (c) WS-фид котировок мёртв — токен WS мог протухнуть без редиректа страницы
           (дополняет (a); точнее и раньше, чем ждать сбоя данных).
     Возвращает (dead, reason) — reason для лога вызывающим."""
-    page = manager.pages.get('main')
+    page = session.pages_by_role.get('main')
     if page is not None:
         try:
             if not on_trade(page.url):
