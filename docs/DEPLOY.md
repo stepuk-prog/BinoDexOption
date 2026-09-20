@@ -160,8 +160,12 @@ User=vova
 WorkingDirectory=/home/vova/Binodex/BinoOptions
 Environment="TIMEFRAME=1m" "BINARY=true" "TEST=false"
 ExecStart=/home/vova/Binodex/BinoOptions/venv/bin/python3.11 main.py
-Restart=on-failure
+# Restart=no — ОБЯЗАТЕЛЬНО под диспетчером: иначе systemd поднимет процесс раньше, чем GD
+# прочитает код выхода, и весь контракт кодов (10/11/12/13/20 → релокация, ALARM, рестарт на
+# месте) перестаёт работать. Во всех юнитах в systemd/ стоит именно no; правит это DeployManager.
+Restart=no
 RestartSec=10
+TimeoutStopSec=150
 
 [Install]
 WantedBy=multi-user.target
@@ -169,13 +173,17 @@ WantedBy=multi-user.target
 
 ### 4.3. Доступные конфигурации
 
-| Сервис                  | Таймфрейм | Тип    |
-|-------------------------|-----------|--------|
-| `binodex-1m-bin.service` | 1 минута  | Binary |
-| `binodex-1m-otc.service` | 1 минута  | OTC    |
-| `binodex-3m-otc.service` | 3 минуты  | OTC    |
-| `binodex-5m-bin.service` | 5 минут   | Binary |
-| `binodex-5m-otc.service` | 5 минут   | OTC    |
+| Сервис                    | Таймфрейм | Тип    |
+|---------------------------|-----------|--------|
+| `binodex-1m-otc.service`  | 1 минута  | OTC    |
+| `binodex-3m-bin.service`  | 3 минуты  | Binary |
+| `binodex-3m-otc.service`  | 3 минуты  | OTC    |
+| `binodex-5m-bin.service`  | 5 минут   | Binary |
+| `binodex-5m-otc.service`  | 5 минут   | OTC    |
+| `binodex-bot@.service`    | любой     | шаблон |
+
+Сверено с каталогом `systemd/` 20-09-2026: `binodex-1m-bin.service` в нём НЕТ (таблица называла
+его, а реальный `binodex-3m-bin.service` не называла вовсе).
 
 Под другие ТФ/типы — скопировать юнит и поменять `Environment="TIMEFRAME=..." "BINARY=..."`.
 
@@ -198,6 +206,40 @@ source venv/bin/activate
 # Запуск с переменными окружения
 TIMEFRAME=1m BINARY=true TEST=false python main.py
 ```
+
+### 5.1a. Прогон с ВИДИМЫМ браузером перед раскатом (обязателен для браузерных правок)
+
+Синтетика и headless проверяют логику, а не то, как страница выглядит СЕГОДНЯ: промо TV
+«AI Copilot» всплывало через ~15с после загрузки чарта, класса у него нет вовсе и закрывашки
+внутри нет — увидеть его можно только глазами. Поэтому перед раскатом правок, трогающих
+браузерные пути, прогон делается с окном:
+
+```bash
+# Под KDE/Wayland обе переменные ОБЯЗАТЕЛЬНЫ, иначе playwright-Firefox падает с SIGSEGV
+MOZ_ENABLE_WAYLAND=0 GDK_BACKEND=x11 BROWSER_HEADLESS=0 \
+TIMEFRAME=1m BINARY=0 SIGNAL_CHANNEL=<тестовый канал> venv/bin/python main.py
+```
+
+⚠️ **НЕ запускать OTC-прогон с БОЕВЫМИ куками, пока работают прод-инстансы.** Сессия binodex
+одна на аккаунт, и ломается она тремя способами сразу:
+
+- **refresh-токен собственной авторизации ОДНОРАЗОВЫЙ** — фронт крутит его примерно раз в 15
+  минут, а потраченный экземпляр сервер помнит. Локальный браузер прокрутит токен, и боевые
+  инстансы на следующем обновлении получат `401 REFRESH_REUSED`, то есть «куки протухли» →
+  релогин → письмо с кодом. На пяти инстансах это упирается в лимит запросов кода
+  (`LoginRateLimited`), и тогда встают ВСЕ, минимум на `RATE_LIMIT_PAUSE`;
+- **снимок в БД перетирается**: подписка `watch_session_refresh` пишет текущий `storage_state`
+  в `cookies.binodex_cookies` — прод-снимок заменится прогонным;
+- **параллельный вход с другого адреса** binodex может погасить сессию вовсе.
+
+Безопасные варианты, по убыванию удобства:
+
+1. отдельные тестовые куки — `COOK_OTC=<user_id>` на аккаунт, который не крутится в проде;
+2. FIN-режим (`BINARY=1`): TV-куки не одноразовые и сессию не гасят — проверит подъём браузера,
+   бюджеты закрытия и чистку зоны кадра, но не OTC-специфику (легенда, ярлык, off-zone);
+3. на ноде в окно остановки: `systemctl stop binodex-1m-otc`, прогон под её куками, затем старт.
+
+Посты в любом случае уводить мимо боевого канала — `SIGNAL_CHANNEL` либо `TEST=1`.
 
 ### 5.2. Запуск через systemd
 
