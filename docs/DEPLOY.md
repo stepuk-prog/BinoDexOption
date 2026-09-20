@@ -86,6 +86,14 @@ playwright install firefox
 playwright install-deps firefox
 ```
 
+⚠️ **Ставим ровно тот движок, который задан в `.env` ключом `BROWSER` (см. 3.1).** На боевых
+нодах это `firefox` — и FIN (TradingView), и OTC (binodex) работают на нём. Дефолт кода при
+НЕЗАДАННОМ ключе — `auto`, а он отдаёт для OTC **Chromium**: без строки `BROWSER=firefox` три
+OTC-инстанса пойдут за несуществующим движком, `init_load` упадёт `Executable doesn't exist`,
+счётчик `BROWSER_MAX_ATTEMPTS` добьёт до `exit(10)` — и диспетчер начнёт переносить ноду за
+нодой, где повторится то же самое. Переводите ноду на Chromium — сначала `playwright install
+chromium` и `playwright install-deps chromium`, потом ключ.
+
 ---
 
 ## 3. Настройка окружения
@@ -115,6 +123,10 @@ TOKEN=your_error_bot_token
 
 # Ключ программы — фильтр своих строк в settings.option_setting (обязателен)
 PROG_KEY=bino_option
+
+# Движок Playwright. ОБЯЗАТЕЛЕН на ноде: без него дефолт auto даст для OTC Chromium, а
+# ставится (2.4) Firefox — браузер не поднимется вовсе. Менять вместе с playwright install.
+BROWSER=firefox
 
 # Настройки догонов
 OVERLAP=3
