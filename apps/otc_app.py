@@ -1180,7 +1180,8 @@ async def _wait_indicator_on(page: Page, name: str, timeout: float = 3.0) -> boo
     пробуем ещё раз до потолка."""
     deadline = time.monotonic() + timeout
     while True:
-        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic(), quiet=True))
+        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic()),
+                                         quiet=True)
         missing = None if counts is None else _missing_from(counts)
         if missing is not None and not any(item_name == name for item_name, _ in missing):
             return True
