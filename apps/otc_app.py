@@ -1062,6 +1062,53 @@ def _extra_from(counts: dict[str, int]) -> dict[str, int]:
     return {badge: counts[badge] - 1 for _, badge in OTC_CHART_INDICATORS if counts.get(badge, 0) > 1}
 
 
+# Холодный старт: сколько ждать, пока binodex отрисует легенду. Чипы появляются вместе с первой
+# отрисовкой чарта (1–3с), потолок с запасом. Ждём ИМЕННО чипы, а не канвас: канвас появляется
+# РАНЬШЕ легенды, и по нему «индикаторов нет» неотличимо от «легенда ещё не построена».
+COLD_LEGEND_WAIT = 6.0    # сек
+COLD_LEGEND_POLL = 0.3    # сек между чтениями
+
+
+async def apply_indicators_cold(page: Page) -> None:
+    """Индикаторы на ХОЛОДНОМ старте: читаем легенду и добираем недостающее, а не кликаем вслепую.
+
+    Раньше здесь стоял слепой клик по всем трём пунктам меню — по записанному допущению
+    «binodex сбрасывает индикаторы в новом контексте, ключей indicators/* в storage_state нет».
+    Первая половина допущения неверна: ключей в снимке действительно нет, но binodex
+    восстанавливает набор СО СВОЕЙ стороны, и к моменту нашего клика он уже на графике. Клик по
+    пункту меню ДОБАВЛЯЕТ экземпляр, поэтому каждый холодный браузер давал ровно ×2 — замер
+    21-09-2026: у пяти сигнальных программ по одному срабатыванию уборки на каждый плановый
+    ребут, у 68 инстансов Screens — до полусотни в час по флоту. Кадру это не вредило (лишнее
+    снимает счётчик чипов перед опционом), но каждый раз стоило лишнего круга «добавить-снять»
+    и нескольких секунд, когда UI ещё не настроен.
+
+    Ждём появления ЧИПОВ (не канваса — он рисуется раньше легенды): как только виден хоть один
+    наш бейдж, легенда построена и счётчикам можно верить. Не дождались за COLD_LEGEND_WAIT —
+    значит индикаторов правда нет, включаем все. Не прочитали вовсе (None) — не трогаем ничего:
+    ремонт перед первым же опционом (`ensure_chart_setup`) перечитает и доберёт."""
+    deadline = time.monotonic() + COLD_LEGEND_WAIT
+    counts = None
+    while True:
+        counts = await _indicator_counts(page, cap=max(_OP_FLOOR, deadline - time.monotonic()),
+                                         quiet=True)
+        if counts is None or any(counts.values()) or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(COLD_LEGEND_POLL)
+    if counts is None:
+        logger.info('OTC: легенда на холодном старте не прочитана — индикаторы не трогаю, '
+                    'доберёт ремонт перед опционом')
+        return
+    missing, extra = _missing_from(counts), _extra_from(counts)
+    if missing:
+        await apply_chart_indicators(page, missing)
+    if extra:      # binodex восстановил больше одного экземпляра — снимаем лишние сразу
+        logger.warning('OTC: на холодном старте лишние копии индикаторов ('
+                       + ', '.join(f'{b}×{n + 1}' for b, n in extra.items()) + ') — снимаю')
+        await drop_extra_indicators(page, extra)
+    if not missing and not extra:
+        logger.info('OTC: индикаторы на холодном старте уже на месте — меню не открываю')
+
+
 async def drop_extra_indicators(page: Page, extra: dict[str, int],
                                 deadline: float | None = None) -> None:
     """Снять лишние копии индикаторов — крестиком на чипе легенды.
@@ -1846,7 +1893,7 @@ async def _verify_otc_ready(page: Page) -> None:
     # Масштабы графика и индикаторы сбрасываются на дефолт при каждом запуске браузера (новый
     # контекст из storage_state) — выставляем на каждом старте, ДО off-zone (под ним кнопки не кликаются).
     await apply_chart_scale(page)
-    await apply_chart_indicators(page)
+    await apply_indicators_cold(page)
     # off-zone оптимизация CPU (~40→~22%): прячем UI вне зоны скрина (детект кук/ярлык — в белом списке).
     # Подложку гасим ДО off-zone: off-zone прячет её от отрисовки, но настройка аккаунта при этом
     # остаётся включённой, и в следующем контексте всё повторится. Здесь выключаем по-настоящему.
