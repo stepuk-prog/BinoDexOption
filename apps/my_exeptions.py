@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
 
-from pyrogram.errors import Unauthorized, FloodWait
+from pyrogram.errors import FloodWait, InternalServerError, ServiceUnavailable, Unauthorized
 
 from apps.exit_app import session_dead_shutdown, session_failed
 from binocore.shutdown import shutdown_event, sleep_or_stop
@@ -238,10 +238,18 @@ async def lost_connection_photo(error, photo, text, mes_type, started_at: dateti
             await session_dead_shutdown(error)  # session мертва — штатный стоп без рестарта (sys.exit)
             return False, 'Сессия юзербота недействительна', None  # явный возврат: не полагаемся только на sys.exit
         # иначе: транзиент-401 при живом ключе → лечим как обрыв (restart + resend) ниже
-    if 'Connection lost' in str(error) or isinstance(error, Unauthorized):
+    # 5xx от Telegram (InternalServerError 500 / ServiceUnavailable 503 и все их подклассы —
+    # Timeout, ApiCallError, RandomIdDuplicate, PersistentTimestampOutdated) — транзиент, как обрыв
+    # связи. pyrofork ретраит их сам (Session.invoke, до 10 раз), но наверх выходит устойчивый 5xx,
+    # и до 23-09-2026 он был отказом с ПЕРВОЙ отправки: без пробы истории, без restart, без повтора.
+    # Определяем ТИПОМ, не подстрокой «500»/«503» — та ловила бы номера в чужих текстах. Проба
+    # истории в лечащей ветке стоит ПЕРЕД повтором, так что дубля правка не создаёт.
+    # Реестр BinoCore: tg-5xx-transient (у этой программы запись раньше ложно давала «неприменимо»).
+    if ('Connection lost' in str(error) or isinstance(error, Unauthorized)
+            or isinstance(error, (InternalServerError, ServiceUnavailable))):
         # В heal-ветку с Unauthorized попадают ТОЛЬКО транзиент-401 при живом ключе (мёртвый
-        # ключ ушёл в session_dead_shutdown выше). 'Connection lost' — сетевой обрыв, к
-        # session-death не относится → счётчик-страйк не наращиваем.
+        # ключ ушёл в session_dead_shutdown выше). 'Connection lost' и 5xx — не session-death
+        # → счётчик-страйк не наращиваем.
         is_transient_401 = isinstance(error, Unauthorized)
         try:
             # Таймаут на restart+resend — зависший reconnect не должен вешать цикл (правило 6)
@@ -281,9 +289,9 @@ async def lost_connection_photo(error, photo, text, mes_type, started_at: dateti
                 logger.session(f'⚠️ Пост ({mes_type}) не доставлен: транзиент-401 не вылечился '
                                f'restart+повтором ({_transient_401_strikes}/{TRANSIENT_401_MAX_STRIKES}): {err}')
             else:
-                # Обрыв связи не вылечился restart+повтором — пост потерян, бот продолжает.
-                logger.session(f'⚠️ Пост ({mes_type}) не доставлен: обрыв связи '
-                               f'не вылечился restart+повтором: {err}')
+                # Обрыв связи / 5xx не вылечился restart+повтором — пост потерян, бот продолжает.
+                logger.session(f'⚠️ Пост ({mes_type}) не доставлен: транзиент '
+                               f'({type(error).__name__}) не вылечился restart+повтором: {err}')
             return False, f'Переподключиться не удалось - {err}', None
     else:
         error_message = f'Ошибка отправки {mes_type}! - {error}'
