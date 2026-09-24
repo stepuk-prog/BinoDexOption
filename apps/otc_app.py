@@ -29,6 +29,8 @@ from classes.result_types import OperationResult
 from binocore.binodex import (SESSION_PROBE_JS as BINODEX_SESSION_PROBE_JS,
                               apply_chart_background as binodex_chart_background,
                               close_modal_button as binodex_close_modal,
+                              pair_items_blind as binodex_pair_items_blind,
+                              selector_drift,
                               LoginRateLimited, RATE_LIMIT_PAUSE,
                               rate_limit_sleep as binodex_rate_limit_sleep,
                               has_session as binodex_has_session,
@@ -48,7 +50,10 @@ from settings.browser_config import (otc_trade_url, otc_select_pair, otc_categor
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
                                      otc_chart_scale, otc_chart_scale_item, otc_indicators,
-                                     otc_theme_open, otc_theme_toggle, otc_wrap_bg, otc_session_keys)
+                                     otc_theme_open, otc_theme_toggle, otc_wrap_bg, otc_session_keys,
+                                     otc_modal_backdrop, otc_modal_roots, otc_modal_close, otc_pair_label,
+                                     otc_indicator_item, otc_chip_icon, otc_chip_delete,
+                                     otc_indicator_labels)
 
 if TYPE_CHECKING:
     from binocore.browser import BrowserSession
@@ -217,14 +222,14 @@ _modal_diag_done = False  # подробный дамп модалки дела�
 
 async def _modal_item_counts(page: Page) -> str:
     """Компактная диагностика для лога при промахе выбора пары: сколько пунктов матчит
-    текущий селектор modal_pair_item и сколько из них содержат 'OTC'. Различает причины
+    текущий селектор modal_pair_item и сколько из них содержат метку OTC (pair_otc_label). Различает причины
     одинакового лога «не нашёл …»: items=0 → селектор отвалился (binodex сменил разметку);
     items>0, otc=0 → пункты есть, но OTC-вариантов сейчас нет; items>0, otc>0 → есть OTC,
     но фильтр has_text=pair не матчит (изменился формат текста, напр. слэш в паре)."""
     try:
         items = page.locator(otc_modal_pair_item)
         n = await items.count()
-        otc = await items.filter(has_text=re.compile('OTC', re.IGNORECASE)).count()
+        otc = await items.filter(has_text=re.compile(re.escape(otc_pair_label), re.IGNORECASE)).count()
         return f'items={n}, otc={otc}'
     except (Exception,) as err:
         return f'диаг-сбой:{err}'
@@ -237,7 +242,7 @@ async def _modal_item_counts(page: Page) -> str:
 # `_otcInlineBtn_1wgz3_32` → `otcInlineBtn`); семантические классы без хеша (`modal_pair_item`)
 # не трогаем (в их хвосте нет цифры). Так в логе сразу виден кликабельный контейнер строки.
 _DUMP_CHAIN_JS = r"""
-() => {
+(otc) => {
   const core = (cn) => {
     const tok = ((typeof cn === 'string' ? cn : '').trim().split(/\s+/)[0]) || '';
     return tok.replace(/^_/, '').replace(/_(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{4,8}(_\d+)?$/, '');
@@ -248,7 +253,7 @@ _DUMP_CHAIN_JS = r"""
   };
   const nodes = [...document.querySelectorAll('span, div, button, a, li')].filter(el => {
     const t = (el.innerText || '').trim();
-    return t && t.length <= 40 && /OTC/i.test(t) && !el.querySelector('*');  // листовой узел
+    return t && t.length <= 40 && t.toLowerCase().includes(otc.toLowerCase()) && !el.querySelector('*');  // листовой узел
   });
   const out = [], seen = new Set();
   for (const n of nodes) {
@@ -276,7 +281,7 @@ async def _dump_pair_modal(page: Page, phase: str) -> None:
     БЕЗ поиска (полный список — там и видна строка пары). Любые ошибки глушим — это диагностика."""
     try:
         old_cnt = await page.locator(otc_modal_pair_item).count()
-        rows = await _eval(page, _DUMP_CHAIN_JS)
+        rows = await _eval(page, _DUMP_CHAIN_JS, otc_pair_label)
         logger.warning('OTC-DIAG [%s]: старый modal_pair_item=%s match, листовых узлов с OTC=%s',
                        phase, old_cnt, len(rows))
         for r in rows:
@@ -341,16 +346,26 @@ async def select_otc_pair(page: Page, pair: str) -> bool:
             await page.click(otc_input_pair, timeout=TIMEOUT_SHORT)
             await page.keyboard.type(pair, delay=40)
         # Ждём появления нужного пункта '<pair> … OTC' (auto-wait вместо слепой паузы):
-        # фильтруем по тексту пары и по 'OTC' (без регистра).
+        # фильтруем по тексту пары и по метке pair_otc_label (без регистра).
         target_item = (page.locator(otc_modal_pair_item)
                        .filter(has_text=pair)
-                       .filter(has_text=re.compile('OTC', re.IGNORECASE))
+                       .filter(has_text=re.compile(re.escape(otc_pair_label), re.IGNORECASE))
                        .first)
         try:
             await target_item.wait_for(state='visible', timeout=TIMEOUT_SHORT)
         except (Exception,):
             global _modal_diag_done
-            logger.warning(f"OTC: не нашёл '{pair} … OTC' в модалке ({await _modal_item_counts(page)})")
+            logger.warning(f"OTC: не нашёл '{pair} … {otc_pair_label}' в модалке ({await _modal_item_counts(page)})")
+            # Промах выглядит одинаково, когда binodex держит модалку пустой (ждать правильно) и
+            # когда пары на экране есть, а селектор строки их не видит (24-09-2026: так весь флот
+            # час за часом «ждал пар» молча). Второе — дрейф вёрстки: алерт в тему ошибок. Проверка
+            # ДО дампа ниже: дамп очищает поиск, и имя пары из модалки уходит.
+            if await binodex_pair_items_blind(page, item=otc_modal_pair_item, input_sel=otc_input_pair,
+                                              category=otc_category_valute, opener=otc_select_pair,
+                                              pair=pair, eval_js=_eval):
+                selector_drift(logger, 'modal_pair_item', otc_modal_pair_item,
+                               f"пара '{pair}' в открытой модалке видна, а строк по селектору ноль — "
+                               f"ни одна пара не выберется, программа будет ждать впустую")
             if not _modal_diag_done:  # подробный дамп — один раз на процесс, чтобы не флудить
                 _modal_diag_done = True
                 await _dump_pair_modal(page, 'после поиска')   # список, схлопнутый вводом '<pair>'
@@ -650,8 +665,8 @@ async def _raise_ui_dead(page: Page, detail: str) -> None:
 # Модалка binodex (онбординг/промо) поверх страницы: её бэкдроп ест pointer events, и клик по
 # кнопке масштаба 5 секунд ретраится впустую. Локатор при этом РЕЗОЛВИТСЯ — по логу не видно, что
 # мешает именно оверлей. Класс MUI (`MuiBackdrop-root`) стабилен: это имя компонента, а не хеш
-# сборки, в отличие от соседнего суффикса `css-3j5o61`.
-MODAL_BACKDROP = '.MuiBackdrop-root'
+# сборки, в отличие от соседнего суффикса `css-3j5o61`. Значение — из БД (modal_backdrop).
+MODAL_BACKDROP = otc_modal_backdrop   # строка modal_backdrop в binodex_settings
 
 
 async def dismiss_modal_backdrop(page: Page) -> None:
@@ -683,7 +698,7 @@ async def dismiss_modal_backdrop(page: Page) -> None:
     # снаружи, а модалку-анонс binodex рисует картинкой ПОВЕРХ бэкдропа. Ядро ищет закрывашку
     # по служебным признакам (aria-label/data-testid/класс close, значок ×) и НЕ трогает кнопки
     # с подписями вроде «OK» — такая в промо увела бы бота с /trade.
-    closed_by = await binodex_close_modal(page)
+    closed_by = await binodex_close_modal(page, roots=otc_modal_roots, close=otc_modal_close)
     if closed_by:
         try:
             await backdrop.wait_for(state='hidden', timeout=2000)
@@ -804,11 +819,15 @@ async def apply_chart_scale(page: Page, deadline: float | None = None) -> None:
 # заводит, поэтому идёт первым и на расклад панелей не влияет. Чип легенды — 'Whale' (рядом binodex
 # рисует параметры '150, 28, 2'). Дальше порядок = порядок панелей: Volume включаем ПОСЛЕДНИМ,
 # чтобы его панель осела НИЖНЕЙ (под Stochastic).
-OTC_CHART_INDICATORS = (('Whale Absorption', 'Whale'), ('Stochastic', 'Stoch'), ('Volume', 'VOL'))
+# Подпись чипа берётся из строки indicator_labels (binodex_settings): сайт её уже менял и может
+# поменять снова, а какие индикаторы включать и в каком порядке — решение этой программы.
+OTC_CHART_INDICATOR_NAMES = ('Whale Absorption', 'Stochastic', 'Volume')
+OTC_CHART_INDICATORS = tuple((name, otc_indicator_labels.get(name, name))
+                             for name in OTC_CHART_INDICATOR_NAMES)
 
 
 async def _indicators_menu_open(page: Page, cap: float | None = None) -> bool:
-    """Открыто ли меню индикаторов (видимы пункты button.chart_indicator).
+    """Открыто ли меню индикаторов (видимы пункты меню — строка indicator_menu_item в БД).
 
     `cap` — потолок на ЭТО чтение (секунды). Нужен, когда проверку зовут под общим бюджетом
     ремонта: без него один evaluate на подвисшей странице ждёт EVAL_TIMEOUT=10с, и «ожидание
@@ -816,8 +835,8 @@ async def _indicators_menu_open(page: Page, cap: float | None = None) -> bool:
     потолок SETUP_TOTAL_BUDGET оставался номинальным."""
     try:
         return await _eval(page,
-            "() => [...document.querySelectorAll('button.chart_indicator')].some(b => b.offsetParent !== null)",
-            cap=cap)
+            "(sel) => [...document.querySelectorAll(sel)].some(b => b.offsetParent !== null)",
+            otc_indicator_item, cap=cap)
     except (Exception,):
         return False
 
@@ -855,9 +874,16 @@ _LEGEND_ROOT_ATTR = 'data-legend-root'
 # body: «контейнер» размером со страницу не экономит ничего.
 _LEGEND_ROOT_MAX_UP = 6
 
+# Признак «это чип легенды» — иконка кнопки действия (глаз/карандаш/крестик), строка
+# legend_chip_icon в БД; крестик удаления — legend_chip_delete. 24-09-2026 binodex перевёл иконки
+# на SVG-спрайт (<use href="#trade-chart-…">) вместо <img src="/img/chart/…">, и зашитый в
+# код предикат перестал находить чипы ВООБЩЕ: канвас на месте, чипов ноль — это читалось как
+# «индикаторы сброшены», ремонт кликал меню, а клик ДОБАВЛЯЕТ копию → по три копии в кадре.
+# В JS значения идут АРГУМЕНТОМ, а не склейкой строки: кавычка в значении из БД ломала бы JS.
+
 # Чип легенды — это span с ТОЧНЫМ именем индикатора внутри бейджа, у которого есть кнопки
-# действий (глаз/карандаш/крестик — картинки /img/chart/*.svg). Признак по картинке, а не по
-# классу: CSS-хэши binodex (_badge_1sh1r_92) плавают между сборками, а пути картинок стабильны.
+# действий (глаз/карандаш/крестик — иконки, признак arg.icon = legend_chip_icon). Признак по
+# иконке, а не по классу: CSS-хэши binodex (_badge_1sh1r_92) плавают между сборками.
 # Берём САМЫЙ ВНУТРЕННИЙ элемент (без вложенных span/div), иначе один чип считался бы дважды —
 # за себя и за обёртку с тем же textContent.
 _LEGEND_SCAN_JS = (
@@ -872,7 +898,7 @@ _LEGEND_SCAN_JS = (
     "   for (const el of root.querySelectorAll('div,span')) {"
     "     if (el.querySelector('span,div')) continue;"
     "     const chip = el.closest('div');"
-    "     if (!chip || !chip.querySelector('img[src*=\"/img/chart/\"]')) continue;"
+    "     if (!chip || !chip.querySelector(arg.icon)) continue;"
     "     total++;"
     "     const t = (el.textContent || '').trim();"
     "     if (arg.badges.includes(t)) counts[t]++; }"
@@ -903,7 +929,7 @@ _LEGEND_SCAN_JS = (
 # после клика React перестраивает легенду, и пачка кликов по устаревшим узлам не проходит.
 # Выключить индикатор через меню НЕЛЬЗЯ (см. apply_chart_indicators): там клик добавляет.
 # Предикат чипа — ДОСЛОВНО тот же, что у _LEGEND_SCAN_JS (лист 'div,span' внутри бейджа с
-# картинками /img/chart/). Раньше скан считал листья 'div,span', а снятие искало только 'span':
+# иконкой arg.icon). Раньше скан считал листья 'div,span', а снятие искало только 'span':
 # чип с текстом в листовом div считался дублем, но не снимался, и функция уходила по 'no-dup'
 # молча — лишняя панель доживала до конца опциона. Дедуп по узлу обязателен: у чипа бывает
 # несколько листьев (имя и параметры), и один и тот же chip иначе попал бы в список дважды.
@@ -913,11 +939,11 @@ _LEGEND_DROP_JS = (
     "     if (el.querySelector('span,div')) continue;"
     "     if ((el.textContent || '').trim() !== arg.badge) continue;"
     "     const chip = el.closest('div');"
-    "     if (!chip || !chip.querySelector('img[src*=\"/img/chart/\"]')) continue;"
+    "     if (!chip || !chip.querySelector(arg.icon)) continue;"
     "     if (!chips.includes(chip)) chips.push(chip); }"
     "   if (chips.length < 2) return 'no-dup';"
     "   const btn = chips[chips.length - 1]"
-    "     .querySelector('button img[src*=\"cross\"]');"
+    "     .querySelector(arg.del);"
     "   if (!btn) return 'no-button';"
     "   btn.closest('button').click();"
     "   return 'clicked'; }")
@@ -969,7 +995,7 @@ async def _indicator_counts(page: Page, cap: float | None = None, quiet: bool = 
     scope = _legend_scope or 'calibrate'
     try:
         res = await _eval(page, _LEGEND_SCAN_JS,
-                          {'badges': badges, 'zone': screen_zone_otc, 'scope': scope,
+                          {'badges': badges, 'zone': screen_zone_otc, 'scope': scope, 'icon': otc_chip_icon,
                            'rootAttr': _LEGEND_ROOT_ATTR, 'maxUp': _LEGEND_ROOT_MAX_UP}, cap=cap)
     except (Exception,) as err:
         logger.debug(f'OTC: чипы индикаторов не прочитались ({err}) — состояние неизвестно')
@@ -1052,6 +1078,45 @@ async def indicator_counts_confirmed(page: Page, cap: float | None = None) -> di
     return second
 
 
+# Стоп-кран кликов по меню индикаторов. Взводится, когда пункт меню НАЖАТ, а чип на графике не
+# появился и после подтверждающего ожидания: легенда не читается (уехал legend_chip_icon либо
+# подпись из indicator_labels). В таком состоянии каждый следующий клик добавляет ещё одну копию
+# индикатора, а уборка её не видит — 24-09-2026 так и набегало по три копии. Живёт до конца
+# процесса: новые значения из БД подхватываются только перезапуском, и алерт об этом говорит.
+_legend_blind = False
+
+# Подтверждающее ожидание перед стоп-краном: чип мог просто медленно дорисоваться.
+LEGEND_BLIND_CONFIRM = 3.0   # сек
+
+
+async def _legend_total(page: Page) -> int | None:
+    """Сколько вообще чипов с иконкой видно в легенде (любых, не только наших) — чтобы в алерте
+    сказать, что уехало: признак чипа (0 чипов) или подписи индикаторов (чипы есть, наших нет)."""
+    try:
+        res = await _eval(page, _LEGEND_SCAN_JS,
+                          {'badges': [], 'zone': screen_zone_otc, 'scope': 'document', 'icon': otc_chip_icon,
+                           'rootAttr': _LEGEND_ROOT_ATTR, 'maxUp': _LEGEND_ROOT_MAX_UP})
+        return int(res['all']['total'])
+    except (Exception,):
+        return None
+
+
+async def _freeze_indicator_clicks(page: Page, menu_name: str) -> None:
+    """Взвести стоп-кран и сообщить, что именно уехало (см. _legend_blind)."""
+    global _legend_blind
+    _legend_blind = True
+    total = await _legend_total(page)
+    if total:
+        selector_drift(logger, 'indicator_labels', ', '.join(f'{n}={b}' for n, b in OTC_CHART_INDICATORS),
+                       f"пункт меню '{menu_name}' нажат, чипы в легенде есть ({total}), но ни один не "
+                       f"подписан ожидаемо. Клики по меню остановлены до перезапуска — каждый добавлял "
+                       f"бы копию индикатора")
+    else:
+        selector_drift(logger, 'legend_chip_icon', otc_chip_icon,
+                       f"пункт меню '{menu_name}' нажат, а ни одного чипа легенды не видно. Клики по "
+                       f"меню остановлены до перезапуска — каждый добавлял бы копию индикатора")
+
+
 def _missing_from(counts: dict[str, int]) -> list[tuple[str, str]]:
     """Индикаторы, которых на графике НЕТ ВОВСЕ (их и только их добавляем через меню)."""
     return [(name, badge) for name, badge in OTC_CHART_INDICATORS if counts.get(badge, 0) == 0]
@@ -1128,12 +1193,15 @@ async def drop_extra_indicators(page: Page, extra: dict[str, int],
             # полный ре-init. Соседи по функции ошибки глотают по тому же принципу:
             # «оформление кадра — не данные».
             try:
-                verdict = await _eval(page, _LEGEND_DROP_JS, {'badge': badge},
+                verdict = await _eval(page, _LEGEND_DROP_JS,
+                                      {'badge': badge, 'icon': otc_chip_icon, 'del': otc_chip_delete},
                                       cap=_left_s(deadline, EVAL_TIMEOUT))
                 if verdict != 'clicked':
                     if verdict == 'no-button':
-                        logger.warning(f'OTC: у чипа {badge} нет кнопки удаления — вёрстка легенды '
-                                       f'изменилась, лишние копии снять не могу')
+                        # Копия видна, а снять нечем — лишняя панель поедет в каждый кадр.
+                        selector_drift(logger, 'legend_chip_delete', otc_chip_delete,
+                                       f'у копии {badge} на чипе легенды нет кнопки удаления — '
+                                       f'лишние копии индикаторов снять нечем, они уйдут в кадр')
                     break
                 await page.wait_for_timeout(300)
             except (Exception,) as err:
@@ -1145,7 +1213,7 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
                                  deadline: float | None = None) -> None:
     """Включить индикаторы графика (OTC_CHART_INDICATORS) для OTC-кадра — рисуются binodex на том же
     канвасе, что и свечи, поэтому попадают в toDataURL-кадр (screenshot_otc) без отдельного слоя.
-    Меню #setup_indicators, пункты button.chart_indicator выбираются ПО ТЕКСТУ (порядок списка
+    Меню #setup_indicators, пункты (indicator_menu_item) выбираются ПО ТЕКСТУ (порядок списка
     binodex плавает). Клик по пункту ДОБАВЛЯЕТ индикатор и закрывает модалку, поэтому: (1) меню
     переоткрываем перед каждым; (2) включаем только те, которых НЕТ ВОВСЕ. Раньше здесь стояло
     «клик ТОГГЛИТ» — так было у прежнего фронта; сейчас (проверено 20-09-2026 на живой странице)
@@ -1173,9 +1241,13 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
     зажигается), и первый же проход по трём выбирал минуты против объявленных секунд."""
     if not otc_indicators:  # старая БД без строки setup_indicators — тихо пропускаем
         return
+    if _legend_blind:       # легенда не читается — клик только добавил бы копию (см. _legend_blind)
+        return
     if missing is None:
         missing = list(OTC_CHART_INDICATORS)
     await _click_indicators(page, missing, deadline=deadline)
+    if _legend_blind:
+        return
     # cap обязателен: без него контрольное чтение ждёт общий EVAL_TIMEOUT ПОВЕРХ бюджета
     # ремонта, и на подвисшей SPA это +10с молчания ленты перед первым постом опциона.
     # С подтверждением: окно «легенда ещё не отрисована» здесь создают НАШИ ЖЕ клики, а по
@@ -1198,11 +1270,22 @@ async def apply_chart_indicators(page: Page, missing: list[tuple[str, str]] | No
                            f"({', '.join(n for n, _ in still)}) — кадр уйдёт без них")
 
 
+async def _text_visible(page: Page, text: str) -> bool:
+    """Виден ли на странице элемент с ТОЧНО таким текстом (листовой по этому тексту)."""
+    try:
+        return bool(await _eval(page,
+            "(t) => [...document.querySelectorAll('body *')].some(el => (el.innerText || '').trim() === t"
+            " && ![...el.children].some(c => (c.innerText || '').trim() === t)"
+            " && (el.offsetWidth || el.offsetHeight))", text))
+    except (Exception,):
+        return False
+
+
 async def _wait_menu_open(page: Page, timeout: float = 1.5) -> bool:
     """Дождаться открытия меню индикаторов ТЕМ ЖЕ предикатом, каким открытость определяется
     везде в файле (_indicators_menu_open).
 
-    Ждать видимости 'button.chart_indicator' локатором нельзя: закрытое меню оставляет свои
+    Ждать видимости пунктов меню (indicator_menu_item) локатором нельзя: закрытое меню оставляет свои
     кнопки в DOM, и первый матч может оказаться именно невидимым узлом — предикаты разошлись бы,
     а мы выжигали бы TIMEOUT_SHORT на КАЖДЫЙ индикатор. При пропавшем селекторе меню проход
     вырос бы с ~18 до ~39 с, и это перед каждым опционом (ревизия 12-09-2026)."""
@@ -1253,6 +1336,8 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
     по-прежнему окажется включён последним, и его панель осядет нижней."""
     await dismiss_modal_backdrop(page)
     for menu_name, _badge in missing:
+        if _legend_blind:
+            break
         if deadline is not None and time.monotonic() >= deadline:
             logger.warning(f"OTC: бюджет ремонта оформления исчерпан — индикатор '{menu_name}' "
                            f"не включён, оставляю следующему опциону")
@@ -1270,18 +1355,35 @@ async def _click_indicators(page: Page, missing: list[tuple[str, str]],
                 # Ждём факт открытия, а не «полсекунды на всякий случай» — и тем же предикатом,
                 # что и остальной файл (см. _wait_menu_open).
                 if not await _wait_menu_open(page, timeout=_left_s(deadline, 1.5)):
-                    logger.warning(f"OTC: меню индикаторов не открылось — пропускаю '{menu_name}'")
+                    # Меню могло и открыться, а ослеп селектор его пунктов: тогда имя индикатора
+                    # на экране ВИДНО. Это дрейф вёрстки, а не залипший клик.
+                    if await _text_visible(page, menu_name):
+                        selector_drift(logger, 'indicator_menu_item', otc_indicator_item,
+                                       f"меню индикаторов открыто ('{menu_name}' на экране), а "
+                                       f"пунктов по селектору не видно — индикаторы не включатся")
+                    else:
+                        logger.warning(f"OTC: меню индикаторов не открылось — пропускаю '{menu_name}'")
                     continue
             clicked = await _eval(page,
-                "(name) => { const b = [...document.querySelectorAll('button.chart_indicator')]"
+                "({name, sel}) => { const b = [...document.querySelectorAll(sel)]"
                 ".find(x => (x.innerText || '').trim() === name); if (!b) return false; b.click(); return true; }",
-                menu_name, cap=_left_s(deadline, EVAL_TIMEOUT))
+                {'name': menu_name, 'sel': otc_indicator_item}, cap=_left_s(deadline, EVAL_TIMEOUT))
             if not clicked:
-                logger.warning(f"OTC: индикатор '{menu_name}' не найден в меню")
+                # Меню открыто (пункты по селектору видны), а пункта с таким именем нет: binodex
+                # переименовал индикатор. Имена пунктов — в коде программы (набор — её решение).
+                selector_drift(logger, 'indicator_menu_item', otc_indicator_item,
+                               f"в открытом меню индикаторов нет пункта '{menu_name}' — binodex "
+                               f"переименовал его, либо селектор пункта ловит не то")
             elif not await _wait_indicator_on(page, menu_name,
                                               timeout=_left_s(deadline, 3.0)):
-                logger.warning(f"OTC: индикатор '{menu_name}' не зажёгся на графике за отведённое "
-                               f"время — проверю следующим проходом")
+                # Подтверждаем ещё LEGEND_BLIND_CONFIRM: чип мог просто медленно дорисоваться.
+                # Не появился и тогда — легенда не читается, дальнейшие клики только множат копии.
+                if await _wait_indicator_on(page, menu_name, timeout=_left_s(deadline, LEGEND_BLIND_CONFIRM)):
+                    continue
+                logger.warning(f"OTC: индикатор '{menu_name}' нажат, но чип на графике так и не "
+                               f"появился — легенда не читается, клики по меню останавливаю")
+                await _freeze_indicator_clicks(page, menu_name)
+                break
         except (Exception,) as error:
             logger.warning(f"OTC: не удалось включить индикатор '{menu_name}': {error}")
     # На случай ошибки (пункт не найден → модалка осталась открытой) закрываем меню, чтобы не мешало.
@@ -1381,6 +1483,8 @@ async def ensure_chart_setup(session: "BrowserSession") -> None:
     counts = await indicator_counts_confirmed(page, cap=_left_s(deadline, EVAL_TIMEOUT))
     missing = None if counts is None else _missing_from(counts)
     extra = {} if counts is None else _extra_from(counts)
+    if _legend_blind:
+        missing = []    # легенда не читается: алерт уже ушёл, клики остановлены (см. _legend_blind)
     if missing:
         logger.warning(f"OTC: индикаторы графика сбились ({', '.join(n for n, _ in missing)}) — "
                        f"включаю заново")
@@ -1446,20 +1550,28 @@ _CANVAS_ALPHA_JS = ("el => ({ url: el.toDataURL('image/png'), w: el.width, h: el
                     " cssw: Math.round(el.getBoundingClientRect().width),"
                     " cssh: Math.round(el.getBoundingClientRect().height) })")
 
-# Ярлык пары (флаг+пара+OTC+payout) — HTML поверх канваса, в toDataURL он НЕ попадает, поэтому
-# кладём отдельным слоем. Находим по содержимому+геометрии (у верх-левого угла бокса канваса,
-# текст с 'OTC' и '%') — устойчиво к ротации классов binodex; ставим маркер data-otc-lbl.
+# Ярлык пары (флаг+пара+OTC+payout) — HTML поверх канваса, в toDataURL НЕ входит → отдельным слоем.
+# Сам ярлык — это кнопка выбора пары (строка select_pair_add в БД), её и берём. Поиск по
+# содержимому+геометрии (у верх-левого угла бокса, текст с меткой OTC и '%') — только запасной
+# путь: 24-09-2026 binodex сдвинул ярлык ровно на порог (left = край канваса + 24, условие было
+# строгим `< +24`), и кадры молча ушли без подписи актива — сбой писался только в debug.
+# Допуск запасного пути расширен до +48. Маркер data-otc-lbl.
 _LABEL_BOX_JS = r"""
-(sel) => {
+({sel, otc, label}) => {
   const cv = document.querySelector(sel);
   if (!cv) return null;
   const b = cv.getBoundingClientRect();
   let best = null, area = 0;
-  for (const el of document.querySelectorAll('body *')) {
+  const own = label ? document.querySelector(label) : null;
+  if (own) {
+    const r = own.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && r.width < 600 && r.height < 120) best = own;
+  }
+  for (const el of best ? [] : document.querySelectorAll('body *')) {
     const t = el.textContent || '';
-    if (!t.includes('OTC') || !t.includes('%')) continue;
+    if (!t.includes(otc) || !t.includes('%')) continue;
     const r = el.getBoundingClientRect();
-    if (r.left < b.left + 24 && r.top < b.top + 44 && r.width > 0 && r.width < 360 && r.height < 80) {
+    if (r.left < b.left + 48 && r.top < b.top + 48 && r.width > 0 && r.width < 360 && r.height < 80) {
       const a = r.width * r.height; if (a > area) { area = a; best = el; }
     }
   }
@@ -1554,8 +1666,14 @@ async def _label_cutout(page: Page, asset, clip, rebuild: bool = False,
     if not rebuild and key in _label_cutout_cache:
         return _label_cutout_cache[key]
     try:
-        lb = await _eval(page, _LABEL_BOX_JS, screen_zone_otc, cap=_left_s(deadline, EVAL_TIMEOUT))
+        lb = await _eval(page, _LABEL_BOX_JS, {'sel': screen_zone_otc, 'otc': otc_pair_label,
+                                             'label': otc_select_pair}, cap=_left_s(deadline, EVAL_TIMEOUT))
         if not lb:
+            # Без ярлыка кадр уходит подписчику без подписи актива — это не «оформление», а
+            # потеря смысла поста. Раньше молчало (debug), теперь ERROR раз на процесс.
+            selector_drift(logger, 'select_pair_add', otc_select_pair,
+                           'ярлык пары над графиком не найден ни по селектору, ни по геометрии — '
+                           'кадры уходят подписчикам без подписи актива')
             return None
         lx, ly, lw, lh = round(lb['x']), round(lb['y']), round(lb['w']), round(lb['h'])
         region: FloatRect = {'x': lx, 'y': ly, 'width': lw, 'height': lh}

@@ -1,4 +1,5 @@
 from binocore.binodex import session_keys as binodex_session_keys
+from binocore.binodex import indicator_labels as binodex_indicator_labels, site_setting
 from settings.config import timeframe, binary
 from settings._bootstrap import bootstrap_fetch
 from settings._bootstrap_sql import SQL_BINODEX_SETTINGS, SQL_TV_SETTINGS
@@ -159,3 +160,20 @@ otc_indicators = next((i['par_value'] for i in otc_setting if i['par_name'] == '
 otc_session_keys = binodex_session_keys(
     {'session_keys': next((i['par_value'] for i in otc_setting
                            if i['par_name'] == 'session_keys'), None)})
+
+# ---------- Селекторы, которые раньше жили в коде (перенесены в БД 24-09-2026) --------------------
+# binodex меняет вёрстку без предупреждения, и 24-09 это случилось дважды за вечер: сперва
+# отвалились строки модалки пар (починено строкой modal_pair_item), затем иконки чипов легенды
+# ушли в SVG-спрайт — а признак чипа был зашит в код, и индикаторы тихо множились до трёх копий.
+# Теперь всё, что программа ищет на странице, правится строкой binodex_settings без раскатки.
+# site_setting: нет строки / пустая — запасное значение из ядра (binocore.binodex.SITE_DEFAULTS),
+# то есть старая БД старт не валит. Новые значения подхватываются ПЕРЕЗАПУСКОМ программы.
+otc_modal_backdrop = site_setting(otc_setting, 'modal_backdrop')     # бэкдроп модалки-анонса
+otc_modal_roots = site_setting(otc_setting, 'modal_roots')           # корни модалок для закрывашки
+otc_modal_close = site_setting(otc_setting, 'modal_close')           # признаки закрывашки (CSS-список)
+otc_pair_label = site_setting(otc_setting, 'pair_otc_label')         # 'OTC' в строке модалки пар
+otc_indicator_item = site_setting(otc_setting, 'indicator_menu_item')  # пункт меню индикаторов
+otc_chip_icon = site_setting(otc_setting, 'legend_chip_icon')        # признак чипа легенды
+otc_chip_delete = site_setting(otc_setting, 'legend_chip_delete')    # крестик на чипе легенды
+# {пункт меню: подпись чипа} — сайт пишет на чипе сокращение ('Stoch'), а не имя пункта.
+otc_indicator_labels = binodex_indicator_labels(site_setting(otc_setting, 'indicator_labels'))
