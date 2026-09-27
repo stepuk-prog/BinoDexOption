@@ -70,6 +70,11 @@ main_cycle_pause_max = opt_int("MAIN_CYCLE_PAUSE_MAX", 120)
 # Нормализуем порядок (как у translocation): перевёрнутая пара MIN>MAX уронила бы
 # random.randint в app.time_sleep — то есть падение процесса в ГЛАВНОМ цикле, вне try.
 main_cycle_pause_min, main_cycle_pause_max = sorted((main_cycle_pause_min, main_cycle_pause_max))
+# Пауза ШТОРМА: main.FAILED_STREAK_MAX опционов подряд сорвались уже после первого поста, а
+# процесс не перезапускался (OTC: отвал сессии → пересоздание браузера в процессе, binodex
+# недоступен → ожидание). Каждый такой опцион — анонс и баг-картинка в канале; пауза держится
+# до первого прошедшего опциона.
+main_cycle_pause_storm = opt_int("MAIN_CYCLE_PAUSE_STORM", 900)
 # --- Всё, что нужно с базы program на старте, — ОДНИМ коннектом -------------------------------
 # Каждый bootstrap_fetch — отдельный asyncpg.connect через PgBouncer со своим event loop.
 # Креды юзербота и (в FIN-режиме) куки TV известны одновременно — оба зависят только от строки

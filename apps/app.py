@@ -150,12 +150,14 @@ async def exit_main(channel_mess: bool,
     :return: result, plus - если окончился плюсом, fall - перезапуск
     """
     plus = False
+    # Снимаем ДО clear_data: он сбрасывает флаг, а главному циклу нужен факт «пост уже был».
+    posted = option_data.posted
     # Штатная остановка (SIGTERM/SIGINT): ничего не шлём в канал и не трогаем счётчики —
     # просто чистим состояние и выходим. Иначе ошибочный выход на shutdown ушёл бы
     # в plus-ветку (check_plus/dop_plus в канал + инкремент серии).
     if shutdown_requested():
         option_data.clear_data()
-        return MainResult(result, plus, fall, bug_text, check_cookies)
+        return MainResult(result, plus, fall, bug_text, check_cookies, posted)
     if channel_mess:
         # Через send_photo_safe (2026-08-15): прямой send_photo шёл мимо пробы доставки и
         # повтора — при потерях SYN сообщение о сбое просто не доходило (в инциденте оно
@@ -205,13 +207,13 @@ async def exit_main(channel_mess: bool,
         if option_data.plus:
             check = await check_plus()
             if not check[0]:
-                return MainResult(result, plus, False, check[1], check_cookies)
+                return MainResult(result, plus, False, check[1], check_cookies, posted)
         if option_data.minus:
             check = await check_minus()
             if not check[0]:
-                return MainResult(result, False, False, check[1], check_cookies)
+                return MainResult(result, False, False, check[1], check_cookies, posted)
     option_data.clear_data()
-    return MainResult(result, plus, fall, bug_text, check_cookies)
+    return MainResult(result, plus, fall, bug_text, check_cookies, posted)
 
 
 def check_cookies_price(old_price: float, new_price: float, round_par: int, count: int) -> tuple[int, float]:

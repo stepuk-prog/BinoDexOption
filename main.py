@@ -18,7 +18,8 @@ from classes import upload_session
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from logs import init_logger
 from messages import weekend_message, start_message
-from settings.config import get_app, binary, database, program_id, cook_name_otc
+from settings.config import (get_app, binary, database, program_id, cook_name_otc,
+                             main_cycle_pause_storm)
 from settings.fatal import fatal_exit
 from settings.timing import (BROWSER_CLOSE_TIMEOUT, USERBOT_RETRY_DELAY, USERBOT_CONNECT_ATTEMPTS, USERBOT_CONNECT_TIMEOUT)
 from settings.timing import SHUTDOWN_TOTAL_BUDGET, SYSTEMD_STOP_TIMEOUT
@@ -466,6 +467,17 @@ def _check_shutdown_budget() -> None:
                      f'потолки SHUTDOWN_*')
 
 
+# Предохранитель от шторма (перенос из ForumTradeEnglish_API 27-09-2026). Сбой опциона после
+# первого поста обычно уводит в рестарт (exit_main, fall=True по умолчанию → close_program,
+# код 1), и дальше решает диспетчер. Но в OTC две ветки цикла ниже крутят следующий опцион БЕЗ
+# рестарта: binodex недоступен (ждём фид) и отвал сессии (пересоздание браузера в процессе, а
+# счётчики _init_with_retry обнуляются на каждом удачном подъёме). Если сессия умирает посреди
+# каждого опциона (те же куки подняты на другой ноде, короткоживущий токен), каждый виток — анонс
+# и баг-картинка в канале без конца. После FAILED_STREAK_MAX таких подряд — одна строка error и
+# пауза main_cycle_pause_storm перед каждым опционом, до первого прошедшего (о нём — report).
+FAILED_STREAK_MAX = 3
+
+
 async def bot():
     """Запуск бота"""
     _check_shutdown_budget()
@@ -597,7 +609,13 @@ async def bot():
     logger.info("✅ Браузер инициализирован, страницы: %s", list(session.pages_by_role))
     logger.info("🔄 Переход в main loop...")
 
+    failed_streak = 0      # опционов подряд, сорвавшихся после первого поста (см. FAILED_STREAK_MAX)
     while not stop_event.is_set():
+        # Шторм (см. FAILED_STREAK_MAX): до первого прошедшего опциона — длинная пауза перед каждым.
+        if failed_streak >= FAILED_STREAK_MAX:
+            if await sleep_or_stop(stop_event, main_cycle_pause_storm):
+                break
+
         # Premium аккаунта: сторож сам решает, подошёл ли срок (раз в 2 часа), поэтому вызов
         # в цикле дешёвый — почти всегда это сравнение таймера. Кастом-эмодзи в постах шлёт
         # только Premium-аккаунт, а истекает он посреди прогона.
@@ -610,6 +628,20 @@ async def bot():
         # programdata.status НЕ трогаем — стоп инициировал диспетчер, см. хвост функции).
         if stop_event.is_set():
             break
+
+        if res_option.result:
+            if failed_streak >= FAILED_STREAK_MAX:
+                logger.report(f'Опционы снова проходят — после {failed_streak} сорванных подряд')
+            failed_streak = 0
+        elif res_option.posted:
+            # Сбой до первого поста серию не копит (в канале его не видно) и не сбрасывает
+            # (выздоровления он не доказывает).
+            failed_streak += 1
+            if failed_streak == FAILED_STREAK_MAX:
+                logger.error(f'{failed_streak} опционов подряд сорвались уже после первого поста — в '
+                             f'канале баг-картинка за баг-картинкой. Пауза перед опционом — '
+                             f'{main_cycle_pause_storm // 60} мин, пока опцион не пройдёт; причина — '
+                             f'в строках ошибок выше')
 
         # OTC-аутэйдж в рантайме: опцион не снялся И binodex недоступен (браузер-фри binodex_ready:
         # market-WS молчит ЛИБО auth-API api.binodex.app лежит). Это аутэйдж на стороне binodex
