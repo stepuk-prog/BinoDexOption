@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 from PIL import Image
 from playwright.async_api import Page
 
-from apps.browser_app import clear_zone_overlays, close_dom_popups, init_valute_browser
+from apps.browser_app import (clear_zone_overlays, close_dom_popups, collapse_right_panel,
+                              init_valute_browser)
 from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
 from apps.my_exeptions import send_photo_safe
@@ -58,7 +59,7 @@ async def _close_popup(page):
 
 def get_water():
     """Загрузка QR-оверлеев. FIN — qr110+qr85; OTC — собственный otc_qr110 (на скрине один QR,
-    используется только qr[0]). Позиция (otc_qr_x/y) и прочее без изменений."""
+    используется только qr[0]). Позиция (otc_qr_pos) и прочее без изменений."""
     # Кэш и лог сбоя — в общем settings.screenshot_set.load_rgba.
     qr110 = load_rgba(otc_qr110_path if not binary else qr110_path)
     qr85 = load_rgba(qr85_path) if binary else None  # OTC использует только qr[0]
@@ -347,6 +348,12 @@ async def _screenshot_steps(session: "BrowserSession", take_shot: bool, qr) -> t
 
         if not await mouse_move(page, move_field, 0):
             return False, 'Ошибка имитации движения мыши'
+
+        # Правая панель TV (вотчлист/«Детали») — перед КАЖДЫМ кадром, а не только на подъёме:
+        # TV раскрывает её и посреди работы (29-09-2026). Раскрытая панель съедает ~350px
+        # ширины зоны кадра, и QR85 с x=qr85_x уходит за правый край. Функция тоггл-safe:
+        # свёрнутую панель не трогает.
+        await collapse_right_panel(page)
 
         # Окна, накрывшие ЗОНУ КАДРА, — ПОСЛЕДНИМ шагом перед съёмкой. close_dom_popups выше
         # смотрит точку клика (кнопку поиска символа), а онбординг TV («Теперь можно перемещать

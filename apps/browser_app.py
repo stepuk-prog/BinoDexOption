@@ -1014,11 +1014,11 @@ async def open_tv_browser(session: BrowserSession, cookies_override=None):
     # старте чистого контекста, поэтому сворачиваем в коде. Делаем на обеих вкладках
     # (не только на main, откуда скрин): TV может синхронизировать состояние панели между
     # вкладками сессии — «разбалансировка» (свёрнута на main, открыта на price) рискует тем,
-    # что price переоткроет панель и она вернётся на main. _collapse_right_panel тоггл-safe.
+    # что price переоткроет панель и она вернётся на main. collapse_right_panel тоггл-safe.
     for page_name, page in session.pages_by_role.items():
         await page.bring_to_front()
         await close_dom_popups(page)
-        await _collapse_right_panel(page)
+        await collapse_right_panel(page)
 
     # info, НЕ report: report уходит в служебную TG-тему, а это рутинная строка успеха —
     # она повторяется на каждом подъёме браузера (старт, fall, ротация прокси) и в канале
@@ -1027,7 +1027,7 @@ async def open_tv_browser(session: BrowserSession, cookies_override=None):
     return OperationResult(success=True)
 
 
-async def _collapse_right_panel(page) -> None:
+async def collapse_right_panel(page) -> None:
     """Свернуть правую widget-панель TradingView (вотчлист/«Детали») на странице графика.
     Кнопка тулбара (panel_toggle) — ТОГГЛ, поэтому сворачиваем ТОЛЬКО если панель реально
     раскрыта (иначе клик её, наоборот, откроет). Признак раскрытой: ширина panel_wrap
@@ -1036,7 +1036,9 @@ async def _collapse_right_panel(page) -> None:
     if not panel_toggle or not panel_wrap:
         return
     try:
-        box = await page.locator(panel_wrap).first.bounding_box()
+        # timeout: без него bounding_box ждёт пропавший контейнер дефолтные 30 с — а зовём
+        # теперь перед КАЖДЫМ кадром, не только на подъёме.
+        box = await page.locator(panel_wrap).first.bounding_box(timeout=TIMEOUT_SHORT)
         if not box or box['width'] <= 100:  # свёрнута/отсутствует — не трогаем (не откроем!)
             return
         btn = page.locator(panel_toggle).first

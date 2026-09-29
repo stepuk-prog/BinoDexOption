@@ -45,7 +45,7 @@ from settings.config import screenshot_path, database, cookies_pocket_id
 from settings.constant import globe_otc_path
 from settings.timing import (EVAL_TIMEOUT, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
                              MAX_SCREENSHOT_ATTEMPTS)
-from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_x, otc_qr_y, load_rgba, paste_overlay
+from settings.screenshot_set import win_x_otc, win_y_otc, otc_qr_pos, load_rgba, paste_overlay
 from settings.browser_config import (otc_trade_url, otc_select_pair, otc_category_valute, otc_input_pair,
                                      otc_modal_pair_item, screen_zone_otc, otc_settings_btn, otc_login_email,
                                      otc_candle_scale, otc_candle_scale_item,
@@ -1923,7 +1923,8 @@ async def screenshot_otc(page: Page, asset: str = None, qr=None):
                 comp.alpha_composite(cut[0], dest=(max(0, cut[1][0]), max(0, cut[1][1])))
             comp = comp.convert('RGB')
             if qr:
-                paste_overlay(comp, qr[0], otc_qr_x, otc_qr_y)  # на OTC один QR (qr110)
+                # на OTC один QR (qr110), от правого нижнего угла — холст binodex меняет размер
+                paste_overlay(comp, qr[0], *otc_qr_pos(comp.size, qr[0].size))
             comp.save(screenshot_path)
             return True, price
         except (Exception,) as error:
