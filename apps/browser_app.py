@@ -10,7 +10,7 @@ from binocore.browser import BrowserSession, configure as configure_browser
 from classes.exceptions import CookiesExpired, FeedOutage, SetupError
 from apps.otc_app import open_otc_browser
 from apps.browser_io import eval_js
-from apps.close_ui import CLOSE_SWEEP_SELECTORS, with_close_config
+from apps.close_ui import CLOSE_SWEEP_SELECTORS, COOKIE_REJECT_WORDS, with_close_config
 from logs import init_logger
 from settings import win_x, win_y
 from settings.browser_set import browser_launch_options, context_options, chromium_launch_options
@@ -488,6 +488,33 @@ _ZONE_CLEAR_JS = with_close_config(r"""
   return {state: 'clean', probe: seen.join(' ;; ').slice(0, 700)};
 }
 """)
+
+
+# Кнопка отказа в баннере cookie — см. close_ui.COOKIE_REJECT_WORDS. Ищем по ВСЕМУ документу,
+# без геометрии и плавающих предков: подпись однозначная, других кнопок «Не разрешать» у TV нет.
+_COOKIE_REJECT_JS = """
+(words) => {
+  let clicked = 0;
+  for (const b of document.querySelectorAll('button')) {
+    if (!(b.offsetWidth || b.offsetHeight)) continue;
+    if (words.includes((b.innerText || '').trim().toLowerCase())) { b.click(); clicked++; }
+  }
+  return clicked;
+}
+"""
+
+
+async def dismiss_cookie_consent(page: Page) -> None:
+    """Снять баннер согласия на cookie TV кнопкой отказа. Best-effort: не нашли — молчим
+    (баннер показывается не всегда и не везде), сбой — в лог, кадр снимаем в любом случае."""
+    try:
+        clicked = await eval_js(page, _COOKIE_REJECT_JS, COOKIE_REJECT_WORDS)
+    except (Exception,) as error:
+        logger.warning(f'Баннер cookie TV: проба не выполнилась — {type(error).__name__}: {error}')
+        return
+    if clicked:
+        logger.info('Баннер cookie TV снят кнопкой отказа')
+        await page.wait_for_timeout(200)
 
 
 async def clear_zone_overlays(page: Page, zone_selector: str, attempts: int = 3) -> None:
@@ -1018,6 +1045,7 @@ async def open_tv_browser(session: BrowserSession, cookies_override=None):
     for page_name, page in session.pages_by_role.items():
         await page.bring_to_front()
         await close_dom_popups(page)
+        await dismiss_cookie_consent(page)
         await collapse_right_panel(page)
 
     # info, НЕ report: report уходит в служебную TG-тему, а это рутинная строка успеха —

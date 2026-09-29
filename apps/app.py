@@ -7,6 +7,7 @@ from PIL import Image
 from playwright.async_api import Page
 
 from apps.browser_app import (clear_zone_overlays, close_dom_popups, collapse_right_panel,
+                              dismiss_cookie_consent,
                               init_valute_browser)
 from apps.exit_app import close_program
 from apps.forum_forward import forward_plus_milestone
@@ -354,6 +355,10 @@ async def _screenshot_steps(session: "BrowserSession", take_shot: bool, qr) -> t
         # ширины зоны кадра, и QR85 с x=qr85_x уходит за правый край. Функция тоггл-safe:
         # свёрнутую панель не трогает.
         await collapse_right_panel(page)
+
+        # Баннер cookie TV (слева снизу, в зоне кадра) — отдельным шагом: общая чистка
+        # зоны его не берёт, см. close_ui.COOKIE_REJECT_WORDS.
+        await dismiss_cookie_consent(page)
 
         # Окна, накрывшие ЗОНУ КАДРА, — ПОСЛЕДНИМ шагом перед съёмкой. close_dom_popups выше
         # смотрит точку клика (кнопку поиска символа), а онбординг TV («Теперь можно перемещать
