@@ -107,7 +107,8 @@ async def forward_plus_milestone(message_id: int, count: int) -> None:
         # Запоминаем id вехи-форварда (+ партнёрки) — чтобы удалить их перед следующей пересылкой.
         await database.save_forum_message(forum_id, topic, sent.message_id, extra_id)
     except (Exception,) as error:
-        logger.warning(f'Не удалось переслать веху {count} в тему форума: {error}')
+        logger.warning(f'Не удалось переслать веху {count} в тему форума: '
+                       f'{type(error).__name__}: {str(error) or "не уложилась в срок"}')
 
 
 async def _send_partner_message(topic: int) -> int | None:
@@ -126,7 +127,8 @@ async def _send_partner_message(topic: int) -> int | None:
         logger.info(f'Партнёрское сообщение отправлено в тему {topic}')
         return sent.message_id
     except (Exception,) as error:
-        logger.warning(f'Не удалось отправить партнёрское сообщение в тему {topic}: {error}')
+        logger.warning(f'Не удалось отправить партнёрское сообщение в тему {topic}: '
+                       f'{type(error).__name__}: {str(error) or "срок истёк"}')
         return None
 
 
@@ -148,10 +150,12 @@ async def _delete_previous(topic: int) -> None:
                     _get_moderator_bot().delete_message(chat_id=forum_id, message_id=mid),
                     timeout=TG_SEND_TIMEOUT)
             except (Exception,) as error:
-                logger.warning(f'Не смог ❌ удалить сообщение {mid} в теме {topic}: {error}')
+                logger.warning(f'Не смог ❌ удалить сообщение {mid} в теме {topic}: '
+                               f'{type(error).__name__}: {str(error) or "срок истёк"}')
         logger.info(f'Предыдущие сообщения в теме {topic} удалены ✅')
     except (Exception,) as error:
-        logger.warning(f'Не смог ❌ удалить предыдущие сообщения в теме {topic}: {error}')
+        logger.warning(f'Не смог ❌ удалить предыдущие сообщения в теме {topic}: '
+                       f'{type(error).__name__}: {str(error) or "срок истёк"}')
 
 
 async def close_moderator_bot() -> None:
